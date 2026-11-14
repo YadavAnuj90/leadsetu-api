@@ -1,0 +1,204 @@
+// schema.prisma — Leadsetu database schema
+// Run: npx prisma migrate dev --name init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Platform ──────────────────────────────────────────
+
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  plan      String   @default("trial")
+  status    String   @default("active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  users         User[]
+  leads         Lead[]
+  contacts      Contact[]
+  companies     Company[]
+  deals         Deal[]
+  tasks         Task[]
+  conversations Conversation[]
+  auditLogs     AuditLog[]
+  subscription  Subscription?
+
+  @@map("tenants")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  tenantId     String   @map("tenant_id")
+  email        String
+  passwordHash String   @map("password_hash")
+  name         String
+  role         String   @default("sales_rep")
+  status       String   @default("active")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, email])
+  @@map("users")
+}
+
+model Subscription {
+  id        String   @id @default(uuid())
+  tenantId  String   @unique @map("tenant_id")
+  plan      String
+  seats     Int      @default(1)
+  status    String   @default("active")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("subscriptions")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  userId    String?  @map("user_id")
+  action    String
+  entity    String
+  entityId  String   @map("entity_id")
+  diff      Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@map("audit_logs")
+}
+
+// ── Core CRM ──────────────────────────────────────────
+
+model Lead {
+  id           String   @id @default(uuid())
+  tenantId     String   @map("tenant_id")
+  ownerId      String?  @map("owner_id")
+  name         String
+  phone        String?
+  email        String?
+  source       String?
+  status       String   @default("new")
+  tags         String[]
+  customFields Json?    @map("custom_fields")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@map("leads")
+}
+
+model Contact {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  name      String
+  phone     String?
+  email     String?
+  companyId String?  @map("company_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  company   Company?  @relation(fields: [companyId], references: [id])
+  deals     Deal[]
+  conversations Conversation[]
+
+  @@index([tenantId])
+  @@map("contacts")
+}
+
+model Company {
+  id        String    @id @default(uuid())
+  tenantId  String    @map("tenant_id")
+  name      String
+  industry  String?
+  website   String?
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  contacts Contact[]
+
+  @@index([tenantId])
+  @@map("companies")
+}
+
+model Deal {
+  id         String   @id @default(uuid())
+  tenantId   String   @map("tenant_id")
+  contactId  String   @map("contact_id")
+  pipelineId String   @map("pipeline_id")
+  stageId    String   @map("stage_id")
+  title      String
+  value      Int      @default(0) // stored in paise
+  currency   String   @default("INR")
+  status     String   @default("open")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  contact Contact @relation(fields: [contactId], references: [id])
+
+  @@index([tenantId])
+  @@map("deals")
+}
+
+model Task {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  assignedTo  String?  @map("assigned_to")
+  entityType  String   @map("entity_type")
+  entityId    String   @map("entity_id")
+  title       String
+  dueAt       DateTime? @map("due_at")
+  status      String   @default("pending")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@map("tasks")
+}
+
+model Conversation {
+  id         String    @id @default(uuid())
+  tenantId   String    @map("tenant_id")
+  contactId  String?   @map("contact_id")
+  channel    String
+  status     String    @default("open")
+  assignedTo String?   @map("assigned_to")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  contact  Contact?  @relation(fields: [contactId], references: [id])
+  messages Message[]
+
+  @@index([tenantId])
+  @@map("conversations")
+}
+
+model Message {
+  id             String   @id @default(uuid())
+  conversationId String   @map("conversation_id")
+  direction      String
+  content        String
+  status         String   @default("sent")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+
+  @@map("messages")
+}
