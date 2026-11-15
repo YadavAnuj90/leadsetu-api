@@ -35,6 +35,7 @@ import {
 } from '@nestjs/swagger';
 import { Model, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.module';
+import { PLAN_CATALOG } from '../tenants/tenants.service';
 import { User, UserDocument, UserSchema } from '../auth/schemas/user.schema';
 import {
   Tenant,
@@ -436,6 +437,20 @@ export class TeamService {
       throw new ConflictException('This email is already registered with a Leadsetu account.');
     }
     await this.assertPhoneFreeInWorkspace(actor, phone);
+
+    // Enforce plan or Super Admin seat cap override
+    const seatCap =
+      (typeof actor.tenant.seatLimitOverride === 'number' && actor.tenant.seatLimitOverride > 0
+        ? actor.tenant.seatLimitOverride
+        : PLAN_CATALOG[actor.tenant.plan]?.seatLimit) || 12;
+    const currentMemberCount = await this.userModel
+      .countDocuments({ tenantId: actor.tenant._id })
+      .exec();
+    if (currentMemberCount >= seatCap) {
+      throw new ForbiddenException(
+        `Seat limit reached (${currentMemberCount}/${seatCap} seats on ${actor.tenant.plan} plan). Upgrade plan or request a seat override from Leadsetu HQ.`,
+      );
+    }
 
     const generated = !dto.password;
     const password = dto.password || generateTemporaryPassword();

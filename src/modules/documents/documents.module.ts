@@ -39,6 +39,7 @@ import {
 import { HydratedDocument, Model, Types } from 'mongoose';
 import { randomBytes } from 'crypto';
 import { AuditService } from '../audit/audit.module';
+import { SuperAdminService } from '../super-admin/super-admin.service';
 
 export type DocumentCategory =
   | 'gst_certificate'
@@ -268,6 +269,7 @@ export class DocumentsService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     @Optional() private readonly auditService?: AuditService,
+    @Optional() private readonly superAdminService?: SuperAdminService,
   ) {}
 
   async verifyAuth(authHeader?: string) {
@@ -278,22 +280,27 @@ export class DocumentsService {
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
       'leadsetu_super_secret_access_key_2026_delhi_ncr';
+    let payload: { sub: string; tenantId: string; email: string; name?: string };
     try {
-      const payload = await this.jwtService.verifyAsync<{
+      payload = await this.jwtService.verifyAsync<{
         sub: string;
         tenantId: string;
         email: string;
         name?: string;
       }>(token, { secret });
-      return {
-        userId: payload.sub,
-        tenantId: payload.tenantId,
-        email: payload.email,
-        name: payload.name || payload.email,
-      };
     } catch {
       throw new UnauthorizedException('Invalid or expired session.');
     }
+    await this.superAdminService?.assertFeatureEnabled(
+      payload.tenantId,
+      'documentVault',
+    );
+    return {
+      userId: payload.sub,
+      tenantId: payload.tenantId,
+      email: payload.email,
+      name: payload.name || payload.email,
+    };
   }
 
   private toDto(doc: CrmDocumentRecord, includeDataUrl = false) {

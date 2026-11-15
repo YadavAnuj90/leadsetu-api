@@ -3,6 +3,13 @@ import { HydratedDocument, Types } from 'mongoose';
 
 export type UserDocument = HydratedDocument<User>;
 
+export type UserRole =
+  | 'super_admin'
+  | 'owner'
+  | 'admin'
+  | 'manager'
+  | 'agent';
+
 @Schema({ timestamps: true, collection: 'users' })
 export class User {
   @Prop({ type: Types.ObjectId, ref: 'Tenant', required: true, index: true })
@@ -27,8 +34,23 @@ export class User {
   @Prop({ required: true })
   passwordHash!: string;
 
-  @Prop({ default: 'owner', enum: ['owner', 'admin', 'manager', 'agent'] })
-  role!: 'owner' | 'admin' | 'manager' | 'agent';
+  @Prop({
+    default: 'owner',
+    enum: ['super_admin', 'owner', 'admin', 'manager', 'agent'],
+  })
+  role!: UserRole;
+
+  /** Department workspace preset for RBAC feature scoping. */
+  @Prop({
+    trim: true,
+    default: 'sales',
+    enum: ['hq', 'executive', 'sales', 'finance', 'service', 'marketing', 'operations'],
+  })
+  departmentPreset?: string;
+
+  /** Granular module:action permission overrides assigned by Admin / Super Admin. */
+  @Prop({ type: [String], default: [] })
+  permissions?: string[];
 
   @Prop({ default: true })
   isActive!: boolean;
@@ -45,7 +67,7 @@ export class User {
   @Prop({ type: Boolean, default: false })
   maskPhones?: boolean;
 
-  /** User who added this member (null for the workspace owner). */
+  /** User who added this member (null for the workspace owner / super admin). */
   @Prop({ type: Types.ObjectId, ref: 'User', default: null })
   invitedBy?: Types.ObjectId | null;
 

@@ -40,6 +40,7 @@ import { HydratedDocument, Model, Types } from 'mongoose';
 import { randomBytes } from 'crypto';
 import { AuditService } from '../audit/audit.module';
 import { maskPhoneNumber } from '../auth/identity.util';
+import { SuperAdminService } from '../super-admin/super-admin.service';
 
 export type ConversationDocument = HydratedDocument<ConversationThread>;
 
@@ -135,6 +136,7 @@ export class InboxService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     @Optional() private readonly auditService?: AuditService,
+    @Optional() private readonly superAdminService?: SuperAdminService,
   ) {}
 
   async verifyAuth(authHeader?: string) {
@@ -145,20 +147,25 @@ export class InboxService {
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
       'leadsetu_super_secret_access_key_2026_delhi_ncr';
+    let payload: { sub: string; tenantId: string; email: string };
     try {
-      const payload = await this.jwtService.verifyAsync<{
+      payload = await this.jwtService.verifyAsync<{
         sub: string;
         tenantId: string;
         email: string;
       }>(token, { secret });
-      return {
-        userId: payload.sub,
-        tenantId: payload.tenantId,
-        email: payload.email,
-      };
     } catch {
       throw new UnauthorizedException('Invalid or expired session.');
     }
+    await this.superAdminService?.assertFeatureEnabled(
+      payload.tenantId,
+      'whatsappCloud',
+    );
+    return {
+      userId: payload.sub,
+      tenantId: payload.tenantId,
+      email: payload.email,
+    };
   }
 
   private toDto(doc: ConversationDocument, maskPhones = false) {

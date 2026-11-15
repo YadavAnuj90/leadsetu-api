@@ -1,7 +1,10 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
+  Optional,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -11,6 +14,7 @@ import { Model, Types } from 'mongoose';
 import { randomBytes } from 'crypto';
 import { User, UserDocument } from './schemas/user.schema';
 import { Tenant, TenantDocument } from './schemas/tenant.schema';
+import { SuperAdminService } from '../super-admin/super-admin.service';
 import {
   generateAccountId,
   generateUserCode,
@@ -39,6 +43,7 @@ export class AuthService {
     @InjectModel(Tenant.name) private readonly tenantModel: Model<TenantDocument>,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    @Optional() private readonly superAdminService?: SuperAdminService,
   ) {}
 
   private hashSecret(plain: string): string {
@@ -103,8 +108,16 @@ export class AuthService {
     user.lastLoginAt = new Date();
     await user.save();
 
+    const effectiveState = this.superAdminService
+      ? await this.superAdminService
+          .getTenantEffectiveState(tenant._id.toString())
+          .catch(() => null)
+      : null;
+
     const viewerMasked = Boolean(
-      user.maskPhones || (tenant.maskPhoneForAgents && user.role === 'agent'),
+      user.maskPhones ||
+        ((tenant.maskPhoneForAgents || effectiveState?.forcePhoneMasking) &&
+          user.role === 'agent'),
     );
 
     return {
@@ -118,6 +131,8 @@ export class AuthService {
         email: user.email,
         phone: user.phone || '',
         role: user.role,
+        departmentPreset: user.departmentPreset || 'sales',
+        permissions: user.permissions || [],
         maskPhones: viewerMasked,
       },
       tenant: {
@@ -128,13 +143,41 @@ export class AuthService {
         plan: tenant.plan,
         status: tenant.status,
         city: tenant.city || 'Delhi-NCR',
-        maskPhoneForAgents: Boolean(tenant.maskPhoneForAgents),
-        blockAgentExport: tenant.blockAgentExport ?? true,
+        gstin: tenant.gstin || '',
+        state: tenant.state || 'Delhi (07)',
+        phone: tenant.phone || '',
+        email: tenant.email || '',
+        address: tenant.address || '',
+        maskPhoneForAgents: Boolean(
+          tenant.maskPhoneForAgents || effectiveState?.forcePhoneMasking,
+        ),
+        blockAgentExport: effectiveState?.blockCsvExport ?? (tenant.blockAgentExport ?? true),
+        effectiveFeatures: effectiveState?.effectiveFeatures,
+        effectiveFeatureDetails: effectiveState?.effectiveFeatureDetails,
+        globalKillSwitches: effectiveState?.globalKillSwitches,
+        maintenanceMode: effectiveState?.maintenanceMode ?? false,
       },
     };
   }
 
   async register(input: RegisterInput) {
+    const platformConfig = this.superAdminService
+      ? await this.superAdminService.ensureGlobalConfig().catch(() => null)
+      : null;
+
+    if (platformConfig?.maintenanceMode) {
+      throw new ServiceUnavailableException(
+        platformConfig.maintenanceBanner ||
+          'Leadsetu Cloud is undergoing maintenance. Please try again shortly.',
+      );
+    }
+
+    if (platformConfig && platformConfig.allowNewSignups === false) {
+      throw new ForbiddenException(
+        'New workspace registrations are temporarily paused by Leadsetu HQ.',
+      );
+    }
+
     const email = input.email?.trim().toLowerCase();
     const name = input.name?.trim();
     const password = input.password;
@@ -143,14 +186,23 @@ export class AuthService {
       throw new BadRequestException('Name, email, and password are required.');
     }
 
+    const minPwd = Math.max(
+      6,
+      platformConfig?.securityPolicies?.minPasswordLength || 6,
+    );
     if (password.length < 6) {
-      throw new BadRequestException('Password must be at least 6 characters long.');
+      throw new BadRequestException(
+        `Password must be at least ${Math.min(6, minPwd)} characters long.`,
+      );
     }
 
     const existingUser = await this.userModel.findOne({ email }).exec();
     if (existingUser) {
       throw new ConflictException('An account with this email already exists. Please sign in.');
     }
+
+    const trialDays = platformConfig?.defaultTrialDays || 14;
+    const trialEndsAt = new Date(Date.now() + trialDays * 86400000).toISOString();
 
     const companyName = input.companyName?.trim() || `${name}'s Workspace`;
     const tenant = await this.tenantModel.create({
@@ -159,6 +211,7 @@ export class AuthService {
       accountId: await generateAccountId(this.tenantModel),
       plan: 'growth',
       status: 'trial',
+      trialEndsAt,
       city: input.city?.trim() || 'Delhi-NCR',
     });
 
@@ -170,6 +223,8 @@ export class AuthService {
       phone: input.phone?.trim(),
       passwordHash: this.hashSecret(password),
       role: 'owner',
+      departmentPreset: 'executive',
+      permissions: ['*'],
       isActive: true,
     });
 
@@ -193,6 +248,17 @@ export class AuthService {
       throw new UnauthorizedException('Your account has been deactivated.');
     }
 
+    const platformConfig = this.superAdminService
+      ? await this.superAdminService.ensureGlobalConfig().catch(() => null)
+      : null;
+
+    if (platformConfig?.maintenanceMode && user.role !== 'super_admin') {
+      throw new ServiceUnavailableException(
+        platformConfig.maintenanceBanner ||
+          'Leadsetu Cloud is currently in maintenance mode.',
+      );
+    }
+
     let tenant = await this.tenantModel.findById(user.tenantId).exec();
     if (!tenant) {
       tenant = await this.tenantModel.create({
@@ -203,6 +269,15 @@ export class AuthService {
       });
       user.tenantId = tenant._id as Types.ObjectId;
       await user.save();
+    }
+
+    if (user.role !== 'super_admin' && tenant.status === 'suspended') {
+      const reason = tenant.securityPolicy?.suspensionReason
+        ? ` Reason: ${tenant.securityPolicy.suspensionReason}`
+        : '';
+      throw new ForbiddenException(
+        `This workspace has been suspended by Leadsetu HQ.${reason} Please contact billing@leadsetu.in.`,
+      );
     }
 
     return this.issueTokens(user, tenant);
@@ -218,52 +293,88 @@ export class AuthService {
       this.configService.get<string>('JWT_SECRET') ||
       'leadsetu_super_secret_access_key_2026_delhi_ncr';
 
+    let payload: {
+      sub: string;
+      tenantId: string;
+      isImpersonation?: boolean;
+      impersonatorEmail?: string;
+    };
     try {
-      const payload = await this.jwtService.verifyAsync<{
+      payload = await this.jwtService.verifyAsync<{
         sub: string;
         tenantId: string;
+        isImpersonation?: boolean;
+        impersonatorEmail?: string;
       }>(token, { secret: accessSecret });
-
-      const user = await this.userModel.findById(payload.sub).exec();
-      if (!user) {
-        throw new UnauthorizedException('User no longer exists.');
-      }
-
-      const tenant = await this.tenantModel.findById(user.tenantId).exec();
-      await this.ensureIdentityCodes(user, tenant);
-
-      const viewerMasked = Boolean(
-        user.maskPhones || (tenant?.maskPhoneForAgents && user.role === 'agent'),
-      );
-
-      return {
-        user: {
-          id: user._id.toString(),
-          userCode: user.userCode || '',
-          tenantId: user.tenantId.toString(),
-          name: user.name,
-          email: user.email,
-          phone: user.phone || '',
-          role: user.role,
-          maskPhones: viewerMasked,
-        },
-        tenant: tenant
-          ? {
-              id: tenant._id.toString(),
-              accountId: tenant.accountId || '',
-              name: tenant.name,
-              slug: tenant.slug,
-              plan: tenant.plan,
-              status: tenant.status,
-              city: tenant.city || 'Delhi-NCR',
-              maskPhoneForAgents: Boolean(tenant.maskPhoneForAgents),
-              blockAgentExport: tenant.blockAgentExport ?? true,
-            }
-          : null,
-      };
     } catch {
       throw new UnauthorizedException('Invalid or expired session. Please sign in again.');
     }
+
+    const user = await this.userModel.findById(payload.sub).exec();
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('User no longer exists or is inactive.');
+    }
+
+    const tenant = await this.tenantModel.findById(user.tenantId).exec();
+    if (user.role !== 'super_admin' && tenant?.status === 'suspended' && !payload.isImpersonation) {
+      throw new ForbiddenException('This workspace has been suspended by Leadsetu HQ.');
+    }
+
+    await this.ensureIdentityCodes(user, tenant);
+
+    const effectiveState =
+      tenant && this.superAdminService
+        ? await this.superAdminService
+            .getTenantEffectiveState(tenant._id.toString())
+            .catch(() => null)
+        : null;
+
+    const viewerMasked = Boolean(
+      user.maskPhones ||
+        ((tenant?.maskPhoneForAgents || effectiveState?.forcePhoneMasking) &&
+          user.role === 'agent'),
+    );
+
+    return {
+      user: {
+        id: user._id.toString(),
+        userCode: user.userCode || '',
+        tenantId: user.tenantId.toString(),
+        name: user.name,
+        email: user.email,
+        phone: user.phone || '',
+        role: user.role,
+        departmentPreset: user.departmentPreset || 'sales',
+        permissions: user.permissions || [],
+        maskPhones: viewerMasked,
+        isImpersonation: Boolean(payload.isImpersonation),
+        impersonatorEmail: payload.impersonatorEmail || '',
+      },
+      tenant: tenant
+        ? {
+            id: tenant._id.toString(),
+            accountId: tenant.accountId || '',
+            name: tenant.name,
+            slug: tenant.slug,
+            plan: tenant.plan,
+            status: tenant.status,
+            city: tenant.city || 'Delhi-NCR',
+            gstin: tenant.gstin || '',
+            state: tenant.state || 'Delhi (07)',
+            phone: tenant.phone || '',
+            email: tenant.email || '',
+            address: tenant.address || '',
+            maskPhoneForAgents: Boolean(
+              tenant.maskPhoneForAgents || effectiveState?.forcePhoneMasking,
+            ),
+            blockAgentExport: effectiveState?.blockCsvExport ?? (tenant.blockAgentExport ?? true),
+            effectiveFeatures: effectiveState?.effectiveFeatures,
+            effectiveFeatureDetails: effectiveState?.effectiveFeatureDetails,
+            globalKillSwitches: effectiveState?.globalKillSwitches,
+            maintenanceMode: effectiveState?.maintenanceMode ?? false,
+          }
+        : null,
+    };
   }
 
   async refresh(refreshToken?: string) {
@@ -275,30 +386,35 @@ export class AuthService {
       this.configService.get<string>('JWT_REFRESH_SECRET') ||
       'leadsetu_super_secret_refresh_key_2026_delhi_ncr';
 
+    let payload: { sub: string; tenantId: string };
     try {
-      const payload = await this.jwtService.verifyAsync<{
+      payload = await this.jwtService.verifyAsync<{
         sub: string;
         tenantId: string;
       }>(refreshToken, { secret: refreshSecret });
-
-      const user = await this.userModel.findById(payload.sub).exec();
-      if (
-        !user ||
-        !user.refreshTokenHash ||
-        !this.verifySecret(refreshToken, user.refreshTokenHash)
-      ) {
-        throw new UnauthorizedException('Invalid refresh token.');
-      }
-
-      const tenant = await this.tenantModel.findById(user.tenantId).exec();
-      if (!tenant) {
-        throw new UnauthorizedException('Workspace not found.');
-      }
-
-      return this.issueTokens(user, tenant);
     } catch {
       throw new UnauthorizedException('Refresh token expired or invalid.');
     }
+
+    const user = await this.userModel.findById(payload.sub).exec();
+    if (
+      !user ||
+      !user.isActive ||
+      !user.refreshTokenHash ||
+      !this.verifySecret(refreshToken, user.refreshTokenHash)
+    ) {
+      throw new UnauthorizedException('Invalid refresh token.');
+    }
+
+    const tenant = await this.tenantModel.findById(user.tenantId).exec();
+    if (!tenant) {
+      throw new UnauthorizedException('Workspace not found.');
+    }
+    if (user.role !== 'super_admin' && tenant.status === 'suspended') {
+      throw new ForbiddenException('This workspace has been suspended by Leadsetu HQ.');
+    }
+
+    return this.issueTokens(user, tenant);
   }
 
   async logout(authHeader?: string) {

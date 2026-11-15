@@ -16,6 +16,8 @@ import { AuditModule } from './modules/audit/audit.module';
 import { TicketsModule } from './modules/tickets/tickets.module';
 import { ProductsModule } from './modules/products/products.module';
 import { DocumentsModule } from './modules/documents/documents.module';
+import { TenantsModule } from './modules/tenants/tenants.module';
+import { SuperAdminModule } from './modules/super-admin/super-admin.module';
 
 @Module({
   imports: [
@@ -50,6 +52,8 @@ import { DocumentsModule } from './modules/documents/documents.module';
     TicketsModule,
     ProductsModule,
     DocumentsModule,
+    TenantsModule,
+    SuperAdminModule,
   ],
 })
 export class AppModule {}

@@ -19,6 +19,7 @@ import {
 } from './schemas/lead.schema';
 import { AuditService } from '../audit/audit.module';
 import { maskPhoneNumber, normalizeIndianPhone } from '../auth/identity.util';
+import { SuperAdminService } from '../super-admin/super-admin.service';
 
 export interface CreateLeadDto {
   name: string;
@@ -60,6 +61,7 @@ export class LeadsService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     @Optional() private readonly auditService?: AuditService,
+    @Optional() private readonly superAdminService?: SuperAdminService,
   ) {}
 
   async verifyAuth(authHeader?: string): Promise<AuthContext> {
@@ -283,7 +285,17 @@ export class LeadsService {
       throw new BadRequestException('Lead name is required.');
     }
 
-    const ai = this.computeAiIntelligence(dto);
+    const eff = this.superAdminService
+      ? await this.superAdminService.getTenantEffectiveState(auth.tenantId).catch(() => null)
+      : null;
+    const aiEnabled = eff?.effectiveFeatures?.aiScoring ?? true;
+    const ai = aiEnabled
+      ? this.computeAiIntelligence(dto)
+      : {
+          aiScore: 0,
+          aiLabel: 'Warm' as const,
+          aiInsight: 'Gemini AI Lead Scoring disabled by Leadsetu HQ.',
+        };
     const nowIso = new Date().toISOString();
 
     const initialActivity: LeadActivity = {
@@ -396,18 +408,26 @@ export class LeadsService {
     if (dto.tags !== undefined) doc.tags = dto.tags;
     if (dto.notes !== undefined) doc.notes = dto.notes.trim();
 
-    const ai = this.computeAiIntelligence({
-      source: doc.source,
-      status: doc.status,
-      estimatedValue: doc.estimatedValue,
-      company: doc.company,
-      phone: doc.phone,
-      email: doc.email,
-      notes: doc.notes,
-    });
-    doc.aiScore = ai.aiScore;
-    doc.aiLabel = ai.aiLabel;
-    doc.aiInsight = ai.aiInsight;
+    if (dto.rescoreAi) {
+      await this.superAdminService?.assertFeatureEnabled(auth.tenantId, 'aiScoring');
+    }
+    const eff = this.superAdminService
+      ? await this.superAdminService.getTenantEffectiveState(auth.tenantId).catch(() => null)
+      : null;
+    if (!eff || eff.effectiveFeatures.aiScoring) {
+      const ai = this.computeAiIntelligence({
+        source: doc.source,
+        status: doc.status,
+        estimatedValue: doc.estimatedValue,
+        company: doc.company,
+        phone: doc.phone,
+        email: doc.email,
+        notes: doc.notes,
+      });
+      doc.aiScore = ai.aiScore;
+      doc.aiLabel = ai.aiLabel;
+      doc.aiInsight = ai.aiInsight;
+    }
 
     if (dto.status && dto.status !== prevStatus) {
       const activity: LeadActivity = {
@@ -688,6 +708,7 @@ export class LeadsService {
   }
 
   async getWebhookConfig(auth: AuthContext) {
+    await this.superAdminService?.assertFeatureEnabled(auth.tenantId, 'apiWebhooks');
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
     const tenantsCol = this.leadModel.db.collection('tenants');
     const tenant = await tenantsCol.findOne({ _id: tenantObjectId });
@@ -730,6 +751,7 @@ export class LeadsService {
   }
 
   async rotateWebhookKey(auth: AuthContext) {
+    await this.superAdminService?.assertFeatureEnabled(auth.tenantId, 'apiWebhooks');
     const actor = await this.leadModel.db
       .collection('users')
       .findOne({ _id: new Types.ObjectId(auth.userId) });
@@ -789,6 +811,7 @@ export class LeadsService {
 
     const tenantObjectId = tenant._id as Types.ObjectId;
     const tenantIdStr = String(tenantObjectId);
+    await this.superAdminService?.assertFeatureEnabled(tenantIdStr, 'apiWebhooks');
     const rawName = String(
       payload?.SENDER_NAME ??
         payload?.name ??
