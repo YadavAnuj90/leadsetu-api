@@ -21,10 +21,15 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import {
+  ApplyBankMatchDto,
+  BankStatementReconcileDto,
   CreateInvoiceDto,
   MarkInvoicePaidDto,
   RecordInvoicePaymentDto,
+  RecordPromiseToPayDto,
+  SendRecoveryChaserDto,
   UpdateInvoiceDto,
+  UpdateRecoveryConfigDto,
 } from './dto/invoices.dto';
 import { InvoicesService } from './invoices.service';
 
@@ -93,6 +98,84 @@ export class InvoicesController {
     return this.invoicesService.exportGstr1Csv(auth);
   }
 
+  @Get('export/tally-xml')
+  @ApiOperation({
+    summary:
+      'Export native TallyPrime <ENVELOPE> XML containing Sales, Receipt & TDS Receivable vouchers',
+  })
+  async exportTallyXml(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.exportTallyXml(auth);
+  }
+
+  @Get('recovery/overview')
+  @ApiOperation({
+    summary:
+      'Udhaar Recovery & Credit Risk Command Center (KPIs, Buyer Credit Risk Ledger, Broken PTPs, Overdue Queue)',
+  })
+  async getRecoveryOverview(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.getRecoveryOverview(auth);
+  }
+
+  @Patch('recovery/config')
+  @ApiOperation({
+    summary:
+      'Configure Tenant UPI ID, Auto-Hold overdue days threshold, and NEFT bank instructions',
+  })
+  async updateRecoveryConfig(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: UpdateRecoveryConfigDto,
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.updateRecoveryConfig(auth, dto);
+  }
+
+  @Post('recovery/run-chasers')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Batch-run automated Hinglish WhatsApp + UPI Udhaar chasers & auto-apply Credit Hold on severe defaulters',
+  })
+  async runBatchChasers(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.runBatchChasers(auth);
+  }
+
+  @Post('reconcile-bank')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Match bank statement NEFT/RTGS/UPI credits against open GST invoices (including TDS detection)',
+  })
+  async previewBankReconciliation(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: BankStatementReconcileDto,
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.previewBankReconciliation(auth, dto);
+  }
+
+  @Post('reconcile-bank/apply')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Apply matched bank statement settlements into invoice Accounts Receivable ledgers',
+  })
+  async applyBankMatches(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: ApplyBankMatchDto,
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.applyBankMatches(auth, dto);
+  }
+
   @Get('public/:token')
   @ApiOperation({
     summary: 'Public buyer quotation view by shareable token (no auth required)',
@@ -128,9 +211,10 @@ export class InvoicesController {
   async convertToInvoice(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,
+    @Body() body?: { overrideCreditHold?: boolean; overrideReason?: string },
   ) {
     const auth = await this.invoicesService.verifyAuth(authorization);
-    return this.invoicesService.convertQuoteToInvoice(auth, id);
+    return this.invoicesService.convertQuoteToInvoice(auth, id, body);
   }
 
   @Get(':id')
@@ -235,6 +319,34 @@ export class InvoicesController {
   ) {
     const auth = await this.invoicesService.verifyAuth(authorization);
     return this.invoicesService.markPaid(auth, id, dto);
+  }
+
+  @Post(':id/ptp')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Record Promise-to-Pay (PTP) date & committed amount on an unpaid invoice',
+  })
+  async recordPtp(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() dto: RecordPromiseToPayDto,
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.recordPromiseToPay(auth, id, dto);
+  }
+
+  @Post(':id/send-chaser')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Dispatch WhatsApp + UPI Udhaar recovery reminder & log chaser history',
+  })
+  async sendChaser(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() dto: SendRecoveryChaserDto,
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.sendRecoveryChaser(auth, id, dto);
   }
 
   @Delete(':id')

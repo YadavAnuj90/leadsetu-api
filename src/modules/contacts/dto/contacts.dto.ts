@@ -71,6 +71,32 @@ export class CreateContactDto {
     example: 'Prefers WhatsApp proforma invoices before dispatch.',
   })
   notes?: string;
+
+  @ApiPropertyOptional({
+    description: 'Approved B2B credit limit in INR (0 = uncapped unless Credit Hold enabled)',
+    example: 500000,
+    default: 0,
+  })
+  creditLimitInr?: number;
+
+  @ApiPropertyOptional({
+    description: 'Approved payment credit cycle in days (e.g. 0, 7, 15, 30, 45, 60)',
+    example: 30,
+    default: 15,
+  })
+  creditTermDays?: number;
+
+  @ApiPropertyOptional({
+    description: 'Place buyer on Credit Hold (blocks new quotes/invoices without Admin override)',
+    default: false,
+  })
+  creditHold?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Reason for placing buyer on Credit Hold',
+    example: 'Invoices overdue > 30 days',
+  })
+  creditHoldReason?: string;
 }
 
 export class UpdateContactDto extends CreateContactDto {}

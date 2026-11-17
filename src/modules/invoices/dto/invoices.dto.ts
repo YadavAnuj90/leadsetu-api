@@ -144,6 +144,18 @@ export class CreateInvoiceDto {
     example: '672e1a2b3c4d5e6f7a8b9c0e',
   })
   linkedLeadId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Admin/Finance override when buyer is on Credit Hold or over Credit Limit',
+    default: false,
+  })
+  overrideCreditHold?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Audit reason for Admin credit override',
+    example: 'MD verbal assurance for NEFT clearance by Friday',
+  })
+  overrideReason?: string;
 }
 
 export class UpdateInvoiceDto extends CreateInvoiceDto {}
@@ -196,4 +208,87 @@ export class RecordInvoicePaymentDto {
     example: '30% Advance Milestone + 2% TDS',
   })
   note?: string;
+}
+
+export class RecordPromiseToPayDto {
+  @ApiProperty({
+    description: 'Promised payment date (YYYY-MM-DD)',
+    example: '2026-11-22',
+  })
+  promisedPaymentDate!: string;
+
+  @ApiPropertyOptional({
+    description: 'Promised amount in INR',
+    example: 150000,
+  })
+  promisedAmount?: number;
+
+  @ApiPropertyOptional({
+    description: 'Buyer commitment note',
+    example: 'Director confirmed NEFT release after GST audit on Friday',
+  })
+  ptpNote?: string;
+}
+
+export class SendRecoveryChaserDto {
+  @ApiPropertyOptional({
+    enum: ['polite', 'firm', 'urgent', 'final_hold'],
+    default: 'firm',
+  })
+  tone?: 'polite' | 'firm' | 'urgent' | 'final_hold';
+
+  @ApiPropertyOptional({
+    enum: ['hinglish', 'hindi', 'english'],
+    default: 'hinglish',
+  })
+  language?: 'hinglish' | 'hindi' | 'english';
+
+  @ApiPropertyOptional({
+    description: 'Optional custom chaser message text',
+  })
+  customMessage?: string;
+}
+
+export class UpdateRecoveryConfigDto {
+  @ApiPropertyOptional({ example: 'leadsetu@icici' })
+  upiId?: string;
+
+  @ApiPropertyOptional({ example: 'Leadsetu Technologies Pvt. Ltd.' })
+  merchantName?: string;
+
+  @ApiPropertyOptional({ default: true })
+  autoChasersEnabled?: boolean;
+
+  @ApiPropertyOptional({ example: 30, default: 30 })
+  autoHoldAfterDays?: number;
+
+  @ApiPropertyOptional({
+    example: 'HDFC Current A/c 50200084112901 · IFSC HDFC0000412 (Noida Sec 62)',
+  })
+  bankAccountNote?: string;
+}
+
+export class BankStatementEntryDto {
+  id?: string;
+  date!: string;
+  narration!: string;
+  utrOrRef!: string;
+  creditAmount!: number;
+}
+
+export class BankStatementReconcileDto {
+  @ApiProperty({ type: [BankStatementEntryDto] })
+  entries!: BankStatementEntryDto[];
+}
+
+export class ApplyBankMatchDto {
+  matches!: {
+    invoiceId: string;
+    amountPaid: number;
+    tdsDeducted?: number;
+    utrOrChequeNo: string;
+    paymentDate: string;
+    paymentMode?: 'UPI' | 'NEFT' | 'RTGS' | 'Cheque' | 'Razorpay' | 'Cash';
+    note?: string;
+  }[];
 }

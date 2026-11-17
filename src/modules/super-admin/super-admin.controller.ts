@@ -18,12 +18,19 @@ import {
 import type { Request, Response } from 'express';
 import { SuperAdminService } from './super-admin.service';
 import {
+  BulkManageAiAuthorityDto,
   CreateSaasCouponDto,
   CreateSaasPartnerDto,
   CreateSuperAdminOperatorDto,
+  DpdpEraseTenantDto,
+  GrantQuotaAddonDto,
   ImpersonateTenantDto,
   IssueTenantSubscriptionDto,
+  ManageTenantAiAuthorityDto,
   PartnerPayoutDto,
+  ResolveTopupRequestDto,
+  RevokeTenantSessionsDto,
+  ToggleOperatorStatusDto,
   UpdateDunningPolicyDto,
   UpdatePlatformPoliciesDto,
   UpdateSaasCouponDto,
@@ -347,11 +354,11 @@ export class SuperAdminController {
   }
 
   @Patch('operators/:operatorId/status')
-  @ApiOperation({ summary: 'Activate or deactivate another HQ Super Admin operator' })
+  @ApiOperation({ summary: 'Activate or deactivate another HQ Super Admin operator (requires password when revoking)' })
   async toggleOperatorStatus(
     @Headers('authorization') authorization: string | undefined,
     @Param('operatorId') operatorId: string,
-    @Body() body: { isActive: boolean },
+    @Body() body: ToggleOperatorStatusDto,
     @Req() req: Request,
   ) {
     const actor = await this.superAdminService.verifySuperAdmin(authorization);
@@ -360,6 +367,140 @@ export class SuperAdminController {
       operatorId,
       Boolean(body.isActive),
       clientIp(req),
+      body.confirmPassword,
     );
+  }
+
+  @Post('tenants/:tenantId/security/revoke-all-sessions')
+  @ApiOperation({ summary: 'Panic-revoke all active JWT & refresh sessions across an entire tenant' })
+  async revokeAllTenantSessions(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('tenantId') tenantId: string,
+    @Body() dto: RevokeTenantSessionsDto,
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.revokeAllTenantSessions(
+      actor,
+      tenantId,
+      dto,
+      clientIp(req),
+    );
+  }
+
+  @Get('tenants/:tenantId/dpdp/export')
+  @ApiOperation({ summary: 'DPDP Data Portability: Export full workspace CRM JSON backup' })
+  async exportTenantDpdpData(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('tenantId') tenantId: string,
+    @Res({ passthrough: true }) res: Response,
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    const { filename, payload } = await this.superAdminService.exportTenantDpdpData(
+      actor,
+      tenantId,
+      clientIp(req),
+    );
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return JSON.stringify(payload, null, 2);
+  }
+
+  @Post('tenants/:tenantId/dpdp/erase')
+  @ApiOperation({ summary: 'DPDP Right-to-Erasure: Soft-Delete, Restore, or Permanent Purge' })
+  async dpdpEraseTenant(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('tenantId') tenantId: string,
+    @Body() dto: DpdpEraseTenantDto,
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.dpdpEraseTenant(actor, tenantId, dto, clientIp(req));
+  }
+
+  @Post('tenants/:tenantId/quotas/addon')
+  @ApiOperation({ summary: 'Grant paid or complimentary AI / WhatsApp / Storage quota top-up pack' })
+  async grantTenantQuotaAddon(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('tenantId') tenantId: string,
+    @Body() dto: GrantQuotaAddonDto,
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.grantTenantQuotaAddon(
+      actor,
+      tenantId,
+      dto,
+      clientIp(req),
+    );
+  }
+
+  @Patch('tenants/:tenantId/ai-authority')
+  @ApiOperation({ summary: 'Assign, edit, reset, or remove AI balance and AI features for a single Admin account' })
+  async manageTenantAiAuthority(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('tenantId') tenantId: string,
+    @Body() dto: ManageTenantAiAuthorityDto,
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.manageTenantAiAuthority(
+      actor,
+      tenantId,
+      dto,
+      clientIp(req),
+    );
+  }
+
+  @Post('tenants/ai-authority/bulk')
+  @ApiOperation({ summary: 'Bulk assign, edit, or remove AI balance and AI features across all Admin accounts' })
+  async bulkManageAiAuthority(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: BulkManageAiAuthorityDto,
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.bulkManageAiAuthority(
+      actor,
+      dto,
+      clientIp(req),
+    );
+  }
+
+  @Get('topup-requests')
+  @ApiOperation({ summary: 'List AI / WhatsApp top-up requests raised by Company Admins' })
+  async listTopupRequests(
+    @Headers('authorization') authorization: string | undefined,
+    @Query('status') status?: string,
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.listTopupRequests(status);
+  }
+
+  @Patch('tenants/:tenantId/topup-requests/:requestId')
+  @ApiOperation({ summary: 'Approve (grant quota, optional GST invoice) or reject a Company Admin top-up request' })
+  async resolveTopupRequest(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('tenantId') tenantId: string,
+    @Param('requestId') requestId: string,
+    @Body() dto: ResolveTopupRequestDto,
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.resolveTopupRequest(
+      actor,
+      tenantId,
+      requestId,
+      dto,
+      clientIp(req),
+    );
+  }
+
+  @Get('analytics/territories')
+  @ApiOperation({ summary: 'Territory / industrial cluster analytics & per-company health scores' })
+  async getTerritoryAnalytics(@Headers('authorization') authorization: string | undefined) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.getTerritoryAnalytics();
   }
 }

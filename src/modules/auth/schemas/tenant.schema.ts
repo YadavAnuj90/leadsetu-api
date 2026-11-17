@@ -19,6 +19,21 @@ export class TenantQuotas {
 
   @Prop({ type: Number, default: 2048 })
   maxStorageMb!: number;
+
+  @Prop({ type: Number, default: 0 })
+  aiCostInr?: number;
+
+  @Prop({ type: Number, default: 0 })
+  whatsappCostInr?: number;
+
+  @Prop({ type: Number, default: 0 })
+  addonAiCalls?: number;
+
+  @Prop({ type: Number, default: 0 })
+  addonWhatsapp?: number;
+
+  @Prop({ trim: true, default: '' })
+  lastMeterResetAt?: string;
 }
 
 export const TenantQuotasSchema = SchemaFactory.createForClass(TenantQuotas);
@@ -176,6 +191,51 @@ export const SubscriptionInvoiceRecordSchema = SchemaFactory.createForClass(
   SubscriptionInvoiceRecord,
 );
 
+/** Company Admin request for an AI / WhatsApp quota top-up, resolved by Super Admin. */
+@Schema({ _id: false })
+export class TopupRequestRecord {
+  @Prop({ required: true, trim: true })
+  id!: string;
+
+  @Prop({ required: true, enum: ['ai', 'whatsapp'] })
+  resource!: 'ai' | 'whatsapp';
+
+  @Prop({ type: Number, required: true })
+  quantity!: number;
+
+  @Prop({ trim: true, default: '' })
+  note!: string;
+
+  @Prop({ default: 'pending', enum: ['pending', 'approved', 'rejected'] })
+  status!: 'pending' | 'approved' | 'rejected';
+
+  @Prop({ trim: true, default: '' })
+  requestedByUserId!: string;
+
+  @Prop({ trim: true, default: '' })
+  requestedByName!: string;
+
+  @Prop({ trim: true, default: '' })
+  requestedByEmail!: string;
+
+  @Prop({ trim: true, default: '' })
+  createdAt!: string;
+
+  @Prop({ trim: true, default: '' })
+  resolvedAt!: string;
+
+  @Prop({ trim: true, default: '' })
+  resolvedByEmail!: string;
+
+  @Prop({ trim: true, default: '' })
+  resolutionNote!: string;
+
+  @Prop({ type: Number, default: 0 })
+  grantedQuantity!: number;
+}
+
+export const TopupRequestRecordSchema = SchemaFactory.createForClass(TopupRequestRecord);
+
 @Schema({ timestamps: true, collection: 'tenants' })
 export class Tenant {
   @Prop({ required: true, trim: true })
@@ -263,6 +323,33 @@ export class Tenant {
   /** Subscription GST invoices attached to this workspace profile. */
   @Prop({ type: [SubscriptionInvoiceRecordSchema], default: [] })
   subscriptionInvoices?: SubscriptionInvoiceRecord[];
+
+  /** Company Admin AI / WhatsApp top-up requests awaiting or resolved by Super Admin. */
+  @Prop({ type: [TopupRequestRecordSchema], default: [] })
+  topupRequests?: TopupRequestRecord[];
+
+  /** Incremented on whole-tenant panic revoke to invalidate all tenant JWTs immediately. */
+  @Prop({ type: Number, default: 1 })
+  sessionVersion?: number;
+
+  /** DPDP Act Right-to-Erasure lifecycle metadata. */
+  @Prop({
+    type: Object,
+    default: () => ({
+      softDeletedAt: '',
+      purgeScheduledAt: '',
+      purgedAt: '',
+      deletionReason: '',
+      requestedByEmail: '',
+    }),
+  })
+  dpdpRetention?: {
+    softDeletedAt?: string;
+    purgeScheduledAt?: string;
+    purgedAt?: string;
+    deletionReason?: string;
+    requestedByEmail?: string;
+  };
 }
 
 export const TenantSchema = SchemaFactory.createForClass(Tenant);

@@ -36,6 +36,7 @@ import {
 import { Model, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.module';
 import { PLAN_CATALOG } from '../tenants/tenants.service';
+import { DEFAULT_PLAN_MATRIX } from '../super-admin/schemas/platform-config.schema';
 import { User, UserDocument, UserSchema } from '../auth/schemas/user.schema';
 import {
   Tenant,
@@ -44,12 +45,17 @@ import {
 } from '../auth/schemas/tenant.schema';
 import {
   generateAccountId,
+  generateInviteToken,
   generateTemporaryPassword,
   generateUserCode,
   hashSecret,
   isDuplicateKeyError,
   normalizeIndianPhone,
+  normalizeUserFeatureAccess,
+  USER_FEATURE_KEYS,
+  USER_FEATURE_LABELS,
 } from '../auth/identity.util';
+import { dispatchTeamInviteEmail } from '../auth/email.util';
 
 type Role = 'owner' | 'admin' | 'manager' | 'agent';
 type AssignableRole = Exclude<Role, 'owner'>;
@@ -102,6 +108,24 @@ export class AddTeamMemberDto {
     example: 'Welcome@2026',
   })
   password?: string;
+
+  @ApiPropertyOptional({
+    description: 'Per-feature CRM access toggles assigned to this Sales Manager or User',
+    example: { leads: true, deals: true, whatsappCloud: true, gstBilling: false },
+  })
+  featureAccess?: Record<string, boolean>;
+
+  @ApiPropertyOptional({
+    description: 'Whether to dispatch an invite email link upon creation',
+    default: true,
+  })
+  sendInviteEmail?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Per-user daily AI call cap (0 = unlimited within workspace balance)',
+    example: 50,
+  })
+  aiDailyCallLimit?: number;
 }
 
 export class UpdateTeamMemberDto {
@@ -125,6 +149,17 @@ export class UpdateTeamMemberDto {
     example: true,
   })
   maskPhones?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Updated per-feature CRM module access toggles for this member',
+  })
+  featureAccess?: Record<string, boolean>;
+
+  @ApiPropertyOptional({
+    description: 'Per-user daily AI call cap (0 = unlimited within workspace balance)',
+    example: 50,
+  })
+  aiDailyCallLimit?: number;
 }
 
 export class SetMemberStatusDto {
@@ -323,10 +358,28 @@ export class TeamService {
     return perf;
   }
 
-  private toMemberDto(m: UserDocument, perf?: RepPerformance) {
+  private getWorkspaceFeatureLimits(tenant: TenantDocument): Record<string, boolean> {
+    const planFeatures = (DEFAULT_PLAN_MATRIX[tenant.plan]?.features || {}) as Record<string, boolean>;
+    const overrides = (tenant.featureOverrides || {}) as Record<string, boolean | undefined>;
+    const out: Record<string, boolean> = {};
+    for (const key of USER_FEATURE_KEYS) {
+      if (overrides[key] === true) out[key] = true;
+      else if (overrides[key] === false) out[key] = false;
+      else if (key in planFeatures) out[key] = Boolean(planFeatures[key]);
+      else out[key] = true;
+    }
+    return out;
+  }
+
+  private toMemberDto(
+    m: UserDocument,
+    perf?: RepPerformance,
+    workspaceLimits?: Record<string, boolean>,
+  ) {
     const raw = m.toObject() as unknown as { createdAt?: Date };
     const p = perf || EMPTY_PERF;
     const target = m.monthlyTarget || 0;
+    const todayKey = new Date().toISOString().slice(0, 10);
     return {
       id: m._id.toString(),
       userCode: m.userCode || '',
@@ -338,6 +391,11 @@ export class TeamService {
       territory: m.territory || '',
       monthlyTarget: target,
       maskPhones: Boolean(m.maskPhones),
+      aiDailyCallLimit: Math.max(0, Number(m.aiDailyCallLimit || 0)),
+      aiCallsToday: m.aiCallsDayKey === todayKey ? Math.max(0, Number(m.aiCallsToday || 0)) : 0,
+      featureAccess: normalizeUserFeatureAccess(m.featureAccess, m.role, workspaceLimits),
+      inviteStatus: m.inviteStatus || 'active',
+      inviteSentAt: m.inviteSentAt ? new Date(m.inviteSentAt).toISOString() : null,
       invitedBy: m.invitedBy ? m.invitedBy.toString() : null,
       lastLoginAt: m.lastLoginAt ? new Date(m.lastLoginAt).toISOString() : null,
       createdAt: raw.createdAt ? new Date(raw.createdAt).toISOString() : null,
@@ -350,6 +408,7 @@ export class TeamService {
 
   async list(actor: Actor, query: { search?: string; role?: string; status?: string }) {
     const tenantId = actor.tenant._id as Types.ObjectId;
+    const workspaceLimits = this.getWorkspaceFeatureLimits(actor.tenant);
 
     // Back-fill 10-digit user IDs for members created before Module 10.
     const missing = await this.userModel
@@ -390,6 +449,7 @@ export class TeamService {
         blockAgentExport: actor.tenant.blockAgentExport ?? true,
         ownerName: owner?.name || '',
         ownerEmail: owner?.email || '',
+        workspaceFeatures: workspaceLimits,
       },
       viewer: {
         id: actor.user._id.toString(),
@@ -397,7 +457,9 @@ export class TeamService {
         canManageTeam: this.canManageTeam(actor),
         canManageAdmins: actor.user.role === 'owner',
       },
-      data: members.map((m) => this.toMemberDto(m, perf.get(m._id.toString()))),
+      data: members.map((m) =>
+        this.toMemberDto(m, perf.get(m._id.toString()), workspaceLimits),
+      ),
       stats: {
         totalMembers: all.length,
         activeMembers: all.filter((m) => m.isActive).length,
@@ -448,12 +510,24 @@ export class TeamService {
       .exec();
     if (currentMemberCount >= seatCap) {
       throw new ForbiddenException(
-        `Seat limit reached (${currentMemberCount}/${seatCap} seats on ${actor.tenant.plan} plan). Upgrade plan or request a seat override from Leadsetu HQ.`,
+        `Seat limit reached (${currentMemberCount}/${seatCap} seats on ${actor.tenant.plan} plan). Upgrade your workspace plan in Company Settings -> Plan & Billing.`,
       );
     }
 
     const generated = !dto.password;
     const password = dto.password || generateTemporaryPassword();
+    const workspaceLimits = this.getWorkspaceFeatureLimits(actor.tenant);
+    const featureAccess = normalizeUserFeatureAccess(
+      dto.featureAccess,
+      role,
+      workspaceLimits,
+    );
+    const invite = generateInviteToken();
+    const inviteExpiresAt = new Date(Date.now() + 7 * 86400000);
+    const frontendBase = (
+      this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000'
+    ).replace(/\/+$/, '');
+    const inviteUrl = `${frontendBase}/invite?token=${invite.rawToken}&email=${encodeURIComponent(email)}`;
 
     // Retry on the (very unlikely) race where two requests pick the same user ID.
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -466,11 +540,44 @@ export class TeamService {
           phone,
           passwordHash: hashSecret(password),
           role,
+          featureAccess,
+          inviteTokenHash: invite.tokenHash,
+          inviteExpiresAt,
+          inviteSentAt: new Date(),
+          inviteStatus: 'pending',
           isActive: true,
           territory: dto.territory?.trim() || '',
           monthlyTarget: dto.monthlyTarget !== undefined ? this.validateTarget(dto.monthlyTarget) : 0,
+          aiDailyCallLimit:
+            dto.aiDailyCallLimit !== undefined
+              ? Math.max(0, Math.min(100000, Math.round(Number(dto.aiDailyCallLimit) || 0)))
+              : 0,
           invitedBy: actor.user._id,
         });
+        const emailDispatch =
+          dto.sendInviteEmail === false
+            ? {
+                sent: false,
+                provider: 'preview' as const,
+                inviteUrl,
+                emailSubject: `Invite for ${member.name}`,
+                emailPreview: inviteUrl,
+              }
+            : await dispatchTeamInviteEmail({
+                toEmail: email,
+                memberName: name,
+                role,
+                userCode: member.userCode || '',
+                accountId: actor.tenant.accountId || '',
+                workspaceName: actor.tenant.name,
+                inviterName: actor.user.name,
+                inviteUrl,
+                temporaryPassword: generated ? password : null,
+                featureAccess,
+              });
+        const enabledNames = USER_FEATURE_KEYS.filter((k) => featureAccess[k]).map(
+          (k) => USER_FEATURE_LABELS[k],
+        );
         await this.auditService?.record({
           tenantId: actor.tenant._id.toString(),
           actorId: actor.user._id.toString(),
@@ -482,16 +589,21 @@ export class TeamService {
           entityType: 'team',
           entityId: member._id.toString(),
           entityLabel: `${member.name} (UID #${member.userCode})`,
-          summary: `Added team member ${member.name} as ${member.role.toUpperCase()} (${email})`,
+          summary: `Invited team member ${member.name} as ${member.role.toUpperCase()} (${email}) with ${enabledNames.length} modules`,
         });
         return {
-          member: this.toMemberDto(member),
+          member: this.toMemberDto(member, undefined, workspaceLimits),
           credentials: {
             accountId: actor.tenant.accountId,
             userCode: member.userCode,
             loginEmail: email,
             // Returned exactly once; it is only stored as a hash.
             temporaryPassword: generated ? password : null,
+            inviteUrl,
+            emailSent: emailDispatch.sent,
+            emailProvider: emailDispatch.provider,
+            emailSubject: emailDispatch.emailSubject,
+            emailPreview: emailDispatch.emailPreview,
           },
         };
       } catch (err) {
@@ -513,14 +625,16 @@ export class TeamService {
     const touchesPrivileged =
       dto.role !== undefined ||
       dto.monthlyTarget !== undefined ||
-      dto.maskPhones !== undefined;
+      dto.maskPhones !== undefined ||
+      dto.featureAccess !== undefined ||
+      dto.aiDailyCallLimit !== undefined;
     if (!isSelf || touchesPrivileged) {
       if (isSelf && dto.role !== undefined) {
         throw new ForbiddenException('You cannot change your own role.');
       }
       if (isSelf) {
         if (!this.canManageTeam(actor)) {
-          throw new ForbiddenException('Only the owner or an admin can change targets or masking.');
+          throw new ForbiddenException('Only the owner or an admin can change targets, features, or masking.');
         }
       } else {
         this.assertCanManageTarget(actor, member, 'modify');
@@ -529,6 +643,7 @@ export class TeamService {
 
     const prevRole = member.role;
     const prevMask = Boolean(member.maskPhones);
+    const workspaceLimits = this.getWorkspaceFeatureLimits(actor.tenant);
 
     if (dto.name !== undefined) {
       if (!dto.name.trim()) throw new BadRequestException('Name cannot be empty.');
@@ -547,8 +662,40 @@ export class TeamService {
     if (dto.territory !== undefined) member.territory = dto.territory.trim();
     if (dto.monthlyTarget !== undefined) member.monthlyTarget = this.validateTarget(dto.monthlyTarget);
     if (dto.maskPhones !== undefined) member.maskPhones = Boolean(dto.maskPhones);
+    if (dto.aiDailyCallLimit !== undefined) {
+      member.aiDailyCallLimit = Math.max(
+        0,
+        Math.min(100000, Math.round(Number(dto.aiDailyCallLimit) || 0)),
+      );
+    }
+    if (dto.featureAccess !== undefined) {
+      member.featureAccess = normalizeUserFeatureAccess(
+        dto.featureAccess,
+        member.role,
+        workspaceLimits,
+      );
+      member.markModified('featureAccess');
+    }
 
     await member.save();
+    if (dto.featureAccess !== undefined) {
+      const enabledCount = USER_FEATURE_KEYS.filter(
+        (k) => (member.featureAccess || {})[k] !== false,
+      ).length;
+      await this.auditService?.record({
+        tenantId: actor.tenant._id.toString(),
+        actorId: actor.user._id.toString(),
+        actorName: actor.user.name,
+        actorEmail: actor.user.email,
+        actorUserCode: actor.user.userCode,
+        actorRole: actor.user.role,
+        action: 'team.features_updated',
+        entityType: 'team',
+        entityId: member._id.toString(),
+        entityLabel: `${member.name} (UID #${member.userCode})`,
+        summary: `Updated CRM feature access for ${member.name} (${member.role.toUpperCase()}): ${enabledCount}/${USER_FEATURE_KEYS.length} modules enabled`,
+      });
+    }
     if (dto.role !== undefined && dto.role !== prevRole) {
       await this.auditService?.record({
         tenantId: actor.tenant._id.toString(),
@@ -580,7 +727,74 @@ export class TeamService {
       });
     }
     const perf = await this.getPerformance(actor.tenant._id as Types.ObjectId);
-    return this.toMemberDto(member, perf.get(member._id.toString()));
+    return this.toMemberDto(member, perf.get(member._id.toString()), workspaceLimits);
+  }
+
+  async resendInvite(actor: Actor, id: string) {
+    const member = await this.findMember(actor, id);
+    this.assertCanManageTarget(actor, member, 'resend invite for');
+
+    const workspaceLimits = this.getWorkspaceFeatureLimits(actor.tenant);
+    const featureAccess = normalizeUserFeatureAccess(
+      member.featureAccess,
+      member.role,
+      workspaceLimits,
+    );
+    const invite = generateInviteToken();
+    member.inviteTokenHash = invite.tokenHash;
+    member.inviteExpiresAt = new Date(Date.now() + 7 * 86400000);
+    member.inviteSentAt = new Date();
+    if (member.inviteStatus !== 'accepted') {
+      member.inviteStatus = 'pending';
+    }
+    await member.save();
+
+    const frontendBase = (
+      this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000'
+    ).replace(/\/+$/, '');
+    const inviteUrl = `${frontendBase}/invite?token=${invite.rawToken}&email=${encodeURIComponent(member.email)}`;
+
+    const emailDispatch = await dispatchTeamInviteEmail({
+      toEmail: member.email,
+      memberName: member.name,
+      role: member.role,
+      userCode: member.userCode || '',
+      accountId: actor.tenant.accountId || '',
+      workspaceName: actor.tenant.name,
+      inviterName: actor.user.name,
+      inviteUrl,
+      temporaryPassword: null,
+      featureAccess,
+    });
+
+    await this.auditService?.record({
+      tenantId: actor.tenant._id.toString(),
+      actorId: actor.user._id.toString(),
+      actorName: actor.user.name,
+      actorEmail: actor.user.email,
+      actorUserCode: actor.user.userCode,
+      actorRole: actor.user.role,
+      action: 'team.invite_resent',
+      entityType: 'team',
+      entityId: member._id.toString(),
+      entityLabel: `${member.name} (UID #${member.userCode})`,
+      summary: `Sent fresh invite login link to ${member.email}`,
+    });
+
+    return {
+      member: this.toMemberDto(member, undefined, workspaceLimits),
+      credentials: {
+        accountId: actor.tenant.accountId,
+        userCode: member.userCode,
+        loginEmail: member.email,
+        temporaryPassword: null,
+        inviteUrl,
+        emailSent: emailDispatch.sent,
+        emailProvider: emailDispatch.provider,
+        emailSubject: emailDispatch.emailSubject,
+        emailPreview: emailDispatch.emailPreview,
+      },
+    };
   }
 
   async setStatus(actor: Actor, id: string, isActive: boolean) {
@@ -685,6 +899,95 @@ export class TeamService {
       reassigned,
     };
   }
+
+  async getMyPerformance(actor: Actor) {
+    const tenantId = actor.tenant._id as Types.ObjectId;
+    const perfMap = await this.getPerformance(tenantId);
+    const p = perfMap.get(actor.user._id.toString()) || EMPTY_PERF;
+    const target = actor.user.monthlyTarget || 0;
+    const todayKey = new Date().toISOString().slice(0, 10);
+    return {
+      userId: actor.user._id.toString(),
+      name: actor.user.name,
+      role: actor.user.role,
+      territory: actor.user.territory || '',
+      monthlyTarget: target,
+      aiDailyCallLimit: Math.max(0, Number(actor.user.aiDailyCallLimit || 0)),
+      aiCallsToday:
+        actor.user.aiCallsDayKey === todayKey
+          ? Math.max(0, Number(actor.user.aiCallsToday || 0))
+          : 0,
+      performance: {
+        ...p,
+        targetAchievedPct:
+          target > 0 ? Math.min(999, Math.round((p.wonRevenue / target) * 100)) : 0,
+      },
+    };
+  }
+
+  async getMyTeam(actor: Actor) {
+    if (actor.user.role === 'agent') {
+      throw new ForbiddenException(
+        'Team overview is only available to Sales Managers, Admins, and Owners.',
+      );
+    }
+    const tenantId = actor.tenant._id as Types.ObjectId;
+    const workspaceLimits = this.getWorkspaceFeatureLimits(actor.tenant);
+    const [allAgents, perfMap, taskCounts] = await Promise.all([
+      this.userModel.find({ tenantId, role: 'agent' }).sort({ name: 1 }).exec(),
+      this.getPerformance(tenantId),
+      this.userModel.db
+        .collection('tasks')
+        .aggregate<{ _id: Types.ObjectId; pending: number }>([
+          { $match: { tenantId, status: { $ne: 'done' } } },
+          { $group: { _id: '$ownerId', pending: { $sum: 1 } } },
+        ])
+        .toArray()
+        .catch(() => []),
+    ]);
+
+    const taskMap = new Map(taskCounts.map((r) => [String(r._id), r.pending]));
+    const mgrTerritory = (actor.user.territory || '').trim().toLowerCase();
+    const scoped =
+      actor.user.role === 'manager' && mgrTerritory
+        ? allAgents.filter((a) => {
+            const t = (a.territory || '').trim().toLowerCase();
+            return !t || t.includes(mgrTerritory) || mgrTerritory.includes(t);
+          })
+        : allAgents;
+
+    const reps = scoped.map((m) => {
+      const dto = this.toMemberDto(
+        m,
+        perfMap.get(m._id.toString()),
+        workspaceLimits,
+      );
+      return {
+        ...dto,
+        pendingTasks: taskMap.get(m._id.toString()) || 0,
+      };
+    });
+
+    const totalWonRevenue = reps.reduce((s, r) => s + r.performance.wonRevenue, 0);
+    const totalOpenPipeline = reps.reduce((s, r) => s + r.performance.openPipeline, 0);
+    const avgTargetPct =
+      reps.length > 0
+        ? Math.round(
+            reps.reduce((s, r) => s + r.performance.targetAchievedPct, 0) / reps.length,
+          )
+        : 0;
+
+    return {
+      territory: actor.user.territory || 'All Territories',
+      summary: {
+        repCount: reps.length,
+        totalWonRevenue,
+        totalOpenPipeline,
+        avgTargetPct,
+      },
+      data: reps,
+    };
+  }
 }
 
 // ─── Controller ──────────────────────────────────────────────────────────────
@@ -729,6 +1032,20 @@ export class TeamController {
     return this.teamService.add(actor, dto);
   }
 
+  @Get('me/performance')
+  @ApiOperation({ summary: 'Get personal monthly target, won revenue, and daily AI call counters for current user' })
+  async getMyPerformance(@Headers('authorization') authorization?: string) {
+    const actor = await this.teamService.getActor(authorization);
+    return this.teamService.getMyPerformance(actor);
+  }
+
+  @Get('my-team')
+  @ApiOperation({ summary: 'Sales Manager view of reps in their territory with pipeline & target progress' })
+  async getMyTeam(@Headers('authorization') authorization?: string) {
+    const actor = await this.teamService.getActor(authorization);
+    return this.teamService.getMyTeam(actor);
+  }
+
   @Patch(':id')
   @ApiOperation({ summary: 'Update a member’s name, phone, role, territory or monthly target' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId of the member', example: '672e1a2b3c4d5e6f7a8b9c0d' })
@@ -765,6 +1082,18 @@ export class TeamController {
   ) {
     const actor = await this.teamService.getActor(authorization);
     return this.teamService.resetPassword(actor, id);
+  }
+
+  @Post(':id/resend-invite')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Generate a fresh 7-day email invite login link for a member' })
+  @ApiParam({ name: 'id', description: 'MongoDB ObjectId of the member', example: '672e1a2b3c4d5e6f7a8b9c0d' })
+  async resendInvite(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+  ) {
+    const actor = await this.teamService.getActor(authorization);
+    return this.teamService.resendInvite(actor, id);
   }
 
   @Delete(':id')

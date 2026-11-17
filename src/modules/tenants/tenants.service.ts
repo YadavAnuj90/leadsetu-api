@@ -15,6 +15,7 @@ import {
   SubscriptionInvoiceRecord,
   Tenant,
   TenantDocument,
+  TopupRequestRecord,
 } from '../auth/schemas/tenant.schema';
 import { User, UserDocument } from '../auth/schemas/user.schema';
 import { AuditService } from '../audit/audit.module';
@@ -399,6 +400,74 @@ export class TenantsService {
     return {
       ...summary,
       latestInvoice: newInvoice,
+    };
+  }
+
+  async listTopupRequests(auth: TenantAuthContext) {
+    if (auth.role !== 'owner' && auth.role !== 'admin' && auth.role !== 'super_admin') {
+      throw new ForbiddenException('Only Workspace Owners and Admins can view top-up requests.');
+    }
+    const tenant = await this.tenantModel.findById(auth.tenantId).exec();
+    if (!tenant) throw new NotFoundException('Workspace not found.');
+    const items = [...(tenant.topupRequests || [])].sort((a, b) =>
+      (b.createdAt || '').localeCompare(a.createdAt || ''),
+    );
+    return { data: items };
+  }
+
+  async createTopupRequest(
+    auth: TenantAuthContext,
+    body: { resource: 'ai' | 'whatsapp'; quantity: number; note?: string },
+  ) {
+    if (auth.role !== 'owner' && auth.role !== 'admin' && auth.role !== 'super_admin') {
+      throw new ForbiddenException('Only Workspace Owners and Admins can request quota top-ups.');
+    }
+    if (body.resource !== 'ai' && body.resource !== 'whatsapp') {
+      throw new BadRequestException('Resource must be ai or whatsapp.');
+    }
+    const qty = Math.round(Number(body.quantity || 0));
+    if (!Number.isFinite(qty) || qty < 1 || qty > 1000000) {
+      throw new BadRequestException('Quantity must be between 1 and 1,000,000.');
+    }
+
+    const [tenant, requester] = await Promise.all([
+      this.tenantModel.findById(auth.tenantId).exec(),
+      this.userModel.findById(auth.userId).select('name email').lean().exec(),
+    ]);
+    if (!tenant) throw new NotFoundException('Workspace not found.');
+
+    const existingPending = (tenant.topupRequests || []).find(
+      (r) => r.status === 'pending' && r.resource === body.resource,
+    );
+    if (existingPending) {
+      throw new BadRequestException(
+        `A pending ${body.resource.toUpperCase()} top-up request is already awaiting Super Admin review.`,
+      );
+    }
+
+    const record: TopupRequestRecord = {
+      id: `topup_${Date.now()}_${randomBytes(3).toString('hex')}`,
+      resource: body.resource,
+      quantity: qty,
+      note: (body.note || '').trim().slice(0, 300),
+      status: 'pending',
+      requestedByUserId: auth.userId,
+      requestedByName: requester?.name || auth.email,
+      requestedByEmail: requester?.email || auth.email,
+      createdAt: new Date().toISOString(),
+      resolvedAt: '',
+      resolvedByEmail: '',
+      resolutionNote: '',
+      grantedQuantity: 0,
+    };
+
+    tenant.topupRequests = [record, ...(tenant.topupRequests || [])];
+    tenant.markModified('topupRequests');
+    await tenant.save();
+
+    return {
+      created: record,
+      data: tenant.topupRequests,
     };
   }
 }

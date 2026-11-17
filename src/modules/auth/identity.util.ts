@@ -1,5 +1,5 @@
 import { ServiceUnavailableException } from '@nestjs/common';
-import { randomBytes, randomInt, scryptSync, timingSafeEqual } from 'crypto';
+import { createHash, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'crypto';
 
 /** Minimal structural type for a Mongoose model that supports `.exists(...)`. */
 export interface ExistsCapableModel {
@@ -118,4 +118,89 @@ export function maskPhoneNumber(raw?: string): string {
     return `${'*'.repeat(digits.length - 3)}${digits.slice(-3)}`;
   }
   return '***';
+}
+
+export function sha256Hex(raw: string): string {
+  return createHash('sha256').update(raw).digest('hex');
+}
+
+export function generateInviteToken(): { rawToken: string; tokenHash: string } {
+  const rawToken = randomBytes(32).toString('hex');
+  return { rawToken, tokenHash: sha256Hex(rawToken) };
+}
+
+export const USER_FEATURE_KEYS = [
+  'leads',
+  'aiScoring',
+  'contacts',
+  'deals',
+  'whatsappCloud',
+  'whatsappBroadcasts',
+  'tasks',
+  'slaTickets',
+  'aiWorkflows',
+  'analytics',
+  'products',
+  'gstBilling',
+  'documentVault',
+  'aiCreditRisk',
+  'aiVoiceCrm',
+  'aiDealerDesk',
+  'aiCopilot',
+] as const;
+
+export type UserFeatureKey = (typeof USER_FEATURE_KEYS)[number];
+
+export const USER_FEATURE_LABELS: Record<UserFeatureKey, string> = {
+  leads: 'Leads Pipeline',
+  aiScoring: 'Gemini AI Lead Scoring',
+  contacts: 'Contacts (B2B)',
+  deals: 'Deals Pipeline',
+  whatsappCloud: 'WhatsApp Cloud Inbox',
+  whatsappBroadcasts: 'WhatsApp Broadcast Campaigns',
+  tasks: 'Tasks & Follow-ups',
+  slaTickets: 'SLA Service Tickets',
+  aiWorkflows: 'AI Workflows',
+  analytics: 'Revenue Analytics',
+  products: 'Products & HSN Catalog',
+  gstBilling: 'Quotations & 18% GST Invoices',
+  documentVault: 'Document Center & KYC',
+  aiCreditRisk: 'AI Credit & Udhaar Risk (Pillar 1)',
+  aiVoiceCrm: 'AI Voice-to-CRM & Call Audit (Pillar 2)',
+  aiDealerDesk: 'AI Dealer RFQ & Beat Planner (Pillar 3)',
+  aiCopilot: 'Ask AI Copilot',
+};
+
+/**
+ * Normalizes per-user feature toggles to an explicit map across all 13 CRM modules.
+ * Owners and workspace admins always retain full access.
+ * When `input` is omitted for managers/agents on creation or legacy profiles, defaults to true
+ * unless `workspaceEffective` explicitly disables a workspace-level entitlement.
+ */
+export function normalizeUserFeatureAccess(
+  input: Record<string, unknown> | undefined | null,
+  role: string,
+  workspaceEffective?: Partial<Record<string, boolean>> | null,
+): Record<UserFeatureKey, boolean> {
+  const out = {} as Record<UserFeatureKey, boolean>;
+  const isAdmin = role === 'owner' || role === 'admin' || role === 'super_admin';
+
+  for (const key of USER_FEATURE_KEYS) {
+    const workspaceAllowed =
+      !workspaceEffective || workspaceEffective[key] === undefined
+        ? true
+        : Boolean(workspaceEffective[key]);
+
+    if (isAdmin) {
+      out[key] = workspaceAllowed;
+      continue;
+    }
+
+    const requested =
+      input && typeof input === 'object' && key in input
+        ? Boolean(input[key])
+        : true;
+    out[key] = workspaceAllowed && requested;
+  }
+  return out;
 }

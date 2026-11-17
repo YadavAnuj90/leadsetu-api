@@ -52,6 +52,27 @@ export class User {
   @Prop({ type: [String], default: [] })
   permissions?: string[];
 
+  /** Per-user CRM module feature toggles managed by Workspace Owner / Admin. */
+  @Prop({ type: Object, default: {} })
+  featureAccess?: Record<string, boolean>;
+
+  /** Invite onboarding state & SHA-256 hashed one-time invite token. */
+  @Prop({ type: String, default: null })
+  inviteTokenHash?: string | null;
+
+  @Prop({ type: Date, default: null })
+  inviteExpiresAt?: Date | null;
+
+  @Prop({ type: Date, default: null })
+  inviteSentAt?: Date | null;
+
+  @Prop({
+    type: String,
+    default: 'active',
+    enum: ['active', 'pending', 'accepted'],
+  })
+  inviteStatus?: 'active' | 'pending' | 'accepted';
+
   @Prop({ default: true })
   isActive!: boolean;
 
@@ -67,12 +88,27 @@ export class User {
   @Prop({ type: Boolean, default: false })
   maskPhones?: boolean;
 
+  /** Per-user daily AI call limit set by Company Admin (0 = unlimited within workspace balance). */
+  @Prop({ type: Number, default: 0 })
+  aiDailyCallLimit?: number;
+
+  /** Number of AI calls made by this user on `aiCallsDayKey` (YYYY-MM-DD). */
+  @Prop({ type: Number, default: 0 })
+  aiCallsToday?: number;
+
+  @Prop({ type: String, default: '' })
+  aiCallsDayKey?: string;
+
   /** User who added this member (null for the workspace owner / super admin). */
   @Prop({ type: Types.ObjectId, ref: 'User', default: null })
   invitedBy?: Types.ObjectId | null;
 
   @Prop({ type: String, default: null })
   refreshTokenHash?: string | null;
+
+  /** Incremented whenever a user's active JWT sessions are force-revoked. */
+  @Prop({ type: Number, default: 1 })
+  sessionVersion?: number;
 
   @Prop({ type: Date, default: null })
   lastLoginAt?: Date | null;

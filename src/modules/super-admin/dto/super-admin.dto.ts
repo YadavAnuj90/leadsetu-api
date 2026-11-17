@@ -43,6 +43,7 @@ export class UpdateTenantGovernanceDto {
     maxMonthlyAiCalls?: number;
     maxMonthlyWhatsapp?: number;
     maxStorageMb?: number;
+    aiCallsUsed?: number;
     resetUsageCounters?: boolean;
   };
 
@@ -58,6 +59,9 @@ export class UpdateTenantGovernanceDto {
 
   @ApiPropertyOptional()
   reason?: string;
+
+  @ApiPropertyOptional({ description: 'Super Admin password required for destructive actions (e.g., suspending workspace)' })
+  confirmPassword?: string;
 }
 
 export class UpdateTenantUserRbacDto {
@@ -86,6 +90,9 @@ export class UpdateTenantUserRbacDto {
 
   @ApiPropertyOptional()
   reason?: string;
+
+  @ApiPropertyOptional({ description: 'Super Admin password required for destructive actions (e.g., suspending workspace)' })
+  confirmPassword?: string;
 }
 
 export class ImpersonateTenantDto {
@@ -120,6 +127,9 @@ export class UpdatePlatformPoliciesDto {
 
   @ApiPropertyOptional()
   reason?: string;
+
+  @ApiPropertyOptional({ description: 'Super Admin password required for destructive actions (e.g., suspending workspace)' })
+  confirmPassword?: string;
 }
 
 export class CreateSuperAdminOperatorDto {
@@ -172,6 +182,9 @@ export class IssueTenantSubscriptionDto {
 
   @ApiPropertyOptional()
   reason?: string;
+
+  @ApiPropertyOptional({ description: 'Super Admin password required for destructive actions (e.g., suspending workspace)' })
+  confirmPassword?: string;
 }
 
 export class UpdateSubscriptionInvoiceStatusDto {
@@ -277,4 +290,116 @@ export class UpdateDunningPolicyDto {
 
   @ApiPropertyOptional()
   reminderMessageTemplate?: string;
+}
+
+export class RevokeTenantSessionsDto {
+  @ApiProperty({ example: 'Suspected compromised employee credentials' })
+  reason!: string;
+
+  @ApiProperty({ description: 'Super Admin operator password confirmation' })
+  confirmPassword!: string;
+}
+
+export class DpdpEraseTenantDto {
+  @ApiProperty({ enum: ['soft_delete', 'restore', 'permanent_purge'] })
+  mode!: 'soft_delete' | 'restore' | 'permanent_purge';
+
+  @ApiProperty({ example: 'Customer DPDP erasure request ticket #409' })
+  reason!: string;
+
+  @ApiPropertyOptional({ description: 'Super Admin operator password confirmation' })
+  confirmPassword?: string;
+
+  @ApiPropertyOptional({ description: 'Allow purge even before dpdpRetentionDays elapses (audited)' })
+  forceBypassRetention?: boolean;
+}
+
+export class GrantQuotaAddonDto {
+  @ApiPropertyOptional({ example: 2500 })
+  addonAiCalls?: number;
+
+  @ApiPropertyOptional({ example: 5000 })
+  addonWhatsapp?: number;
+
+  @ApiPropertyOptional({ example: 2048 })
+  addonStorageMb?: number;
+
+  @ApiPropertyOptional()
+  issueGstInvoice?: boolean;
+
+  @ApiPropertyOptional({ example: 999 })
+  addonPriceInr?: number;
+
+  @ApiPropertyOptional()
+  paymentReference?: string;
+
+  @ApiPropertyOptional()
+  reason?: string;
+}
+
+export class ToggleOperatorStatusDto {
+  @ApiProperty()
+  isActive!: boolean;
+
+  @ApiPropertyOptional({ description: 'Super Admin password required when revoking an operator' })
+  confirmPassword?: string;
+}
+
+export class ManageTenantAiAuthorityDto {
+  @ApiProperty({
+    enum: ['assign_balance', 'remove_balance', 'set_balance', 'reset_used', 'update_features'],
+  })
+  mode!: 'assign_balance' | 'remove_balance' | 'set_balance' | 'reset_used' | 'update_features';
+
+  @ApiPropertyOptional({ example: 1000 })
+  aiCallsDelta?: number;
+
+  @ApiPropertyOptional({ example: 5000 })
+  maxMonthlyAiCalls?: number;
+
+  @ApiPropertyOptional({ example: 0 })
+  aiCallsUsed?: number;
+
+  @ApiPropertyOptional({ nullable: true })
+  aiScoring?: boolean | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  aiWorkflows?: boolean | null;
+
+  @ApiPropertyOptional({ nullable: true, description: 'Pillar 1 · Credit & Udhaar AI' })
+  aiCreditRisk?: boolean | null;
+
+  @ApiPropertyOptional({ nullable: true, description: 'Pillar 2 · Voice-to-CRM & Call Audit' })
+  aiVoiceCrm?: boolean | null;
+
+  @ApiPropertyOptional({ nullable: true, description: 'Pillar 3 · Dealer RFQ & Beat Planner' })
+  aiDealerDesk?: boolean | null;
+
+  @ApiPropertyOptional({ nullable: true, description: 'Ask AI · Tenant RAG Copilot' })
+  aiCopilot?: boolean | null;
+
+  @ApiPropertyOptional()
+  reason?: string;
+}
+
+export class BulkManageAiAuthorityDto extends ManageTenantAiAuthorityDto {
+  @ApiPropertyOptional({ type: [String] })
+  tenantIds?: string[];
+}
+
+export class ResolveTopupRequestDto {
+  @ApiProperty({ enum: ['approve', 'reject'] })
+  action!: 'approve' | 'reject';
+
+  @ApiPropertyOptional({ example: 2500, description: 'Quantity to grant (defaults to requested quantity)' })
+  grantedQuantity?: number;
+
+  @ApiPropertyOptional({ description: 'Attach a paid 18% GST add-on invoice' })
+  issueGstInvoice?: boolean;
+
+  @ApiPropertyOptional({ example: 999 })
+  priceInr?: number;
+
+  @ApiPropertyOptional()
+  note?: string;
 }

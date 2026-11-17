@@ -19,11 +19,17 @@ import { randomBytes } from 'crypto';
 import { AuditService } from '../audit/audit.service';
 import { maskPhoneNumber } from '../auth/identity.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
+import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 import {
+  ApplyBankMatchDto,
+  BankStatementReconcileDto,
   CreateInvoiceDto,
   InvoiceLineItemDto,
   MarkInvoicePaidDto,
   RecordInvoicePaymentDto,
+  RecordPromiseToPayDto,
+  SendRecoveryChaserDto,
+  UpdateRecoveryConfigDto,
 } from './dto/invoices.dto';
 
 export type InvoiceDocument = HydratedDocument<Invoice>;
@@ -84,6 +90,33 @@ export class InvoicePaymentRecord {
 
 export const InvoicePaymentRecordSchema =
   SchemaFactory.createForClass(InvoicePaymentRecord);
+
+@Schema({ _id: false })
+export class InvoiceChaserRecord {
+  @Prop({ required: true, trim: true })
+  id!: string;
+
+  @Prop({ trim: true, default: 'day_7_firm' })
+  stage!: string;
+
+  @Prop({ trim: true, default: 'whatsapp' })
+  channel!: string;
+
+  @Prop({ trim: true, default: '' })
+  message!: string;
+
+  @Prop({ trim: true, default: '' })
+  upiLink!: string;
+
+  @Prop({ trim: true, default: 'Admin' })
+  sentBy!: string;
+
+  @Prop({ trim: true, default: '' })
+  sentAt!: string;
+}
+
+export const InvoiceChaserRecordSchema =
+  SchemaFactory.createForClass(InvoiceChaserRecord);
 
 @Schema({ timestamps: true, collection: 'invoices' })
 export class Invoice {
@@ -215,6 +248,39 @@ export class Invoice {
 
   @Prop({ trim: true, default: '' })
   convertedToInvoiceId!: string;
+
+  @Prop({
+    default: 'none',
+    enum: ['none', 'day_3_polite', 'day_7_firm', 'day_15_urgent', 'day_30_hold'],
+  })
+  chaserStage!: 'none' | 'day_3_polite' | 'day_7_firm' | 'day_15_urgent' | 'day_30_hold';
+
+  @Prop({ trim: true, default: '' })
+  lastChaserSentAt!: string;
+
+  @Prop({ type: Number, default: 0 })
+  chaserCount!: number;
+
+  @Prop({ type: [InvoiceChaserRecordSchema], default: [] })
+  chaserHistory!: InvoiceChaserRecord[];
+
+  @Prop({ trim: true, default: '' })
+  promisedPaymentDate!: string;
+
+  @Prop({ type: Number, default: 0 })
+  promisedAmount!: number;
+
+  @Prop({ trim: true, default: '' })
+  ptpNote!: string;
+
+  @Prop({ trim: true, default: '' })
+  ptpUpdatedAt!: string;
+
+  @Prop({ trim: true, default: '' })
+  creditOverrideBy!: string;
+
+  @Prop({ trim: true, default: '' })
+  creditOverrideReason!: string;
 }
 
 export const InvoiceSchema = SchemaFactory.createForClass(Invoice);
@@ -228,6 +294,7 @@ export class InvoicesService {
     private readonly configService: ConfigService,
     @Optional() private readonly auditService?: AuditService,
     @Optional() private readonly superAdminService?: SuperAdminService,
+    @Optional() private readonly aiBridge?: AiBridgeService,
   ) {}
 
   async verifyAuth(authHeader?: string) {
@@ -418,6 +485,13 @@ export class InvoicesService {
       effectiveStatus = 'overdue';
     }
 
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const isPtpBroken = Boolean(
+      doc.promisedPaymentDate &&
+        settlement.balanceDue > 0 &&
+        doc.promisedPaymentDate < todayIso,
+    );
+
     return {
       id: doc._id.toString(),
       tenantId: doc.tenantId.toString(),
@@ -460,6 +534,17 @@ export class InvoicesService {
       approvedAt: doc.approvedAt || '',
       convertedFromQuoteId: doc.convertedFromQuoteId || '',
       convertedToInvoiceId: doc.convertedToInvoiceId || '',
+      chaserStage: doc.chaserStage || 'none',
+      lastChaserSentAt: doc.lastChaserSentAt || '',
+      chaserCount: Number(doc.chaserCount) || 0,
+      chaserHistory: Array.isArray(doc.chaserHistory) ? doc.chaserHistory : [],
+      promisedPaymentDate: doc.promisedPaymentDate || '',
+      promisedAmount: Number(doc.promisedAmount) || 0,
+      ptpNote: doc.ptpNote || '',
+      ptpUpdatedAt: doc.ptpUpdatedAt || '',
+      isPtpBroken,
+      creditOverrideBy: doc.creditOverrideBy || '',
+      creditOverrideReason: doc.creditOverrideReason || '',
       createdAt: raw.createdAt
         ? new Date(raw.createdAt).toISOString()
         : new Date().toISOString(),
@@ -704,9 +789,187 @@ export class InvoicesService {
     return this.toDto(doc, maskPhones);
   }
 
+  private async getTenantRecoveryConfig(tenantId: string) {
+    const tenant = Types.ObjectId.isValid(tenantId)
+      ? await this.invoiceModel.db
+          ?.collection('tenants')
+          .findOne({ _id: new Types.ObjectId(tenantId) })
+      : null;
+    const saved = (tenant?.creditRecoveryConfig || {}) as Record<string, unknown>;
+    return {
+      upiId: String(saved.upiId || 'leadsetu.b2b@icici'),
+      merchantName: String(
+        saved.merchantName || tenant?.name || 'Leadsetu Technologies Pvt. Ltd.',
+      ),
+      autoChasersEnabled: saved.autoChasersEnabled !== false,
+      autoHoldAfterDays: Number(saved.autoHoldAfterDays ?? 30),
+      bankAccountNote: String(
+        saved.bankAccountNote ||
+          'HDFC Current A/c 50200084112901 · IFSC HDFC0000412 (Noida Sec 62)',
+      ),
+    };
+  }
+
+  private buildUpiLink(
+    upiId: string,
+    merchantName: string,
+    invoiceNumber: string,
+    amountInr: number,
+  ) {
+    const pa = encodeURIComponent(upiId.trim() || 'leadsetu.b2b@icici');
+    const pn = encodeURIComponent(merchantName.trim() || 'Leadsetu B2B');
+    const tn = encodeURIComponent(`Invoice ${invoiceNumber}`);
+    const am = Math.max(1, Math.round(amountInr)).toFixed(2);
+    return `upi://pay?pa=${pa}&pn=${pn}&tn=${tn}&am=${am}&cu=INR`;
+  }
+
+  private async findMatchingBuyerContact(
+    tenantId: string,
+    clientName: string,
+    gstin?: string,
+  ) {
+    const db = this.invoiceModel.db;
+    if (!db || !Types.ObjectId.isValid(tenantId)) return null;
+    const tenantOid = new Types.ObjectId(tenantId);
+    const cleanGstin = String(gstin || '').trim().toUpperCase();
+    if (cleanGstin) {
+      const byGstin = await db
+        .collection('contacts')
+        .findOne({ tenantId: tenantOid, gstin: cleanGstin });
+      if (byGstin) return byGstin;
+    }
+    const cleanName = String(clientName || '').trim();
+    if (!cleanName) return null;
+    const escaped = cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const rx = new RegExp(`^${escaped}$`, 'i');
+    return db.collection('contacts').findOne({
+      tenantId: tenantOid,
+      $or: [{ company: rx }, { name: rx }],
+    });
+  }
+
+  private async assertBuyerCreditEligibility(
+    auth: { userId: string; tenantId: string },
+    params: {
+      clientName: string;
+      gstin?: string;
+      newAmount: number;
+      status?: string;
+      overrideCreditHold?: boolean;
+      overrideReason?: string;
+    },
+  ): Promise<{ creditTermDays: number; overrideActorName: string }> {
+    const contact = await this.findMatchingBuyerContact(
+      auth.tenantId,
+      params.clientName,
+      params.gstin,
+    );
+    const creditTermDays = Number(contact?.creditTermDays ?? 15);
+    if (params.status === 'paid' || params.status === 'draft') {
+      return { creditTermDays, overrideActorName: '' };
+    }
+
+    const db = this.invoiceModel.db;
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+    const cleanGstin = String(params.gstin || contact?.gstin || '')
+      .trim()
+      .toUpperCase();
+    const cleanName = String(params.clientName || '').trim();
+    const orFilter: Record<string, unknown>[] = [];
+    if (cleanGstin) orFilter.push({ gstin: cleanGstin });
+    if (cleanName) {
+      const escaped = cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      orFilter.push({ clientName: new RegExp(`^${escaped}$`, 'i') });
+    }
+
+    const openInvoices =
+      orFilter.length > 0
+        ? await this.invoiceModel
+            .find({
+              tenantId: tenantOid,
+              docType: { $ne: 'proforma_quote' },
+              status: { $nin: ['paid', 'cancelled'] },
+              $or: orFilter,
+            })
+            .exec()
+        : [];
+
+    let openReceivable = 0;
+    let maxOverdueDays = 0;
+    for (const inv of openInvoices) {
+      const st = this.computeSettlement(inv);
+      if (st.balanceDue <= 0) continue;
+      openReceivable += st.balanceDue;
+      const aging = this.computeAging(inv.status, inv.dueDate);
+      if (aging.daysOverdue > maxOverdueDays) {
+        maxOverdueDays = aging.daysOverdue;
+      }
+    }
+
+    const config = await this.getTenantRecoveryConfig(auth.tenantId);
+    const creditLimit = Math.max(0, Number(contact?.creditLimitInr) || 0);
+    const onHold = Boolean(contact?.creditHold);
+    const exceedsLimit =
+      creditLimit > 0 && openReceivable + params.newAmount > creditLimit;
+    const severeOverdue =
+      config.autoHoldAfterDays > 0 &&
+      maxOverdueDays >= config.autoHoldAfterDays;
+
+    if (!onHold && !exceedsLimit && !severeOverdue) {
+      return { creditTermDays, overrideActorName: '' };
+    }
+
+    const reasons: string[] = [];
+    if (onHold) {
+      reasons.push(
+        `Buyer is on CREDIT HOLD${contact?.creditHoldReason ? ` (${contact.creditHoldReason})` : ''}`,
+      );
+    }
+    if (exceedsLimit) {
+      reasons.push(
+        `Open balance ₹${openReceivable.toLocaleString('en-IN')} + new ₹${params.newAmount.toLocaleString('en-IN')} exceeds approved credit limit ₹${creditLimit.toLocaleString('en-IN')}`,
+      );
+    }
+    if (severeOverdue) {
+      reasons.push(
+        `Buyer has unpaid invoice overdue by ${maxOverdueDays} days (auto-hold threshold: ${config.autoHoldAfterDays}d)`,
+      );
+    }
+
+    if (params.overrideCreditHold) {
+      const viewer =
+        db && Types.ObjectId.isValid(auth.userId)
+          ? await db.collection('users').findOne({
+              _id: new Types.ObjectId(auth.userId),
+              tenantId: tenantOid,
+            })
+          : null;
+      const role = String(viewer?.role || '').toLowerCase();
+      if (!['owner', 'admin', 'super_admin', 'manager'].includes(role)) {
+        throw new ForbiddenException(
+          `CREDIT_GUARDRAIL_OVERRIDE_DENIED: ${reasons.join('; ')}. Only Admin/Owner/Manager can override Credit Hold.`,
+        );
+      }
+      if (!params.overrideReason?.trim()) {
+        throw new BadRequestException(
+          'Enter an audit override reason to bypass the B2B Credit Hold / Limit guardrail.',
+        );
+      }
+      return {
+        creditTermDays,
+        overrideActorName: String(viewer?.name || viewer?.email || 'Admin'),
+      };
+    }
+
+    throw new ForbiddenException(
+      `CREDIT_GUARDRAIL: ${reasons.join(' · ')}. Collect overdue payment or enable Admin Override with a reason.`,
+    );
+  }
+
   async create(
     auth: { userId: string; tenantId: string },
     dto: CreateInvoiceDto,
+    options?: { skipCreditGuardrail?: boolean },
   ) {
     if (!dto.clientName?.trim()) {
       throw new BadRequestException('Client / company name is required.');
@@ -774,7 +1037,21 @@ export class InvoicesService {
     const slugCode = generatedNumber.toLowerCase().replace(/[^a-z0-9]/g, '');
     const paymentLink = `https://rzp.io/i/leadsetu-${slugCode}`;
 
-    const defaultDue = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    let creditCheck = { creditTermDays: 15, overrideActorName: '' };
+    if (!options?.skipCreditGuardrail) {
+      creditCheck = await this.assertBuyerCreditEligibility(auth, {
+        clientName: dto.clientName.trim(),
+        gstin: dto.gstin,
+        newAmount: docType === 'proforma_quote' ? 0 : computed.grandTotal,
+        status,
+        overrideCreditHold: dto.overrideCreditHold,
+        overrideReason: dto.overrideReason,
+      });
+    }
+
+    const defaultDue = new Date(
+      Date.now() + Math.max(0, creditCheck.creditTermDays || 15) * 24 * 60 * 60 * 1000,
+    )
       .toISOString()
       .slice(0, 10);
 
@@ -815,6 +1092,10 @@ export class InvoicesService {
       linkedLeadId: dto.linkedLeadId?.trim() || '',
       publicToken: `lsq_${randomBytes(10).toString('hex')}`,
       quoteApprovalStatus: 'pending',
+      creditOverrideBy: creditCheck.overrideActorName || '',
+      creditOverrideReason: creditCheck.overrideActorName
+        ? dto.overrideReason?.trim() || ''
+        : '',
     });
 
     await this.auditService?.record({
@@ -1124,6 +1405,7 @@ export class InvoicesService {
   async convertQuoteToInvoice(
     auth: { userId: string; tenantId: string },
     quoteId: string,
+    override?: { overrideCreditHold?: boolean; overrideReason?: string },
   ) {
     if (!Types.ObjectId.isValid(quoteId)) {
       throw new NotFoundException('Proforma quotation not found.');
@@ -1163,13 +1445,24 @@ export class InvoicesService {
       }
     }
 
+    const creditCheck = await this.assertBuyerCreditEligibility(auth, {
+      clientName: quote.clientName,
+      gstin: quote.gstin,
+      newAmount: quote.grandTotal || 0,
+      status: 'sent',
+      overrideCreditHold: override?.overrideCreditHold,
+      overrideReason: override?.overrideReason,
+    });
+
     const taxCount = await this.invoiceModel.countDocuments({
       tenantId: tenantObjectId,
       docType: 'tax_invoice',
     });
     const invoiceNumber = `INV-2026-${String(1001 + taxCount).padStart(4, '0')}`;
     const slugCode = invoiceNumber.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const defaultDue = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    const defaultDue = new Date(
+      Date.now() + Math.max(0, creditCheck.creditTermDays || 15) * 24 * 60 * 60 * 1000,
+    )
       .toISOString()
       .slice(0, 10);
 
@@ -1195,6 +1488,9 @@ export class InvoicesService {
       igstAmount: quote.igstAmount,
       gstAmount: quote.gstAmount,
       grandTotal: quote.grandTotal,
+      amountPaid: 0,
+      tdsDeducted: 0,
+      balanceDue: quote.grandTotal,
       status: 'sent',
       paymentMethod: 'unpaid',
       paymentLink: `https://rzp.io/i/leadsetu-${slugCode}`,
@@ -1207,6 +1503,10 @@ export class InvoicesService {
       approvedByName: quote.approvedByName || '',
       approvedAt: quote.approvedAt || '',
       convertedFromQuoteId: quote._id.toString(),
+      creditOverrideBy: creditCheck.overrideActorName || '',
+      creditOverrideReason: creditCheck.overrideActorName
+        ? override?.overrideReason?.trim() || ''
+        : '',
     });
 
     quote.convertedToInvoiceId = newInvoice._id.toString();
@@ -1496,7 +1796,7 @@ export class InvoicesService {
 
     const created = [];
     for (const s of samples) {
-      const inv = await this.create(auth, s);
+      const inv = await this.create(auth, s, { skipCreditGuardrail: true });
       if (s.invoiceNumber === 'INV-2026-1002') {
         const withPartial = await this.recordPayment(auth, inv.id, {
           amountPaid: 150000,
@@ -1512,5 +1812,865 @@ export class InvoicesService {
       }
     }
     return { count: created.length, data: created };
+  }
+
+  private composeChaserMessage(params: {
+    invoiceNumber: string;
+    clientName: string;
+    contactPerson?: string;
+    balanceDue: number;
+    daysOverdue: number;
+    dueDate?: string;
+    tone: 'polite' | 'firm' | 'urgent' | 'final_hold';
+    language: 'hinglish' | 'hindi' | 'english';
+    upiLink: string;
+    paymentLink: string;
+    bankAccountNote: string;
+  }) {
+    const greetingName =
+      params.contactPerson?.trim() || params.clientName || 'Sir/Ma’am';
+    const amt = `₹${Math.round(params.balanceDue).toLocaleString('en-IN')}`;
+    const dueLabel = params.dueDate || 'due date';
+
+    if (params.language === 'english') {
+      const opener =
+        params.tone === 'polite'
+          ? `Hello ${greetingName}, gentle reminder for Invoice ${params.invoiceNumber} (${amt}), due on ${dueLabel}.`
+          : params.tone === 'firm'
+            ? `Hello ${greetingName}, Invoice ${params.invoiceNumber} for ${amt} is overdue by ${params.daysOverdue} days (due ${dueLabel}). Kindly release NEFT/UPI today.`
+            : params.tone === 'urgent'
+              ? `Urgent Accounts Notice (${greetingName}): Invoice ${params.invoiceNumber} (${amt}) is ${params.daysOverdue} days overdue. Please clear immediately to keep dispatch uninterrupted.`
+              : `FINAL CREDIT HOLD NOTICE (${greetingName}): ${amt} against ${params.invoiceNumber} is overdue by ${params.daysOverdue} days. New quotations/dispatches are paused until settlement.`;
+
+      return `${opener}\nPay via UPI/Card: ${params.paymentLink}\nUPI Deep Link: ${params.upiLink}\nBank NEFT: ${params.bankAccountNote}`;
+    }
+
+    const openerHinglish =
+      params.tone === 'polite'
+        ? `Namaste ${greetingName} ji, Invoice ${params.invoiceNumber} ka ${amt} balance due (${dueLabel}) ka gentle reminder.`
+        : params.tone === 'firm'
+          ? `Namaste ${greetingName} ji, Invoice ${params.invoiceNumber} ka ${amt} payment ${params.daysOverdue} din overdue ho gaya hai (due ${dueLabel}). Please aaj NEFT/UPI release karwa dijiye.`
+          : params.tone === 'urgent'
+            ? `Urgent Reminder ${greetingName} ji: ${params.clientName} ka Invoice ${params.invoiceNumber} (${amt}) ${params.daysOverdue} din se pending hai. Next dispatch smooth rakhne ke liye aaj settlement kar dein.`
+            : `FINAL CREDIT HOLD ALERT (${greetingName} ji): ${params.clientName} ka ${amt} (${params.invoiceNumber}) ${params.daysOverdue} din overdue hai. Settlement hone tak naye quotes aur dispatch Credit Hold par rahenge.`;
+
+    return `${openerHinglish}\nInstant Pay Link: ${params.paymentLink}\nUPI App: ${params.upiLink}\nNEFT/RTGS: ${params.bankAccountNote}`;
+  }
+
+  async getRecoveryOverview(auth: { userId: string; tenantId: string }) {
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+    const db = this.invoiceModel.db;
+    const [invoices, contacts, recoveryConfig, maskPhones] = await Promise.all([
+      this.invoiceModel.find({ tenantId: tenantOid }).sort({ createdAt: -1 }).exec(),
+      db
+        ? db
+            .collection('contacts')
+            .find({ tenantId: tenantOid })
+            .sort({ createdAt: -1 })
+            .toArray()
+        : Promise.resolve([]),
+      this.getTenantRecoveryConfig(auth.tenantId),
+      this.auditService
+        ? this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
+        : Promise.resolve(false),
+    ]);
+
+    const dtos = invoices.map((d) => this.toDto(d, maskPhones));
+    const activeTaxInvoices = dtos.filter(
+      (i) => i.docType !== 'proforma_quote' && i.status !== 'cancelled',
+    );
+    const openInvoices = activeTaxInvoices.filter((i) => i.balanceDue > 0);
+    const overdueInvoices = openInvoices.filter(
+      (i) => i.status === 'overdue' || (i.daysOverdue ?? 0) > 0,
+    );
+    const brokenPtps = openInvoices.filter((i) => i.isPtpBroken);
+    const activePtps = openInvoices.filter(
+      (i) => i.promisedPaymentDate && !i.isPtpBroken,
+    );
+
+    const totalInvoiced = activeTaxInvoices.reduce(
+      (s, i) => s + (Number(i.grandTotal) || 0),
+      0,
+    );
+    const totalSettled = activeTaxInvoices.reduce(
+      (s, i) => s + (Number(i.totalSettled) || 0),
+      0,
+    );
+    const totalOpenUdhaar = openInvoices.reduce(
+      (s, i) => s + (Number(i.balanceDue) || 0),
+      0,
+    );
+    const overdueUdhaar = overdueInvoices.reduce(
+      (s, i) => s + (Number(i.balanceDue) || 0),
+      0,
+    );
+
+    // Build unified Buyer Credit Risk Ledger across contacts & invoice parties
+    type LedgerRow = {
+      contactId: string;
+      buyerName: string;
+      contactPerson: string;
+      phone: string;
+      gstin: string;
+      gstinStatus: string;
+      creditLimitInr: number;
+      creditTermDays: number;
+      creditHold: boolean;
+      creditHoldReason: string;
+      openBalanceInr: number;
+      overdueBalanceInr: number;
+      maxOverdueDays: number;
+      openInvoicesCount: number;
+      utilizationPct: number;
+      riskLevel: 'hold' | 'critical' | 'warning' | 'healthy';
+    };
+
+    const contactByGstin = new Map<string, Record<string, unknown>>();
+    const contactByName = new Map<string, Record<string, unknown>>();
+    const ledgerMap = new Map<string, LedgerRow>();
+
+    for (const c of contacts) {
+      const id = String(c._id);
+      const gst = String(c.gstin || '').trim().toUpperCase();
+      const buyerName = String(c.company || c.name || '').trim();
+      const rowKey = gst || buyerName.toLowerCase() || id;
+      if (gst) contactByGstin.set(gst, c);
+      if (buyerName) contactByName.set(buyerName.toLowerCase(), c);
+      if (c.name) contactByName.set(String(c.name).trim().toLowerCase(), c);
+
+      ledgerMap.set(rowKey, {
+        contactId: id,
+        buyerName: buyerName || String(c.name || 'Buyer'),
+        contactPerson: String(c.name || ''),
+        phone: maskPhones
+          ? maskPhoneNumber(String(c.phone || ''))
+          : String(c.phone || ''),
+        gstin: gst,
+        gstinStatus: String(c.gstinStatus || (gst ? 'unverified' : 'unverified')),
+        creditLimitInr: Math.max(0, Number(c.creditLimitInr) || 0),
+        creditTermDays: Number(c.creditTermDays ?? 15),
+        creditHold: Boolean(c.creditHold),
+        creditHoldReason: String(c.creditHoldReason || ''),
+        openBalanceInr: 0,
+        overdueBalanceInr: 0,
+        maxOverdueDays: 0,
+        openInvoicesCount: 0,
+        utilizationPct: 0,
+        riskLevel: c.creditHold ? 'hold' : 'healthy',
+      });
+    }
+
+    for (const inv of openInvoices) {
+      const gst = String(inv.gstin || '').trim().toUpperCase();
+      const matchedContact =
+        (gst && contactByGstin.get(gst)) ||
+        contactByName.get(inv.clientName.trim().toLowerCase());
+      const matchedGst = String(matchedContact?.gstin || gst).trim().toUpperCase();
+      const matchedName = String(
+        matchedContact?.company || matchedContact?.name || inv.clientName,
+      ).trim();
+      const rowKey = matchedGst || matchedName.toLowerCase();
+
+      if (!ledgerMap.has(rowKey)) {
+        ledgerMap.set(rowKey, {
+          contactId: matchedContact ? String(matchedContact._id) : '',
+          buyerName: matchedName,
+          contactPerson: inv.contactPerson || '',
+          phone: inv.phone || '',
+          gstin: matchedGst,
+          gstinStatus: String(matchedContact?.gstinStatus || 'unverified'),
+          creditLimitInr: Math.max(0, Number(matchedContact?.creditLimitInr) || 0),
+          creditTermDays: Number(matchedContact?.creditTermDays ?? 15),
+          creditHold: Boolean(matchedContact?.creditHold),
+          creditHoldReason: String(matchedContact?.creditHoldReason || ''),
+          openBalanceInr: 0,
+          overdueBalanceInr: 0,
+          maxOverdueDays: 0,
+          openInvoicesCount: 0,
+          utilizationPct: 0,
+          riskLevel: matchedContact?.creditHold ? 'hold' : 'healthy',
+        });
+      }
+
+      const row = ledgerMap.get(rowKey)!;
+      row.openBalanceInr += inv.balanceDue;
+      row.openInvoicesCount += 1;
+      const days = Number(inv.daysOverdue) || 0;
+      if (days > 0 || inv.status === 'overdue') {
+        row.overdueBalanceInr += inv.balanceDue;
+        if (days > row.maxOverdueDays) row.maxOverdueDays = days;
+      }
+    }
+
+    const creditRiskLedger = Array.from(ledgerMap.values())
+      .map((r) => {
+        const utilizationPct =
+          r.creditLimitInr > 0
+            ? Math.round((r.openBalanceInr / r.creditLimitInr) * 100)
+            : 0;
+        let riskLevel: LedgerRow['riskLevel'] = 'healthy';
+        if (r.creditHold) {
+          riskLevel = 'hold';
+        } else if (
+          r.maxOverdueDays >= recoveryConfig.autoHoldAfterDays ||
+          utilizationPct >= 100
+        ) {
+          riskLevel = 'critical';
+        } else if (r.overdueBalanceInr > 0 || utilizationPct >= 80) {
+          riskLevel = 'warning';
+        }
+        return { ...r, utilizationPct, riskLevel };
+      })
+      .sort(
+        (a, b) =>
+          b.overdueBalanceInr - a.overdueBalanceInr ||
+          b.openBalanceInr - a.openBalanceInr,
+      );
+
+    return {
+      kpis: {
+        totalOpenUdhaar,
+        overdueUdhaar,
+        overdueCount: overdueInvoices.length,
+        brokenPromisesCount: brokenPtps.length,
+        activePromisesCount: activePtps.length,
+        blockedAccountsCount: creditRiskLedger.filter((r) => r.creditHold).length,
+        recoveryRatePct:
+          totalInvoiced > 0
+            ? Math.round((totalSettled / totalInvoiced) * 100)
+            : 100,
+      },
+      recoveryConfig,
+      creditRiskLedger,
+      overdueQueue: overdueInvoices.map((i) => ({
+        ...i,
+        upiLink: this.buildUpiLink(
+          recoveryConfig.upiId,
+          recoveryConfig.merchantName,
+          i.invoiceNumber,
+          i.balanceDue,
+        ),
+      })),
+      promisesQueue: [...brokenPtps, ...activePtps],
+    };
+  }
+
+  async updateRecoveryConfig(
+    auth: { userId: string; tenantId: string },
+    dto: UpdateRecoveryConfigDto,
+  ) {
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+    const db = this.invoiceModel.db;
+    if (db && Types.ObjectId.isValid(auth.userId)) {
+      const viewer = await db.collection('users').findOne({
+        _id: new Types.ObjectId(auth.userId),
+        tenantId: tenantOid,
+      });
+      const role = String(viewer?.role || '').toLowerCase();
+      if (!['owner', 'admin', 'super_admin', 'manager'].includes(role)) {
+        throw new ForbiddenException(
+          'Only Workspace Admin/Owner can update Udhaar Recovery & UPI settings.',
+        );
+      }
+    }
+
+    const current = await this.getTenantRecoveryConfig(auth.tenantId);
+    const nextConfig = {
+      upiId: dto.upiId !== undefined ? dto.upiId.trim() : current.upiId,
+      merchantName:
+        dto.merchantName !== undefined
+          ? dto.merchantName.trim()
+          : current.merchantName,
+      autoChasersEnabled:
+        dto.autoChasersEnabled !== undefined
+          ? Boolean(dto.autoChasersEnabled)
+          : current.autoChasersEnabled,
+      autoHoldAfterDays:
+        dto.autoHoldAfterDays !== undefined
+          ? Math.max(1, Math.min(180, Number(dto.autoHoldAfterDays) || 30))
+          : current.autoHoldAfterDays,
+      bankAccountNote:
+        dto.bankAccountNote !== undefined
+          ? dto.bankAccountNote.trim()
+          : current.bankAccountNote,
+    };
+
+    await db
+      ?.collection('tenants')
+      .updateOne(
+        { _id: tenantOid },
+        { $set: { creditRecoveryConfig: nextConfig } },
+      );
+
+    await this.auditService?.record({
+      tenantId: auth.tenantId,
+      actorId: auth.userId,
+      action: 'invoice.recovery_config_updated',
+      entityType: 'invoice',
+      entityId: auth.tenantId,
+      entityLabel: nextConfig.upiId,
+      summary: `Updated Udhaar recovery policy: UPI ${nextConfig.upiId}, Auto-hold at ${nextConfig.autoHoldAfterDays} overdue days`,
+    });
+
+    return nextConfig;
+  }
+
+  async recordPromiseToPay(
+    auth: { userId: string; tenantId: string },
+    id: string,
+    dto: RecordPromiseToPayDto,
+  ) {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new NotFoundException('Invoice not found.');
+    }
+    const doc = await this.invoiceModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        tenantId: new Types.ObjectId(auth.tenantId),
+      })
+      .exec();
+    if (!doc) throw new NotFoundException('Invoice not found.');
+
+    const settlement = this.computeSettlement(doc);
+    doc.promisedPaymentDate = String(dto.promisedPaymentDate || '').trim();
+    doc.promisedAmount = Math.max(
+      0,
+      Math.round(Number(dto.promisedAmount ?? settlement.balanceDue) || 0),
+    );
+    doc.ptpNote = String(dto.ptpNote || '').trim();
+    doc.ptpUpdatedAt = new Date().toISOString();
+    await doc.save();
+
+    await this.auditService?.record({
+      tenantId: auth.tenantId,
+      actorId: auth.userId,
+      action: 'invoice.ptp_recorded',
+      entityType: 'invoice',
+      entityId: doc._id.toString(),
+      entityLabel: `${doc.invoiceNumber} · ${doc.clientName}`,
+      summary: `Logged Promise-to-Pay ₹${doc.promisedAmount.toLocaleString('en-IN')} by ${doc.promisedPaymentDate} on ${doc.invoiceNumber}`,
+    });
+
+    const maskPhones = this.auditService
+      ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
+      : false;
+    return this.toDto(doc, maskPhones);
+  }
+
+  async sendRecoveryChaser(
+    auth: { userId: string; tenantId: string },
+    id: string,
+    dto: SendRecoveryChaserDto,
+  ) {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new NotFoundException('Invoice not found.');
+    }
+    const doc = await this.invoiceModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        tenantId: new Types.ObjectId(auth.tenantId),
+      })
+      .exec();
+    if (!doc) throw new NotFoundException('Invoice not found.');
+
+    const settlement = this.computeSettlement(doc);
+    if (settlement.balanceDue <= 0) {
+      throw new BadRequestException('Invoice has ₹0 balance due.');
+    }
+
+    await this.superAdminService?.consumeTenantQuota(
+      auth.tenantId,
+      'whatsapp',
+      1,
+    );
+
+    const config = await this.getTenantRecoveryConfig(auth.tenantId);
+    const aging = this.computeAging(doc.status, doc.dueDate);
+    const autoTone: 'polite' | 'firm' | 'urgent' | 'final_hold' =
+      aging.daysOverdue >= config.autoHoldAfterDays
+        ? 'final_hold'
+        : aging.daysOverdue >= 15
+          ? 'urgent'
+          : aging.daysOverdue >= 5
+            ? 'firm'
+            : 'polite';
+    const tone = dto.tone || autoTone;
+    const language = dto.language || 'hinglish';
+    const upiLink = this.buildUpiLink(
+      config.upiId,
+      config.merchantName,
+      doc.invoiceNumber,
+      settlement.balanceDue,
+    );
+
+    const aiToneMap: Record<
+      'polite' | 'firm' | 'urgent' | 'final_hold',
+      'gentle' | 'firm' | 'overdue_alert' | 'final_warning'
+    > = {
+      polite: 'gentle',
+      firm: 'firm',
+      urgent: 'overdue_alert',
+      final_hold: 'final_warning',
+    };
+
+    let message = dto.customMessage?.trim() || '';
+    if (!message && this.aiBridge) {
+      const aiDraft = await this.aiBridge.draftUdhaarReminder({
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        context: {
+          dealerName: doc.clientName,
+          contactPerson: doc.contactPerson,
+          invoiceNumber: doc.invoiceNumber,
+          overdueInr: settlement.balanceDue,
+          overdueDays: aging.daysOverdue,
+          tone: aiToneMap[tone],
+          language,
+          paymentLink: upiLink || doc.paymentLink || '',
+          companyName: config.merchantName,
+        },
+      });
+      if (aiDraft?.result?.trim()) {
+        message = aiDraft.result.trim();
+      }
+    }
+
+    if (!message) {
+      message = this.composeChaserMessage({
+        invoiceNumber: doc.invoiceNumber,
+        clientName: doc.clientName,
+        contactPerson: doc.contactPerson,
+        balanceDue: settlement.balanceDue,
+        daysOverdue: aging.daysOverdue,
+        dueDate: doc.dueDate,
+        tone,
+        language,
+        upiLink,
+        paymentLink: doc.paymentLink || '',
+        bankAccountNote: config.bankAccountNote,
+      });
+    }
+
+    const stageMap: Record<
+      'polite' | 'firm' | 'urgent' | 'final_hold',
+      Invoice['chaserStage']
+    > = {
+      polite: 'day_3_polite',
+      firm: 'day_7_firm',
+      urgent: 'day_15_urgent',
+      final_hold: 'day_30_hold',
+    };
+
+    const viewer = Types.ObjectId.isValid(auth.userId)
+      ? await this.invoiceModel.db
+          ?.collection('users')
+          .findOne({ _id: new Types.ObjectId(auth.userId) })
+      : null;
+    const sentBy = String(viewer?.name || viewer?.email || 'Accounts Team');
+    const nowIso = new Date().toISOString();
+
+    doc.chaserStage = stageMap[tone];
+    doc.lastChaserSentAt = nowIso;
+    doc.chaserCount = (Number(doc.chaserCount) || 0) + 1;
+    doc.chaserHistory = [
+      {
+        id: `chs-${Date.now()}-${randomBytes(3).toString('hex')}`,
+        stage: doc.chaserStage,
+        channel: 'whatsapp',
+        message,
+        upiLink,
+        sentBy,
+        sentAt: nowIso,
+      },
+      ...(Array.isArray(doc.chaserHistory) ? doc.chaserHistory : []),
+    ].slice(0, 20);
+    await doc.save();
+
+    // Push into buyer's Unified WhatsApp Inbox thread if phone matches
+    const cleanDigits = String(doc.phone || '').replace(/\D/g, '').slice(-10);
+    if (cleanDigits.length >= 10 && this.invoiceModel.db) {
+      try {
+        await this.invoiceModel.db.collection('conversations').updateOne(
+          {
+            tenantId: new Types.ObjectId(auth.tenantId),
+            phone: { $regex: cleanDigits },
+          },
+          {
+            $set: {
+              lastMessage: message.slice(0, 140),
+              lastMessageAt: nowIso,
+            },
+            $push: {
+              messages: {
+                id: `msg-${Date.now()}-${randomBytes(3).toString('hex')}`,
+                direction: 'outbound',
+                content: message,
+                senderName: `${sentBy} (Udhaar Bot)`,
+                status: 'delivered',
+                isAiDrafted: true,
+                createdAt: nowIso,
+              },
+            },
+          } as Record<string, unknown>,
+        );
+      } catch {
+        // Non-blocking inbox log
+      }
+    }
+
+    await this.auditService?.record({
+      tenantId: auth.tenantId,
+      actorId: auth.userId,
+      action: 'invoice.chaser_sent',
+      entityType: 'invoice',
+      entityId: doc._id.toString(),
+      entityLabel: `${doc.invoiceNumber} · ${doc.clientName}`,
+      summary: `Sent ${tone.toUpperCase()} WhatsApp + UPI Udhaar chaser on ${doc.invoiceNumber} for ₹${settlement.balanceDue.toLocaleString('en-IN')}`,
+    });
+
+    const maskPhones = this.auditService
+      ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
+      : false;
+    return {
+      invoice: this.toDto(doc, maskPhones),
+      chaserMessage: message,
+      upiLink,
+    };
+  }
+
+  async runBatchChasers(auth: { userId: string; tenantId: string }) {
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+    const config = await this.getTenantRecoveryConfig(auth.tenantId);
+    const openDocs = await this.invoiceModel
+      .find({
+        tenantId: tenantOid,
+        docType: { $ne: 'proforma_quote' },
+        status: { $nin: ['paid', 'cancelled'] },
+      })
+      .exec();
+
+    const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
+    let sentCount = 0;
+    let autoHoldCount = 0;
+    const processed: string[] = [];
+
+    for (const doc of openDocs) {
+      if (sentCount >= 25) break;
+      const st = this.computeSettlement(doc);
+      if (st.balanceDue <= 0) continue;
+      const aging = this.computeAging(doc.status, doc.dueDate);
+      if (aging.daysOverdue <= 0) continue;
+
+      if (doc.lastChaserSentAt) {
+        const lastMs = new Date(doc.lastChaserSentAt).getTime();
+        if (Number.isFinite(lastMs) && lastMs > cutoffMs) {
+          continue;
+        }
+      }
+
+      await this.sendRecoveryChaser(auth, doc._id.toString(), {
+        language: 'hinglish',
+      });
+      sentCount += 1;
+      processed.push(doc.invoiceNumber);
+
+      if (aging.daysOverdue >= config.autoHoldAfterDays) {
+        const contact = await this.findMatchingBuyerContact(
+          auth.tenantId,
+          doc.clientName,
+          doc.gstin,
+        );
+        if (contact && !contact.creditHold && this.invoiceModel.db) {
+          await this.invoiceModel.db.collection('contacts').updateOne(
+            { _id: contact._id },
+            {
+              $set: {
+                creditHold: true,
+                creditHoldReason: `Auto-Hold: Invoice ${doc.invoiceNumber} overdue ${aging.daysOverdue} days`,
+              },
+            },
+          );
+          autoHoldCount += 1;
+        }
+      }
+    }
+
+    return {
+      sentCount,
+      autoHoldCount,
+      processedInvoices: processed,
+    };
+  }
+
+  async exportTallyXml(auth: { userId: string; tenantId: string; email: string }) {
+    const db = this.invoiceModel.db;
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+    if (db && Types.ObjectId.isValid(auth.userId)) {
+      const [tenant, viewer] = await Promise.all([
+        db.collection('tenants').findOne({ _id: tenantOid }),
+        db.collection('users').findOne({ _id: new Types.ObjectId(auth.userId) }),
+      ]);
+      const blockAgent = tenant?.blockAgentExport !== false;
+      if (blockAgent && viewer?.role === 'agent') {
+        throw new ForbiddenException(
+          'TallyPrime XML exports are restricted by your workspace Anti-Data-Leak Shield.',
+        );
+      }
+    }
+
+    const docs = await this.invoiceModel
+      .find({ tenantId: tenantOid, docType: 'tax_invoice', status: { $ne: 'cancelled' } })
+      .sort({ createdAt: -1 })
+      .exec();
+
+    const xmlEscape = (v: unknown) =>
+      String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+
+    const tallyDate = (iso?: string) => {
+      const clean = String(iso || new Date().toISOString()).slice(0, 10).replace(/-/g, '');
+      return /^\d{8}$/.test(clean) ? clean : '20261115';
+    };
+
+    const vouchers: string[] = [];
+    for (const d of docs) {
+      const dto = this.toDto(d, false);
+      const vDate = tallyDate(dto.createdAt);
+      const party = xmlEscape(dto.clientName);
+
+      // 1) Tally Sales Voucher
+      const taxEntries =
+        dto.taxType === 'igst'
+          ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>Output IGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${dto.igstAmount.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>`
+          : `<ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${dto.cgstAmount.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST><ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${dto.sgstAmount.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>`;
+
+      vouchers.push(`
+    <TALLYMESSAGE xmlns:UDF="TallyUDF">
+      <VOUCHER VCHTYPE="Sales" ACTION="Create">
+        <DATE>${vDate}</DATE>
+        <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+        <VOUCHERNUMBER>${xmlEscape(dto.invoiceNumber)}</VOUCHERNUMBER>
+        <PARTYLEDGERNAME>${party}</PARTYLEDGERNAME>
+        <PARTYGSTIN>${xmlEscape(dto.gstin || '')}</PARTYGSTIN>
+        <NARRATION>${xmlEscape(`Leadsetu GST Sales ${dto.invoiceNumber} · ${dto.placeOfSupply}`)}</NARRATION>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>${party}</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-${dto.grandTotal.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>B2B Sales Account</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${dto.taxableAmount.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>
+        ${taxEntries}
+      </VOUCHER>
+    </TALLYMESSAGE>`);
+
+      // 2) Tally Receipt + TDS Vouchers for recorded settlements
+      for (const p of dto.payments || []) {
+        const pDate = tallyDate(p.paymentDate || p.recordedAt);
+        const bankLedger =
+          p.paymentMode === 'Cash'
+            ? 'Cash-in-Hand'
+            : `Bank Receipt (${p.paymentMode})`;
+        const tdsEntry =
+          p.tdsDeducted > 0
+            ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>TDS Receivable (Buyer Deducted)</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-${p.tdsDeducted.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>`
+            : '';
+
+        vouchers.push(`
+    <TALLYMESSAGE xmlns:UDF="TallyUDF">
+      <VOUCHER VCHTYPE="Receipt" ACTION="Create">
+        <DATE>${pDate}</DATE>
+        <VOUCHERTYPENAME>Receipt</VOUCHERTYPENAME>
+        <VOUCHERNUMBER>${xmlEscape(p.utrOrChequeNo || p.id)}</VOUCHERNUMBER>
+        <PARTYLEDGERNAME>${party}</PARTYLEDGERNAME>
+        <NARRATION>${xmlEscape(`Receipt against ${dto.invoiceNumber} · ${p.paymentMode} ${p.utrOrChequeNo || ''}`)}</NARRATION>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>${party}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${p.totalSettled.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>${xmlEscape(bankLedger)}</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-${p.amountPaid.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>
+        ${tdsEntry}
+      </VOUCHER>
+    </TALLYMESSAGE>`);
+      }
+    }
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME></REQUESTDESC>
+      <REQUESTDATA>${vouchers.join('\n')}
+      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>`;
+
+    const filename = `Leadsetu-TallyPrime-Vouchers-${new Date().toISOString().slice(0, 10)}.xml`;
+
+    await this.auditService?.record({
+      tenantId: auth.tenantId,
+      actorId: auth.userId,
+      actorEmail: auth.email,
+      action: 'invoice.tally_xml_exported',
+      entityType: 'invoice',
+      entityId: auth.tenantId,
+      entityLabel: filename,
+      summary: `Exported TallyPrime XML (${docs.length} Sales + Receipt vouchers)`,
+    });
+
+    return {
+      filename,
+      voucherCount: vouchers.length,
+      xml,
+    };
+  }
+
+  async previewBankReconciliation(
+    auth: { userId: string; tenantId: string },
+    dto: BankStatementReconcileDto,
+  ) {
+    const entries = Array.isArray(dto?.entries) ? dto.entries : [];
+    if (entries.length === 0) {
+      throw new BadRequestException('Provide at least one bank statement credit entry.');
+    }
+
+    const openDocs = await this.invoiceModel
+      .find({
+        tenantId: new Types.ObjectId(auth.tenantId),
+        docType: { $ne: 'proforma_quote' },
+        status: { $nin: ['paid', 'cancelled'] },
+      })
+      .exec();
+
+    const openDtos = openDocs
+      .map((d) => this.toDto(d, false))
+      .filter((i) => i.balanceDue > 0);
+
+    const results = entries.map((entry, idx) => {
+      const creditAmount = Math.max(0, Math.round(Number(entry.creditAmount) || 0));
+      const narrationUpper = String(entry.narration || '').toUpperCase();
+      const utrUpper = String(entry.utrOrRef || '').toUpperCase();
+
+      let best: {
+        invoice: (typeof openDtos)[number];
+        score: number;
+        reasons: string[];
+        suggestedTds: number;
+      } | null = null;
+
+      for (const inv of openDtos) {
+        let score = 0;
+        const reasons: string[] = [];
+        const invNumUpper = inv.invoiceNumber.toUpperCase();
+        const words = inv.clientName
+          .toUpperCase()
+          .split(/\s+/)
+          .filter((w) => w.length >= 4 && !['PVT.', 'PVT', 'LTD.', 'LTD', 'INDIA'].includes(w));
+
+        if (narrationUpper.includes(invNumUpper)) {
+          score += 55;
+          reasons.push(`Narration mentions ${inv.invoiceNumber}`);
+        }
+        const matchedWords = words.filter((w) => narrationUpper.includes(w));
+        if (matchedWords.length > 0) {
+          score += Math.min(35, matchedWords.length * 20);
+          reasons.push(`Party keyword "${matchedWords[0]}" matched`);
+        }
+
+        let suggestedTds = 0;
+        if (creditAmount > 0 && creditAmount === inv.balanceDue) {
+          score += 45;
+          reasons.push('Exact ₹ balance due match');
+        } else if (creditAmount > 0 && creditAmount < inv.balanceDue) {
+          // Check common 2% or 10% TDS settlement fit
+          const tds2 = Math.round(inv.taxableAmount * 0.02);
+          const tds10 = Math.round(inv.taxableAmount * 0.1);
+          if (Math.abs(inv.balanceDue - creditAmount - tds2) <= 50) {
+            score += 40;
+            suggestedTds = inv.balanceDue - creditAmount;
+            reasons.push('Exact balance minus ~2% TDS');
+          } else if (Math.abs(inv.balanceDue - creditAmount - tds10) <= 50) {
+            score += 40;
+            suggestedTds = inv.balanceDue - creditAmount;
+            reasons.push('Exact balance minus ~10% TDS');
+          } else if (creditAmount <= inv.balanceDue) {
+            score += 15;
+            reasons.push('Fits partial installment against open balance');
+          }
+        }
+
+        if (
+          score > 0 &&
+          (!best || score > best.score)
+        ) {
+          best = { invoice: inv, score, reasons, suggestedTds };
+        }
+      }
+
+      const mode: 'UPI' | 'RTGS' | 'NEFT' = narrationUpper.includes('UPI')
+        ? 'UPI'
+        : narrationUpper.includes('RTGS')
+          ? 'RTGS'
+          : 'NEFT';
+
+      const confidence =
+        best && best.score >= 70
+          ? 'high'
+          : best && best.score >= 35
+            ? 'medium'
+            : 'unmatched';
+
+      return {
+        entryId: entry.id || `bnk-${idx + 1}`,
+        date: entry.date || new Date().toISOString().slice(0, 10),
+        narration: entry.narration || '',
+        utrOrRef: entry.utrOrRef || utrUpper,
+        creditAmount,
+        paymentMode: mode,
+        confidence,
+        matchedInvoiceId: best && confidence !== 'unmatched' ? best.invoice.id : '',
+        matchedInvoiceNumber:
+          best && confidence !== 'unmatched' ? best.invoice.invoiceNumber : '',
+        matchedClientName:
+          best && confidence !== 'unmatched' ? best.invoice.clientName : '',
+        openBalanceDue:
+          best && confidence !== 'unmatched' ? best.invoice.balanceDue : 0,
+        suggestedTds: best && confidence !== 'unmatched' ? best.suggestedTds : 0,
+        matchReasons: best ? best.reasons : ['No open invoice match found'],
+      };
+    });
+
+    return {
+      totalEntries: results.length,
+      matchedCount: results.filter((r) => r.confidence !== 'unmatched').length,
+      results,
+    };
+  }
+
+  async applyBankMatches(
+    auth: { userId: string; tenantId: string },
+    dto: ApplyBankMatchDto,
+  ) {
+    const matches = Array.isArray(dto?.matches) ? dto.matches : [];
+    if (matches.length === 0) {
+      throw new BadRequestException('Select at least one matched bank receipt to post.');
+    }
+
+    const updatedInvoices = [];
+    for (const m of matches) {
+      if (!m.invoiceId) continue;
+      const updated = await this.recordPayment(auth, m.invoiceId, {
+        amountPaid: m.amountPaid,
+        tdsDeducted: m.tdsDeducted || 0,
+        paymentMode: m.paymentMode || 'NEFT',
+        utrOrChequeNo: m.utrOrChequeNo,
+        paymentDate: m.paymentDate,
+        note: m.note || `Auto-reconciled from Bank Statement (${m.utrOrChequeNo})`,
+      });
+      updatedInvoices.push(updated);
+    }
+
+    return {
+      settledCount: updatedInvoices.length,
+      invoices: updatedInvoices,
+    };
   }
 }

@@ -16,7 +16,18 @@ export type FeatureKey =
   | 'documentVault'
   | 'apiWebhooks'
   | 'customRbac'
-  | 'auditShield';
+  | 'auditShield'
+  | 'aiCreditRisk'
+  | 'aiVoiceCrm'
+  | 'aiDealerDesk'
+  | 'aiCopilot';
+
+export const AI_PILLAR_FEATURE_KEYS = [
+  'aiCreditRisk',
+  'aiVoiceCrm',
+  'aiDealerDesk',
+  'aiCopilot',
+] as const;
 
 export interface FeatureSpec {
   key: FeatureKey;
@@ -86,6 +97,30 @@ export const PLATFORM_FEATURE_CATALOG: FeatureSpec[] = [
     category: 'Security & RBAC',
     description: 'Agent phone masking, bulk CSV export lock & immutable activity trail',
   },
+  {
+    key: 'aiCreditRisk',
+    label: 'Pillar 1 · Credit & Udhaar AI',
+    category: 'AI & Automation',
+    description: 'AI credit-risk scoring, Hinglish vaada extraction & Udhaar recovery drafts',
+  },
+  {
+    key: 'aiVoiceCrm',
+    label: 'Pillar 2 · Voice-to-CRM & Call Audit',
+    category: 'AI & Automation',
+    description: 'Hinglish call notes to CRM fields, follow-up tasks & compliance QA audit',
+  },
+  {
+    key: 'aiDealerDesk',
+    label: 'Pillar 3 · Dealer RFQ & Beat Planner',
+    category: 'AI & Automation',
+    description: 'WhatsApp multi-SKU RFQ parser & prioritized field beat route planner',
+  },
+  {
+    key: 'aiCopilot',
+    label: 'Ask AI · Tenant RAG Copilot',
+    category: 'AI & Automation',
+    description: 'Grounded Q&A over the workspace leads, deals, invoices & tasks',
+  },
 ];
 
 export interface PlanEntitlementSpec {
@@ -124,6 +159,10 @@ export const DEFAULT_PLAN_MATRIX: Record<
       apiWebhooks: true,
       customRbac: false,
       auditShield: false,
+      aiCreditRisk: true,
+      aiVoiceCrm: false,
+      aiDealerDesk: false,
+      aiCopilot: false,
     },
   },
   growth: {
@@ -146,6 +185,10 @@ export const DEFAULT_PLAN_MATRIX: Record<
       apiWebhooks: true,
       customRbac: true,
       auditShield: true,
+      aiCreditRisk: true,
+      aiVoiceCrm: true,
+      aiDealerDesk: true,
+      aiCopilot: true,
     },
   },
   enterprise: {
@@ -168,6 +211,10 @@ export const DEFAULT_PLAN_MATRIX: Record<
       apiWebhooks: true,
       customRbac: true,
       auditShield: true,
+      aiCreditRisk: true,
+      aiVoiceCrm: true,
+      aiDealerDesk: true,
+      aiCopilot: true,
     },
   },
 };

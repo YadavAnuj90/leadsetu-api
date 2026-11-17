@@ -5,7 +5,9 @@ import {
   Headers,
   HttpCode,
   HttpStatus,
+  Patch,
   Post,
+  Query,
   Req,
   Res,
 } from '@nestjs/common';
@@ -20,6 +22,7 @@ import {
 } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { AuthService, LoginInput, RegisterInput } from './auth.service';
+import { extractClientIp } from '../super-admin/tenant-security.guard';
 
 export class RegisterSwaggerDto implements RegisterInput {
   @ApiProperty({
@@ -169,9 +172,10 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'Invalid email or password.' })
   async login(
     @Body() body: LoginSwaggerDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const result = await this.authService.login(body);
+    const result = await this.authService.login(body, extractClientIp(req));
     return this.setRefreshCookieAndStrip(res, result);
   }
 
@@ -192,6 +196,7 @@ export class AuthController {
     const cookieToken = extractCookie(req.headers.cookie, REFRESH_COOKIE_NAME);
     const result = await this.authService.refresh(
       cookieToken || bodyFallbackToken,
+      extractClientIp(req),
     );
     return this.setRefreshCookieAndStrip(res, result);
   }
@@ -227,7 +232,62 @@ export class AuthController {
     description: 'Returns authenticated user and workspace tenant details.',
   })
   @ApiResponse({ status: 401, description: 'Missing or expired token.' })
-  async me(@Headers('authorization') authorization?: string) {
-    return this.authService.getProfileFromToken(authorization);
+  async me(
+    @Headers('authorization') authorization: string | undefined,
+    @Req() req: Request,
+  ) {
+    return this.authService.getProfileFromToken(authorization, extractClientIp(req));
+  }
+
+  @Get('invite-info')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Inspect a team invite link token before signing in or activating',
+  })
+  async inviteInfo(@Query('token') token?: string) {
+    return this.authService.getInviteInfo(token);
+  }
+
+  @Post('accept-invite')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Accept a workspace invite link with email & password (or set new password) and sign in',
+  })
+  async acceptInvite(
+    @Body()
+    body: {
+      token: string;
+      email: string;
+      password?: string;
+      newPassword?: string;
+      mode?: 'login' | 'set_password';
+    },
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.authService.acceptInvite(body, extractClientIp(req));
+    return this.setRefreshCookieAndStrip(res, result);
+  }
+
+  @Patch('profile')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Update the signed-in user profile (name, phone, territory)' })
+  async updateProfile(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: { name?: string; phone?: string; territory?: string },
+  ) {
+    return this.authService.updateSelfProfile(authorization, body);
+  }
+
+  @Post('change-password')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Change password for the signed-in user' })
+  async changePassword(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: { currentPassword: string; newPassword: string },
+  ) {
+    return this.authService.changePassword(authorization, body);
   }
 }

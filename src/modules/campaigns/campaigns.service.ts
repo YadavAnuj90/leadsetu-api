@@ -372,6 +372,14 @@ export class CampaignsService {
       dto.attributedRevenue,
     );
 
+    if (status === 'completed' && metrics.sentCount > 0) {
+      await this.superAdminService?.consumeTenantQuota(
+        auth.tenantId,
+        'whatsapp',
+        metrics.sentCount,
+      );
+    }
+
     const doc = await this.campaignModel.create({
       tenantId: tenantObjectId,
       ownerId: new Types.ObjectId(auth.userId),
@@ -412,6 +420,13 @@ export class CampaignsService {
       doc.audienceCount || 120,
       'completed',
     );
+    if (metrics.sentCount > 0) {
+      await this.superAdminService?.consumeTenantQuota(
+        auth.tenantId,
+        'whatsapp',
+        metrics.sentCount,
+      );
+    }
     doc.status = 'completed';
     doc.sentCount = metrics.sentCount;
     doc.deliveredCount = metrics.deliveredCount;

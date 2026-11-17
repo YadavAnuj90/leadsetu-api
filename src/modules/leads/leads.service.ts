@@ -289,6 +289,9 @@ export class LeadsService {
       ? await this.superAdminService.getTenantEffectiveState(auth.tenantId).catch(() => null)
       : null;
     const aiEnabled = eff?.effectiveFeatures?.aiScoring ?? true;
+    if (aiEnabled) {
+      await this.superAdminService?.consumeTenantQuota(auth.tenantId, 'ai', 1);
+    }
     const ai = aiEnabled
       ? this.computeAiIntelligence(dto)
       : {
@@ -415,6 +418,9 @@ export class LeadsService {
       ? await this.superAdminService.getTenantEffectiveState(auth.tenantId).catch(() => null)
       : null;
     if (!eff || eff.effectiveFeatures.aiScoring) {
+      if (dto.rescoreAi) {
+        await this.superAdminService?.consumeTenantQuota(auth.tenantId, 'ai', 1);
+      }
       const ai = this.computeAiIntelligence({
         source: doc.source,
         status: doc.status,

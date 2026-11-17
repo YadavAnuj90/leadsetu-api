@@ -251,6 +251,11 @@ export class InboxService {
       .exec();
     if (!doc) throw new NotFoundException('Conversation not found.');
 
+    await this.superAdminService?.consumeTenantQuota(auth.tenantId, 'whatsapp', 1);
+    if (body.isAiDrafted) {
+      await this.superAdminService?.consumeTenantQuota(auth.tenantId, 'ai', 1);
+    }
+
     const newMsg: ChatMessage = {
       id: randomBytes(6).toString('hex'),
       direction: 'outbound',

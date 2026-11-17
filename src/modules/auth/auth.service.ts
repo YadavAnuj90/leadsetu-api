@@ -15,10 +15,14 @@ import { randomBytes } from 'crypto';
 import { User, UserDocument } from './schemas/user.schema';
 import { Tenant, TenantDocument } from './schemas/tenant.schema';
 import { SuperAdminService } from '../super-admin/super-admin.service';
+import { isIpAllowed } from '../super-admin/tenant-security.guard';
 import {
   generateAccountId,
   generateUserCode,
   hashSecret,
+  normalizeIndianPhone,
+  normalizeUserFeatureAccess,
+  sha256Hex,
   verifySecret,
 } from './identity.util';
 
@@ -76,6 +80,38 @@ export class AuthService {
     return `${base || 'workspace'}-${suffix}`;
   }
 
+  private buildQuotaPayload(tenant: TenantDocument | null) {
+    if (!tenant) return undefined;
+    const q = tenant.quotas || {
+      maxMonthlyAiCalls: 2500,
+      maxMonthlyWhatsapp: 5000,
+      aiCallsUsed: 0,
+      whatsappUsed: 0,
+      maxStorageMb: 2048,
+    };
+    const aiLimit = Math.max(1, q.maxMonthlyAiCalls || 2500);
+    const waLimit = Math.max(1, q.maxMonthlyWhatsapp || 5000);
+    const aiUsed = q.aiCallsUsed || 0;
+    const waUsed = q.whatsappUsed || 0;
+    const aiPct = Math.round((aiUsed / aiLimit) * 100);
+    const waPct = Math.round((waUsed / waLimit) * 100);
+    return {
+      quotas: {
+        maxMonthlyAiCalls: q.maxMonthlyAiCalls || 2500,
+        maxMonthlyWhatsapp: q.maxMonthlyWhatsapp || 5000,
+        aiCallsUsed: aiUsed,
+        whatsappUsed: waUsed,
+        maxStorageMb: q.maxStorageMb || 2048,
+        aiPct,
+        waPct,
+        aiWarning: aiPct >= 80 && aiPct < 100,
+        waWarning: waPct >= 80 && waPct < 100,
+        aiExceeded: aiPct >= 100,
+        waExceeded: waPct >= 100,
+      },
+    };
+  }
+
   private async issueTokens(user: UserDocument, tenant: TenantDocument) {
     await this.ensureIdentityCodes(user, tenant);
 
@@ -84,6 +120,8 @@ export class AuthService {
       email: user.email,
       role: user.role,
       tenantId: tenant._id.toString(),
+      sv: user.sessionVersion ?? 1,
+      tsv: tenant.sessionVersion ?? 1,
     };
 
     const accessSecret =
@@ -93,10 +131,19 @@ export class AuthService {
       this.configService.get<string>('JWT_REFRESH_SECRET') ||
       'leadsetu_super_secret_refresh_key_2026_delhi_ncr';
 
+    const ttlHours = Math.max(
+      1,
+      Math.min(720, tenant.securityPolicy?.sessionTtlHours || 24),
+    );
+    const accessExpiresIn =
+      user.role === 'super_admin'
+        ? this.configService.get<string>('JWT_EXPIRES_IN') || '1d'
+        : `${ttlHours}h`;
+
     const [accessToken, refreshToken] = await Promise.all([
       this.jwtService.signAsync(payload, {
         secret: accessSecret,
-        expiresIn: this.configService.get<string>('JWT_EXPIRES_IN') || '1d',
+        expiresIn: accessExpiresIn,
       }),
       this.jwtService.signAsync(payload, {
         secret: refreshSecret,
@@ -120,6 +167,13 @@ export class AuthService {
           user.role === 'agent'),
     );
 
+    const rawUser = user.toObject() as unknown as { createdAt?: Date };
+    const normalizedFeatures = normalizeUserFeatureAccess(
+      user.featureAccess,
+      user.role,
+      effectiveState?.effectiveFeatures,
+    );
+
     return {
       accessToken,
       refreshToken,
@@ -133,6 +187,12 @@ export class AuthService {
         role: user.role,
         departmentPreset: user.departmentPreset || 'sales',
         permissions: user.permissions || [],
+        featureAccess: normalizedFeatures,
+        territory: user.territory || '',
+        monthlyTarget: user.monthlyTarget || 0,
+        inviteStatus: user.inviteStatus || 'active',
+        lastLoginAt: user.lastLoginAt ? new Date(user.lastLoginAt).toISOString() : null,
+        createdAt: rawUser.createdAt ? new Date(rawUser.createdAt).toISOString() : null,
         maskPhones: viewerMasked,
       },
       tenant: {
@@ -156,6 +216,8 @@ export class AuthService {
         effectiveFeatureDetails: effectiveState?.effectiveFeatureDetails,
         globalKillSwitches: effectiveState?.globalKillSwitches,
         maintenanceMode: effectiveState?.maintenanceMode ?? false,
+        sessionTtlHours: tenant.securityPolicy?.sessionTtlHours || 24,
+        ...(this.buildQuotaPayload(tenant) || {}),
       },
     };
   }
@@ -231,7 +293,7 @@ export class AuthService {
     return this.issueTokens(user, tenant);
   }
 
-  async login(input: LoginInput) {
+  async login(input: LoginInput, clientIp = '') {
     const email = input.email?.trim().toLowerCase();
     const password = input.password;
 
@@ -271,19 +333,31 @@ export class AuthService {
       await user.save();
     }
 
-    if (user.role !== 'super_admin' && tenant.status === 'suspended') {
-      const reason = tenant.securityPolicy?.suspensionReason
-        ? ` Reason: ${tenant.securityPolicy.suspensionReason}`
-        : '';
-      throw new ForbiddenException(
-        `This workspace has been suspended by Leadsetu HQ.${reason} Please contact billing@leadsetu.in.`,
-      );
+    if (user.role !== 'super_admin') {
+      if (tenant.dpdpRetention?.purgedAt || tenant.dpdpRetention?.softDeletedAt) {
+        throw new ForbiddenException(
+          'This workspace is deactivated under DPDP erasure/retention policy.',
+        );
+      }
+      if (tenant.status === 'suspended') {
+        const reason = tenant.securityPolicy?.suspensionReason
+          ? ` Reason: ${tenant.securityPolicy.suspensionReason}`
+          : '';
+        throw new ForbiddenException(
+          `This workspace has been suspended by Leadsetu HQ.${reason} Please contact billing@leadsetu.in.`,
+        );
+      }
+      if (clientIp && !isIpAllowed(clientIp, tenant.securityPolicy?.ipAllowlist)) {
+        throw new ForbiddenException(
+          `Login blocked: Your IP (${clientIp}) is not on this workspace's IP Allowlist.`,
+        );
+      }
     }
 
     return this.issueTokens(user, tenant);
   }
 
-  async getProfileFromToken(authHeader?: string) {
+  async getProfileFromToken(authHeader?: string, clientIp = '') {
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       throw new UnauthorizedException('Missing or invalid authorization token.');
     }
@@ -296,6 +370,8 @@ export class AuthService {
     let payload: {
       sub: string;
       tenantId: string;
+      sv?: number;
+      tsv?: number;
       isImpersonation?: boolean;
       impersonatorEmail?: string;
     };
@@ -303,6 +379,8 @@ export class AuthService {
       payload = await this.jwtService.verifyAsync<{
         sub: string;
         tenantId: string;
+        sv?: number;
+        tsv?: number;
         isImpersonation?: boolean;
         impersonatorEmail?: string;
       }>(token, { secret: accessSecret });
@@ -315,9 +393,30 @@ export class AuthService {
       throw new UnauthorizedException('User no longer exists or is inactive.');
     }
 
+    if (
+      user.role !== 'super_admin' &&
+      !payload.isImpersonation &&
+      (payload.sv ?? 1) < (user.sessionVersion ?? 1)
+    ) {
+      throw new UnauthorizedException('Your session was revoked by security authority.');
+    }
+
     const tenant = await this.tenantModel.findById(user.tenantId).exec();
-    if (user.role !== 'super_admin' && tenant?.status === 'suspended' && !payload.isImpersonation) {
-      throw new ForbiddenException('This workspace has been suspended by Leadsetu HQ.');
+    if (user.role !== 'super_admin' && !payload.isImpersonation && tenant) {
+      if (tenant.dpdpRetention?.purgedAt || tenant.dpdpRetention?.softDeletedAt) {
+        throw new ForbiddenException('This workspace is queued for DPDP erasure.');
+      }
+      if (tenant.status === 'suspended') {
+        throw new ForbiddenException('This workspace has been suspended by Leadsetu HQ.');
+      }
+      if ((payload.tsv ?? 1) < (tenant.sessionVersion ?? 1)) {
+        throw new UnauthorizedException('All workspace sessions were revoked by security admin.');
+      }
+      if (clientIp && !isIpAllowed(clientIp, tenant.securityPolicy?.ipAllowlist)) {
+        throw new ForbiddenException(
+          `Access denied: Your IP (${clientIp}) is not on the workspace IP allowlist.`,
+        );
+      }
     }
 
     await this.ensureIdentityCodes(user, tenant);
@@ -335,6 +434,13 @@ export class AuthService {
           user.role === 'agent'),
     );
 
+    const rawUser = user.toObject() as unknown as { createdAt?: Date };
+    const normalizedFeatures = normalizeUserFeatureAccess(
+      user.featureAccess,
+      user.role,
+      effectiveState?.effectiveFeatures,
+    );
+
     return {
       user: {
         id: user._id.toString(),
@@ -346,6 +452,12 @@ export class AuthService {
         role: user.role,
         departmentPreset: user.departmentPreset || 'sales',
         permissions: user.permissions || [],
+        featureAccess: normalizedFeatures,
+        territory: user.territory || '',
+        monthlyTarget: user.monthlyTarget || 0,
+        inviteStatus: user.inviteStatus || 'active',
+        lastLoginAt: user.lastLoginAt ? new Date(user.lastLoginAt).toISOString() : null,
+        createdAt: rawUser.createdAt ? new Date(rawUser.createdAt).toISOString() : null,
         maskPhones: viewerMasked,
         isImpersonation: Boolean(payload.isImpersonation),
         impersonatorEmail: payload.impersonatorEmail || '',
@@ -372,12 +484,14 @@ export class AuthService {
             effectiveFeatureDetails: effectiveState?.effectiveFeatureDetails,
             globalKillSwitches: effectiveState?.globalKillSwitches,
             maintenanceMode: effectiveState?.maintenanceMode ?? false,
+            sessionTtlHours: tenant.securityPolicy?.sessionTtlHours || 24,
+            ...(this.buildQuotaPayload(tenant) || {}),
           }
         : null,
     };
   }
 
-  async refresh(refreshToken?: string) {
+  async refresh(refreshToken?: string, clientIp = '') {
     if (!refreshToken) {
       throw new UnauthorizedException('Refresh token is required.');
     }
@@ -386,11 +500,13 @@ export class AuthService {
       this.configService.get<string>('JWT_REFRESH_SECRET') ||
       'leadsetu_super_secret_refresh_key_2026_delhi_ncr';
 
-    let payload: { sub: string; tenantId: string };
+    let payload: { sub: string; tenantId: string; sv?: number; tsv?: number };
     try {
       payload = await this.jwtService.verifyAsync<{
         sub: string;
         tenantId: string;
+        sv?: number;
+        tsv?: number;
       }>(refreshToken, { secret: refreshSecret });
     } catch {
       throw new UnauthorizedException('Refresh token expired or invalid.');
@@ -410,8 +526,18 @@ export class AuthService {
     if (!tenant) {
       throw new UnauthorizedException('Workspace not found.');
     }
-    if (user.role !== 'super_admin' && tenant.status === 'suspended') {
-      throw new ForbiddenException('This workspace has been suspended by Leadsetu HQ.');
+    if (user.role !== 'super_admin') {
+      if (tenant.dpdpRetention?.purgedAt || tenant.dpdpRetention?.softDeletedAt) {
+        throw new ForbiddenException('This workspace is queued for DPDP erasure.');
+      }
+      if (tenant.status === 'suspended') {
+        throw new ForbiddenException('This workspace has been suspended by Leadsetu HQ.');
+      }
+      if (clientIp && !isIpAllowed(clientIp, tenant.securityPolicy?.ipAllowlist)) {
+        throw new ForbiddenException(
+          `Refresh blocked: Your IP (${clientIp}) is outside the workspace IP allowlist.`,
+        );
+      }
     }
 
     return this.issueTokens(user, tenant);
@@ -435,6 +561,183 @@ export class AuthService {
     } catch {
       // Ignore expired token on logout
     }
+    return { success: true };
+  }
+
+  async getInviteInfo(token?: string) {
+    const cleanToken = token?.trim();
+    if (!cleanToken) {
+      throw new BadRequestException('Invite token is required.');
+    }
+
+    const tokenHash = sha256Hex(cleanToken);
+    const user = await this.userModel.findOne({ inviteTokenHash: tokenHash }).exec();
+    if (!user) {
+      throw new BadRequestException(
+        'This invite link is invalid or has already been used.',
+      );
+    }
+    if (!user.isActive) {
+      throw new ForbiddenException('Your user account is currently deactivated.');
+    }
+    if (user.inviteExpiresAt && new Date(user.inviteExpiresAt).getTime() < Date.now()) {
+      throw new BadRequestException(
+        'This invite link has expired. Ask your workspace admin to resend the invite.',
+      );
+    }
+
+    const tenant = await this.tenantModel.findById(user.tenantId).exec();
+    if (!tenant) {
+      throw new BadRequestException('Workspace not found for this invite.');
+    }
+    const effectiveState = this.superAdminService
+      ? await this.superAdminService
+          .getTenantEffectiveState(tenant._id.toString())
+          .catch(() => null)
+      : null;
+
+    return {
+      valid: true,
+      name: user.name,
+      email: user.email,
+      phone: user.phone || '',
+      userCode: user.userCode || '',
+      role: user.role,
+      territory: user.territory || '',
+      inviteStatus: user.inviteStatus || 'pending',
+      workspaceName: tenant.name,
+      accountId: tenant.accountId || '',
+      featureAccess: normalizeUserFeatureAccess(
+        user.featureAccess,
+        user.role,
+        effectiveState?.effectiveFeatures,
+      ),
+    };
+  }
+
+  async acceptInvite(
+    input: {
+      token: string;
+      email: string;
+      password?: string;
+      newPassword?: string;
+      mode?: 'login' | 'set_password';
+    },
+    clientIp = '',
+  ) {
+    const cleanToken = input.token?.trim();
+    const email = input.email?.trim().toLowerCase();
+    if (!cleanToken || !email) {
+      throw new BadRequestException('Invite token and email address are required.');
+    }
+
+    const tokenHash = sha256Hex(cleanToken);
+    const user = await this.userModel.findOne({ inviteTokenHash: tokenHash }).exec();
+    if (!user) {
+      throw new BadRequestException(
+        'This invite link is invalid or has already been used.',
+      );
+    }
+    if (user.email.toLowerCase() !== email) {
+      throw new UnauthorizedException(
+        'The entered email does not match the invited email address.',
+      );
+    }
+    if (!user.isActive) {
+      throw new ForbiddenException('Your user account has been deactivated.');
+    }
+    if (user.inviteExpiresAt && new Date(user.inviteExpiresAt).getTime() < Date.now()) {
+      throw new BadRequestException(
+        'This invite link has expired. Please request a fresh invite from your admin.',
+      );
+    }
+
+    const tenant = await this.tenantModel.findById(user.tenantId).exec();
+    if (!tenant) {
+      throw new BadRequestException('Workspace not found.');
+    }
+    if (tenant.status === 'suspended') {
+      throw new ForbiddenException('This workspace is currently suspended.');
+    }
+    if (clientIp && !isIpAllowed(clientIp, tenant.securityPolicy?.ipAllowlist)) {
+      throw new ForbiddenException(
+        `Login blocked: Your IP (${clientIp}) is outside the workspace IP allowlist.`,
+      );
+    }
+
+    const useSetPassword =
+      input.mode === 'set_password' ||
+      (Boolean(input.newPassword) && !input.password);
+
+    if (useSetPassword) {
+      const nextPwd = input.newPassword || input.password || '';
+      if (nextPwd.length < 8) {
+        throw new BadRequestException('Password must be at least 8 characters long.');
+      }
+      user.passwordHash = this.hashSecret(nextPwd);
+    } else {
+      const pwd = input.password || '';
+      if (!pwd || !this.verifySecret(pwd, user.passwordHash)) {
+        throw new UnauthorizedException('Incorrect password for this invited email.');
+      }
+      if (input.newPassword && input.newPassword.length >= 8) {
+        user.passwordHash = this.hashSecret(input.newPassword);
+      }
+    }
+
+    user.inviteStatus = 'accepted';
+    user.inviteTokenHash = null;
+    user.inviteExpiresAt = null;
+    await user.save();
+
+    return this.issueTokens(user, tenant);
+  }
+
+  async updateSelfProfile(
+    authHeader: string | undefined,
+    input: { name?: string; phone?: string; territory?: string },
+  ) {
+    const profile = await this.getProfileFromToken(authHeader);
+    const user = await this.userModel.findById(profile.user.id).exec();
+    if (!user) throw new UnauthorizedException('User not found.');
+
+    if (input.name !== undefined) {
+      const cleanName = input.name.trim();
+      if (!cleanName) throw new BadRequestException('Name cannot be empty.');
+      user.name = cleanName;
+    }
+    if (input.phone !== undefined && input.phone.trim() !== '') {
+      const normalized = normalizeIndianPhone(input.phone);
+      if (!normalized) {
+        throw new BadRequestException(
+          'Enter a valid 10-digit Indian mobile number.',
+        );
+      }
+      user.phone = normalized;
+    }
+    if (input.territory !== undefined) {
+      user.territory = input.territory.trim();
+    }
+    await user.save();
+    return this.getProfileFromToken(authHeader);
+  }
+
+  async changePassword(
+    authHeader: string | undefined,
+    input: { currentPassword: string; newPassword: string },
+  ) {
+    const profile = await this.getProfileFromToken(authHeader);
+    const user = await this.userModel.findById(profile.user.id).exec();
+    if (!user) throw new UnauthorizedException('User not found.');
+
+    if (!input.currentPassword || !this.verifySecret(input.currentPassword, user.passwordHash)) {
+      throw new UnauthorizedException('Current password is incorrect.');
+    }
+    if (!input.newPassword || input.newPassword.length < 8) {
+      throw new BadRequestException('New password must be at least 8 characters.');
+    }
+    user.passwordHash = this.hashSecret(input.newPassword);
+    await user.save();
     return { success: true };
   }
 }

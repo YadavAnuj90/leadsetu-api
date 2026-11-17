@@ -2,6 +2,8 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   NotFoundException,
   OnModuleInit,
@@ -23,9 +25,11 @@ import {
   generateAccountId,
   generateUserCode,
   hashSecret,
+  verifySecret,
 } from '../auth/identity.util';
 import { PLAN_CATALOG } from '../tenants/tenants.service';
 import {
+  AI_PILLAR_FEATURE_KEYS,
   DEFAULT_DUNNING_POLICY,
   DEFAULT_GLOBAL_KILL_SWITCHES,
   DEFAULT_PLAN_MATRIX,
@@ -42,12 +46,18 @@ import {
   SaasPartnerDocument,
 } from './schemas/platform-config.schema';
 import {
+  BulkManageAiAuthorityDto,
   CreateSaasCouponDto,
   CreateSaasPartnerDto,
   CreateSuperAdminOperatorDto,
+  DpdpEraseTenantDto,
+  GrantQuotaAddonDto,
   ImpersonateTenantDto,
   IssueTenantSubscriptionDto,
+  ManageTenantAiAuthorityDto,
   PartnerPayoutDto,
+  ResolveTopupRequestDto,
+  RevokeTenantSessionsDto,
   SuperAdminActor,
   UpdateDunningPolicyDto,
   UpdatePlatformPoliciesDto,
@@ -56,6 +66,9 @@ import {
   UpdateTenantGovernanceDto,
   UpdateTenantUserRbacDto,
 } from './dto/super-admin.dto';
+
+const AI_UNIT_COST_INR = 0.35;
+const WA_UNIT_COST_INR = 0.88;
 
 const VALID_PLANS = ['starter', 'growth', 'enterprise'] as const;
 const VALID_STATUSES = ['trial', 'active', 'suspended'] as const;
@@ -361,7 +374,12 @@ export class SuperAdminService implements OnModuleInit {
     >;
 
     const isKilledGlobally = (key: FeatureKey): boolean => {
-      if (key === 'aiScoring') return kills.geminiAiEnabled === false;
+      if (
+        key === 'aiScoring' ||
+        (AI_PILLAR_FEATURE_KEYS as readonly string[]).includes(key)
+      ) {
+        return kills.geminiAiEnabled === false;
+      }
       if (key === 'whatsappCloud' || key === 'whatsappBroadcasts') {
         return kills.whatsappCloudEnabled === false;
       }
@@ -369,12 +387,21 @@ export class SuperAdminService implements OnModuleInit {
       return false;
     };
 
+    const defaultPlanFeatures = (DEFAULT_PLAN_MATRIX[tenant.plan] || DEFAULT_PLAN_MATRIX.growth)
+      .features as Record<string, boolean | undefined>;
+
     for (const spec of PLATFORM_FEATURE_CATALOG) {
       if (isKilledGlobally(spec.key)) {
         result[spec.key] = { enabled: false, source: 'kill_switch' };
         continue;
       }
-      const baseEnabled = Boolean(planSpec.features?.[spec.key]);
+      const storedPlanVal = (planSpec.features as Record<string, boolean | undefined> | undefined)?.[
+        spec.key
+      ];
+      const baseEnabled =
+        typeof storedPlanVal === 'boolean'
+          ? storedPlanVal
+          : Boolean(defaultPlanFeatures?.[spec.key]);
       if (typeof overrides[spec.key] === 'boolean') {
         result[spec.key] = {
           enabled: Boolean(overrides[spec.key]),
@@ -421,6 +448,153 @@ export class SuperAdminService implements OnModuleInit {
         tenant.securityPolicy?.enforcePhoneMasking ||
           tenant.maskPhoneForAgents,
       ),
+    };
+  }
+
+  private computeTenantCostTelemetry(
+    tenant: TenantDocument,
+    config: PlatformConfigDocument,
+  ) {
+    const planSpec =
+      config.planMatrix?.[tenant.plan] || PLAN_CATALOG[tenant.plan] || DEFAULT_PLAN_MATRIX.growth;
+    const mrrInr = tenant.status === 'active' ? planSpec?.monthlyPrice || 0 : 0;
+
+    const aiLimit = Math.max(1, tenant.quotas?.maxMonthlyAiCalls ?? planSpec.maxMonthlyAiCalls ?? 2500);
+    const waLimit = Math.max(1, tenant.quotas?.maxMonthlyWhatsapp ?? planSpec.maxMonthlyWhatsapp ?? 5000);
+    const aiUsed = tenant.quotas?.aiCallsUsed ?? 0;
+    const waUsed = tenant.quotas?.whatsappUsed ?? 0;
+
+    const aiPct = Math.round((aiUsed / aiLimit) * 100);
+    const waPct = Math.round((waUsed / waLimit) * 100);
+
+    const estimatedAiCostInr = Number(
+      (tenant.quotas?.aiCostInr && tenant.quotas.aiCostInr > 0
+        ? tenant.quotas.aiCostInr
+        : aiUsed * AI_UNIT_COST_INR
+      ).toFixed(2),
+    );
+    const estimatedWaCostInr = Number(
+      (tenant.quotas?.whatsappCostInr && tenant.quotas.whatsappCostInr > 0
+        ? tenant.quotas.whatsappCostInr
+        : waUsed * WA_UNIT_COST_INR
+      ).toFixed(2),
+    );
+    const totalInfraCostInr = Number((estimatedAiCostInr + estimatedWaCostInr).toFixed(2));
+    const grossMarginInr = Number((mrrInr - totalInfraCostInr).toFixed(2));
+    const marginPct = mrrInr > 0 ? Math.round((grossMarginInr / mrrInr) * 100) : totalInfraCostInr > 0 ? -100 : 0;
+    const unprofitable = totalInfraCostInr > mrrInr && totalInfraCostInr > 0;
+    const maxPct = Math.max(aiPct, waPct);
+    const alertLevel: 'ok' | 'warning_80' | 'exceeded_100' =
+      maxPct >= 100 ? 'exceeded_100' : maxPct >= 80 ? 'warning_80' : 'ok';
+
+    return {
+      mrrInr,
+      aiUsed,
+      aiLimit,
+      aiPct,
+      estimatedAiCostInr,
+      waUsed,
+      waLimit,
+      waPct,
+      estimatedWaCostInr,
+      totalInfraCostInr,
+      grossMarginInr,
+      marginPct,
+      unprofitable,
+      alertLevel,
+    };
+  }
+
+  private async verifyOperatorConfirmation(
+    actor: SuperAdminActor,
+    confirmPassword: string | undefined,
+    actionLabel: string,
+  ): Promise<void> {
+    if (!confirmPassword || !confirmPassword.trim()) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        code: 'CONFIRM_PASSWORD_REQUIRED',
+        message: `Super Admin password confirmation is required for destructive action: ${actionLabel}.`,
+      });
+    }
+    const op = await this.userModel
+      .findById(actor.userId)
+      .select('passwordHash role isActive')
+      .exec();
+    if (!op || op.role !== 'super_admin' || !op.isActive) {
+      throw new UnauthorizedException('Operator authority invalidated.');
+    }
+    if (!verifySecret(confirmPassword, op.passwordHash)) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        code: 'INVALID_CONFIRM_PASSWORD',
+        message: `Operator verification failed for ${actionLabel}: incorrect Super Admin password.`,
+      });
+    }
+  }
+
+  async consumeTenantQuota(
+    tenantId: string,
+    resource: 'ai' | 'whatsapp',
+    units = 1,
+  ): Promise<{ used: number; limit: number; pct: number; warning80: boolean }> {
+    if (!Types.ObjectId.isValid(tenantId)) {
+      return { used: 0, limit: 999999, pct: 0, warning80: false };
+    }
+    const cleanUnits = Math.max(1, Math.round(units));
+    const [tenant, config] = await Promise.all([
+      this.tenantModel.findById(tenantId).exec(),
+      this.ensureGlobalConfig(),
+    ]);
+    if (!tenant || tenant.isPlatformHq) {
+      return { used: 0, limit: 999999, pct: 0, warning80: false };
+    }
+
+    const planSpec =
+      config.planMatrix?.[tenant.plan] || PLAN_CATALOG[tenant.plan] || DEFAULT_PLAN_MATRIX.growth;
+    const isAi = resource === 'ai';
+    const limit = isAi
+      ? (tenant.quotas?.maxMonthlyAiCalls ?? planSpec.maxMonthlyAiCalls ?? 2500)
+      : (tenant.quotas?.maxMonthlyWhatsapp ?? planSpec.maxMonthlyWhatsapp ?? 5000);
+    const currentUsed = isAi
+      ? (tenant.quotas?.aiCallsUsed ?? 0)
+      : (tenant.quotas?.whatsappUsed ?? 0);
+
+    if (limit <= 0 || currentUsed + cleanUnits > limit) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          error: 'Too Many Requests',
+          code: 'QUOTA_EXCEEDED',
+          resource,
+          used: currentUsed,
+          limit,
+          message: `Monthly ${isAi ? 'Gemini AI calls' : 'WhatsApp Cloud messages'} quota exceeded (${currentUsed}/${limit}). Upgrade your plan or contact Leadsetu HQ for an Add-on Quota Pack.`,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    const costDelta = Number(
+      (cleanUnits * (isAi ? AI_UNIT_COST_INR : WA_UNIT_COST_INR)).toFixed(2),
+    );
+    const incPayload = isAi
+      ? { 'quotas.aiCallsUsed': cleanUnits, 'quotas.aiCostInr': costDelta }
+      : { 'quotas.whatsappUsed': cleanUnits, 'quotas.whatsappCostInr': costDelta };
+
+    await this.tenantModel
+      .updateOne({ _id: tenant._id }, { $inc: incPayload })
+      .exec();
+
+    const nextUsed = currentUsed + cleanUnits;
+    const pct = limit > 0 ? Math.round((nextUsed / limit) * 100) : 0;
+    return {
+      used: nextUsed,
+      limit,
+      pct,
+      warning80: pct >= 80,
     };
   }
 
@@ -539,13 +713,24 @@ export class SuperAdminService implements OnModuleInit {
       }
     }
 
+    let totalMonthlyAiCostInr = 0;
+    let totalMonthlyWaCostInr = 0;
+    let unprofitableTenantsCount = 0;
+    let warning80Count = 0;
+    let exceeded100Count = 0;
+
     const quotaWatchlist = tenants
       .map((t) => {
         const seats = userCountMap.get(t._id.toString()) || { total: 0, active: 0 };
         const seatLimit = this.resolveSeatLimit(t, config);
         const seatPct = seatLimit > 0 ? Math.round((seats.total / seatLimit) * 100) : 0;
-        const aiLimit = t.quotas?.maxMonthlyAiCalls || 2500;
-        const aiPct = Math.round(((t.quotas?.aiCallsUsed || 0) / aiLimit) * 100);
+        const tel = this.computeTenantCostTelemetry(t, config);
+        totalMonthlyAiCostInr += tel.estimatedAiCostInr;
+        totalMonthlyWaCostInr += tel.estimatedWaCostInr;
+        if (tel.unprofitable) unprofitableTenantsCount++;
+        if (tel.alertLevel === 'warning_80') warning80Count++;
+        if (tel.alertLevel === 'exceeded_100') exceeded100Count++;
+
         return {
           id: t._id.toString(),
           accountId: t.accountId || '',
@@ -555,12 +740,29 @@ export class SuperAdminService implements OnModuleInit {
           seatsUsed: seats.total,
           seatLimit,
           seatPct,
-          aiPct,
+          aiPct: tel.aiPct,
+          aiUsed: tel.aiUsed,
+          aiLimit: tel.aiLimit,
+          waPct: tel.waPct,
+          waUsed: tel.waUsed,
+          waLimit: tel.waLimit,
+          mrrInr: tel.mrrInr,
+          estimatedAiCostInr: tel.estimatedAiCostInr,
+          estimatedWaCostInr: tel.estimatedWaCostInr,
+          totalInfraCostInr: tel.totalInfraCostInr,
+          grossMarginInr: tel.grossMarginInr,
+          marginPct: tel.marginPct,
+          unprofitable: tel.unprofitable,
+          alertLevel: tel.alertLevel,
           overrideCount: Object.keys(t.featureOverrides || {}).length,
         };
       })
-      .sort((a, b) => Math.max(b.seatPct, b.aiPct) - Math.max(a.seatPct, a.aiPct))
-      .slice(0, 6);
+      .sort(
+        (a, b) =>
+          Number(b.unprofitable) - Number(a.unprofitable) ||
+          Math.max(b.seatPct, b.aiPct, b.waPct) - Math.max(a.seatPct, a.aiPct, a.waPct),
+      )
+      .slice(0, 8);
 
     const topCities = Array.from(cityCounts.entries())
       .map(([city, count]) => ({ city, count }))
@@ -583,6 +785,19 @@ export class SuperAdminService implements OnModuleInit {
         annualRunRateInr: monthlyRecurringInr * 12,
         totalSubscriptionBilledInr,
         totalGstCollectedInr,
+        pendingTopupRequests: tenants.reduce(
+          (sum, t) =>
+            sum + (t.topupRequests || []).filter((r) => r.status === 'pending').length,
+          0,
+        ),
+      },
+      costTelemetry: {
+        totalMonthlyAiCostInr: Number(totalMonthlyAiCostInr.toFixed(2)),
+        totalMonthlyWaCostInr: Number(totalMonthlyWaCostInr.toFixed(2)),
+        totalInfraCostInr: Number((totalMonthlyAiCostInr + totalMonthlyWaCostInr).toFixed(2)),
+        unprofitableTenantsCount,
+        warning80Count,
+        exceeded100Count,
       },
       planBreakdown: planCounts,
       topCities,
@@ -697,6 +912,10 @@ export class SuperAdminService implements OnModuleInit {
         const overrideCount = Object.values(t.featureOverrides || {}).filter(
           (v) => typeof v === 'boolean',
         ).length;
+        const effectiveFeatures = this.computeEffectiveFeatures(t, config);
+        const planSpec = config.planMatrix?.[t.plan] || DEFAULT_PLAN_MATRIX[t.plan];
+        const maxMonthlyAiCalls = t.quotas?.maxMonthlyAiCalls ?? planSpec.maxMonthlyAiCalls;
+        const aiCallsUsed = t.quotas?.aiCallsUsed ?? 0;
 
         return {
           id: key,
@@ -719,6 +938,18 @@ export class SuperAdminService implements OnModuleInit {
           overrideCount,
           maskPhoneForAgents: Boolean(t.maskPhoneForAgents),
           blockAgentExport: t.blockAgentExport ?? true,
+          aiEnabled: effectiveFeatures.aiScoring.enabled,
+          aiWorkflowsEnabled: effectiveFeatures.aiWorkflows.enabled,
+          aiSource: effectiveFeatures.aiScoring.source,
+          aiPillars: {
+            aiCreditRisk: Boolean(effectiveFeatures.aiCreditRisk?.enabled),
+            aiVoiceCrm: Boolean(effectiveFeatures.aiVoiceCrm?.enabled),
+            aiDealerDesk: Boolean(effectiveFeatures.aiDealerDesk?.enabled),
+            aiCopilot: Boolean(effectiveFeatures.aiCopilot?.enabled),
+          },
+          maxMonthlyAiCalls,
+          aiCallsUsed,
+          aiBalanceRemaining: Math.max(0, maxMonthlyAiCalls - aiCallsUsed),
           trialEndsAt: t.trialEndsAt || '',
           suspensionReason: t.securityPolicy?.suspensionReason || '',
           createdAt: raw.createdAt ? new Date(raw.createdAt).toISOString() : null,
@@ -779,6 +1010,20 @@ export class SuperAdminService implements OnModuleInit {
           aiCallsUsed: tenant.quotas?.aiCallsUsed ?? 0,
           whatsappUsed: tenant.quotas?.whatsappUsed ?? 0,
           maxStorageMb: tenant.quotas?.maxStorageMb ?? planSpec.maxStorageMb,
+          aiCostInr: tenant.quotas?.aiCostInr ?? 0,
+          whatsappCostInr: tenant.quotas?.whatsappCostInr ?? 0,
+          addonAiCalls: tenant.quotas?.addonAiCalls ?? 0,
+          addonWhatsapp: tenant.quotas?.addonWhatsapp ?? 0,
+          lastMeterResetAt: tenant.quotas?.lastMeterResetAt || '',
+        },
+        costTelemetry: this.computeTenantCostTelemetry(tenant, config),
+        sessionVersion: tenant.sessionVersion ?? 1,
+        dpdpRetention: tenant.dpdpRetention || {
+          softDeletedAt: '',
+          purgeScheduledAt: '',
+          purgedAt: '',
+          deletionReason: '',
+          requestedByEmail: '',
         },
         securityPolicy: {
           enforcePhoneMasking: Boolean(
@@ -853,9 +1098,16 @@ export class SuperAdminService implements OnModuleInit {
     }
 
     if (dto.status && VALID_STATUSES.includes(dto.status) && dto.status !== tenant.status) {
-      if (dto.status === 'suspended' && !dto.suspensionReason?.trim()) {
-        throw new BadRequestException(
-          'A suspension reason is mandatory for compliance and audit logs.',
+      if (dto.status === 'suspended') {
+        if (!dto.suspensionReason?.trim()) {
+          throw new BadRequestException(
+            'A suspension reason is mandatory for compliance and audit logs.',
+          );
+        }
+        await this.verifyOperatorConfirmation(
+          actor,
+          dto.confirmPassword,
+          `Suspending workspace ${tenant.name}`,
         );
       }
       changes.push(`status: ${tenant.status} -> ${dto.status}`);
@@ -938,9 +1190,15 @@ export class SuperAdminService implements OnModuleInit {
       if (typeof dto.quotas.maxStorageMb === 'number') {
         current.maxStorageMb = Math.max(128, dto.quotas.maxStorageMb);
       }
+      if (typeof dto.quotas.aiCallsUsed === 'number') {
+        current.aiCallsUsed = Math.max(0, Math.round(dto.quotas.aiCallsUsed));
+      }
       if (dto.quotas.resetUsageCounters) {
         current.aiCallsUsed = 0;
         current.whatsappUsed = 0;
+        current.aiCostInr = 0;
+        current.whatsappCostInr = 0;
+        current.lastMeterResetAt = new Date().toISOString();
       }
       tenant.quotas = current;
       tenant.markModified('quotas');
@@ -1049,7 +1307,8 @@ export class SuperAdminService implements OnModuleInit {
     }
     if (dto.revokeSessions) {
       user.refreshTokenHash = null;
-      diffs.push('sessions revoked');
+      user.sessionVersion = (user.sessionVersion ?? 1) + 1;
+      diffs.push('sessions force-revoked (JWT + refresh invalidated)');
     }
 
     await user.save();
@@ -1226,6 +1485,28 @@ export class SuperAdminService implements OnModuleInit {
   ) {
     const config = await this.ensureGlobalConfig();
     const sections: string[] = [];
+
+    const maintenanceChanged =
+      typeof dto.maintenanceMode === 'boolean' &&
+      dto.maintenanceMode !== Boolean(config.maintenanceMode);
+    const currentKills = config.globalKillSwitches || DEFAULT_GLOBAL_KILL_SWITCHES;
+    const killSwitchChanged =
+      Boolean(dto.globalKillSwitches) &&
+      Object.entries(dto.globalKillSwitches || {}).some(
+        ([k, v]) =>
+          typeof v === 'boolean' &&
+          v !== Boolean(currentKills[k as keyof typeof currentKills]),
+      );
+
+    if (maintenanceChanged || killSwitchChanged) {
+      await this.verifyOperatorConfirmation(
+        actor,
+        dto.confirmPassword,
+        maintenanceChanged
+          ? `Toggling Platform Maintenance Mode (${dto.maintenanceMode ? 'ON' : 'OFF'})`
+          : 'Flipping Global Platform Kill-Switch',
+      );
+    }
 
     if (typeof dto.maintenanceMode === 'boolean') {
       config.maintenanceMode = dto.maintenanceMode;
@@ -2301,6 +2582,7 @@ export class SuperAdminService implements OnModuleInit {
     operatorId: string,
     isActive: boolean,
     ipAddress = '',
+    confirmPassword?: string,
   ) {
     if (!Types.ObjectId.isValid(operatorId)) {
       throw new NotFoundException('Operator not found.');
@@ -2316,8 +2598,19 @@ export class SuperAdminService implements OnModuleInit {
       throw new NotFoundException('Super Admin operator not found.');
     }
 
+    if (!isActive) {
+      await this.verifyOperatorConfirmation(
+        actor,
+        confirmPassword,
+        `Revoking HQ Super Admin operator ${target.email}`,
+      );
+    }
+
     target.isActive = isActive;
-    if (!isActive) target.refreshTokenHash = null;
+    if (!isActive) {
+      target.refreshTokenHash = null;
+      target.sessionVersion = (target.sessionVersion ?? 1) + 1;
+    }
     await target.save();
 
     await this.recordAudit(actor, {
@@ -2328,5 +2621,917 @@ export class SuperAdminService implements OnModuleInit {
     });
 
     return this.listOperators();
+  }
+
+  async revokeAllTenantSessions(
+    actor: SuperAdminActor,
+    tenantId: string,
+    dto: RevokeTenantSessionsDto,
+    ipAddress = '',
+  ) {
+    if (!Types.ObjectId.isValid(tenantId)) {
+      throw new NotFoundException('Workspace not found.');
+    }
+    if (!dto.reason?.trim()) {
+      throw new BadRequestException('An explicit security reason is required.');
+    }
+    const tenant = await this.tenantModel.findById(tenantId).exec();
+    if (!tenant || tenant.isPlatformHq) {
+      throw new NotFoundException('Customer workspace not found.');
+    }
+
+    await this.verifyOperatorConfirmation(
+      actor,
+      dto.confirmPassword,
+      `Panic-revoking all sessions for ${tenant.name}`,
+    );
+
+    tenant.sessionVersion = (tenant.sessionVersion ?? 1) + 1;
+    await tenant.save();
+
+    const userRes = await this.userModel
+      .updateMany(
+        { tenantId: tenant._id, role: { $ne: 'super_admin' } },
+        {
+          $inc: { sessionVersion: 1 },
+          $set: { refreshTokenHash: null },
+        },
+      )
+      .exec();
+
+    await this.recordAudit(actor, {
+      action: 'tenant.sessions_panic_revoked',
+      severity: 'critical',
+      targetTenant: tenant,
+      summary: `Panic-revoked all active JWT & refresh sessions across ${tenant.name} (#${tenant.accountId}) [tenant v${tenant.sessionVersion}, ${userRes.modifiedCount} seats invalidated].`,
+      reason: dto.reason.trim(),
+      ipAddress,
+    });
+
+    return this.getTenantDetail(tenantId);
+  }
+
+  async exportTenantDpdpData(
+    actor: SuperAdminActor,
+    tenantId: string,
+    ipAddress = '',
+  ) {
+    if (!Types.ObjectId.isValid(tenantId)) {
+      throw new NotFoundException('Workspace not found.');
+    }
+    const tenant = await this.tenantModel.findById(tenantId).lean().exec();
+    if (!tenant || tenant.isPlatformHq) {
+      throw new NotFoundException('Customer workspace not found.');
+    }
+
+    const tObjId = new Types.ObjectId(tenantId);
+    const [
+      users,
+      leads,
+      contacts,
+      deals,
+      invoices,
+      campaigns,
+      workflows,
+      tickets,
+      documents,
+      products,
+      tasks,
+      conversations,
+    ] = await Promise.all([
+      this.userModel
+        .find({ tenantId: tObjId })
+        .select('-passwordHash -refreshTokenHash')
+        .lean()
+        .exec(),
+      this.connection.collection('leads').find({ tenantId: tObjId }).toArray().catch(() => []),
+      this.connection.collection('contacts').find({ tenantId: tObjId }).toArray().catch(() => []),
+      this.connection.collection('deals').find({ tenantId: tObjId }).toArray().catch(() => []),
+      this.connection.collection('invoices').find({ tenantId: tObjId }).toArray().catch(() => []),
+      this.connection.collection('campaigns').find({ tenantId: tObjId }).toArray().catch(() => []),
+      this.connection.collection('workflows').find({ tenantId: tObjId }).toArray().catch(() => []),
+      this.connection.collection('tickets').find({ tenantId: tObjId }).toArray().catch(() => []),
+      this.connection.collection('documents').find({ tenantId: tObjId }).toArray().catch(() => []),
+      this.connection.collection('products').find({ tenantId: tObjId }).toArray().catch(() => []),
+      this.connection.collection('tasks').find({ tenantId: tObjId }).toArray().catch(() => []),
+      this.connection.collection('conversations').find({ tenantId: tObjId }).toArray().catch(() => []),
+    ]);
+
+    const exportPayload = {
+      exportedAt: new Date().toISOString(),
+      exportedBy: actor.email,
+      complianceStandard: 'Digital Personal Data Protection Act (India DPDP) Data Portability Export',
+      workspace: tenant,
+      collections: {
+        users,
+        leads,
+        contacts,
+        deals,
+        invoices,
+        campaigns,
+        workflows,
+        tickets,
+        documents,
+        products,
+        tasks,
+        conversations,
+      },
+      counts: {
+        users: users.length,
+        leads: leads.length,
+        contacts: contacts.length,
+        deals: deals.length,
+        invoices: invoices.length,
+        campaigns: campaigns.length,
+        workflows: workflows.length,
+        tickets: tickets.length,
+        documents: documents.length,
+        products: products.length,
+        tasks: tasks.length,
+        conversations: conversations.length,
+      },
+    };
+
+    const tenantDoc = await this.tenantModel.findById(tenantId).exec();
+    await this.recordAudit(actor, {
+      action: 'tenant.dpdp_data_exported',
+      severity: 'warning',
+      targetTenant: tenantDoc,
+      summary: `Generated full DPDP JSON portability backup for ${tenant.name} (#${tenant.accountId}): ${leads.length} leads, ${deals.length} deals, ${invoices.length} invoices.`,
+      ipAddress,
+    });
+
+    return {
+      filename: `Leadsetu-DPDP-Backup-${tenant.accountId || tenantId}-${new Date().toISOString().slice(0, 10)}.json`,
+      payload: exportPayload,
+    };
+  }
+
+  async dpdpEraseTenant(
+    actor: SuperAdminActor,
+    tenantId: string,
+    dto: DpdpEraseTenantDto,
+    ipAddress = '',
+  ) {
+    if (!Types.ObjectId.isValid(tenantId)) {
+      throw new NotFoundException('Workspace not found.');
+    }
+    if (!dto.reason?.trim()) {
+      throw new BadRequestException('A formal DPDP compliance reason is mandatory.');
+    }
+    const tenant = await this.tenantModel.findById(tenantId).exec();
+    if (!tenant || tenant.isPlatformHq) {
+      throw new NotFoundException('Customer workspace not found.');
+    }
+
+    const config = await this.ensureGlobalConfig();
+    const retentionDays = config.securityPolicies?.dpdpRetentionDays ?? 90;
+
+    if (dto.mode === 'soft_delete') {
+      await this.verifyOperatorConfirmation(
+        actor,
+        dto.confirmPassword,
+        `DPDP Soft-Delete for ${tenant.name}`,
+      );
+      const now = new Date();
+      const purgeAt = new Date(now.getTime() + retentionDays * 86_400_000).toISOString();
+      tenant.status = 'suspended';
+      tenant.sessionVersion = (tenant.sessionVersion ?? 1) + 1;
+      tenant.securityPolicy = {
+        ...(tenant.securityPolicy || {
+          enforcePhoneMasking: false,
+          lockAgentExport: true,
+          requireStrongPassword: true,
+          sessionTtlHours: 24,
+          allowImpersonation: true,
+          ipAllowlist: [],
+          suspensionReason: '',
+          suspendedAt: '',
+        }),
+        suspensionReason: `Queued for DPDP Right-to-Erasure (${retentionDays}d retention): ${dto.reason.trim()}`,
+        suspendedAt: now.toISOString(),
+      };
+      tenant.dpdpRetention = {
+        softDeletedAt: now.toISOString(),
+        purgeScheduledAt: purgeAt,
+        purgedAt: '',
+        deletionReason: dto.reason.trim(),
+        requestedByEmail: actor.email,
+      };
+      tenant.markModified('securityPolicy');
+      tenant.markModified('dpdpRetention');
+      await tenant.save();
+
+      await this.userModel
+        .updateMany(
+          { tenantId: tenant._id, role: { $ne: 'super_admin' } },
+          { $inc: { sessionVersion: 1 }, $set: { refreshTokenHash: null } },
+        )
+        .exec();
+
+      await this.recordAudit(actor, {
+        action: 'tenant.dpdp_soft_deleted',
+        severity: 'critical',
+        targetTenant: tenant,
+        summary: `DPDP Soft-Delete initiated for ${tenant.name} (#${tenant.accountId}). Permanent purge eligible on ${purgeAt.slice(0, 10)}.`,
+        reason: dto.reason.trim(),
+        ipAddress,
+      });
+
+      return this.getTenantDetail(tenantId);
+    }
+
+    if (dto.mode === 'restore') {
+      tenant.status = 'active';
+      tenant.dpdpRetention = {
+        softDeletedAt: '',
+        purgeScheduledAt: '',
+        purgedAt: tenant.dpdpRetention?.purgedAt || '',
+        deletionReason: '',
+        requestedByEmail: '',
+      };
+      if (tenant.securityPolicy) {
+        tenant.securityPolicy.suspensionReason = '';
+        tenant.securityPolicy.suspendedAt = '';
+        tenant.markModified('securityPolicy');
+      }
+      tenant.markModified('dpdpRetention');
+      await tenant.save();
+
+      await this.recordAudit(actor, {
+        action: 'tenant.dpdp_restored',
+        severity: 'warning',
+        targetTenant: tenant,
+        summary: `Cancelled DPDP soft-delete and restored ${tenant.name} (#${tenant.accountId}).`,
+        reason: dto.reason.trim(),
+        ipAddress,
+      });
+
+      return this.getTenantDetail(tenantId);
+    }
+
+    if (dto.mode === 'permanent_purge') {
+      await this.verifyOperatorConfirmation(
+        actor,
+        dto.confirmPassword,
+        `PERMANENT DPDP PURGE for ${tenant.name}`,
+      );
+
+      if (!tenant.dpdpRetention?.softDeletedAt) {
+        throw new BadRequestException(
+          'Workspace must be Soft-Deleted first before Permanent DPDP Purge.',
+        );
+      }
+
+      const scheduledMs = new Date(tenant.dpdpRetention.purgeScheduledAt || 0).getTime();
+      if (Date.now() < scheduledMs && !dto.forceBypassRetention) {
+        throw new BadRequestException(
+          `DPDP retention window (${retentionDays}d) ends on ${tenant.dpdpRetention.purgeScheduledAt?.slice(0, 10)}. Check override retention if explicitly authorized by Customer Data Principal.`,
+        );
+      }
+
+      const tObjId = tenant._id;
+      const collectionNames = [
+        'leads',
+        'contacts',
+        'deals',
+        'invoices',
+        'campaigns',
+        'workflows',
+        'tickets',
+        'documents',
+        'products',
+        'tasks',
+        'conversations',
+        'audit_logs',
+      ];
+      let purgedDocumentsCount = 0;
+      for (const colName of collectionNames) {
+        try {
+          const res = await this.connection.collection(colName).deleteMany({ tenantId: tObjId });
+          purgedDocumentsCount += res.deletedCount || 0;
+        } catch {
+          // Ignore nonexistent collections cleanly
+        }
+      }
+      const userDel = await this.userModel
+        .deleteMany({ tenantId: tObjId, role: { $ne: 'super_admin' } })
+        .exec();
+
+      const originalName = tenant.name;
+      tenant.name = `[ERASED DPDP #${tenant.accountId || tenantId.slice(-5)}]`;
+      tenant.email = '';
+      tenant.phone = '';
+      tenant.gstin = '';
+      tenant.address = '';
+      tenant.status = 'suspended';
+      tenant.sessionVersion = (tenant.sessionVersion ?? 1) + 1;
+      tenant.dpdpRetention = {
+        ...(tenant.dpdpRetention || {}),
+        purgedAt: new Date().toISOString(),
+        deletionReason: dto.reason.trim(),
+        requestedByEmail: actor.email,
+      };
+      tenant.markModified('dpdpRetention');
+      await tenant.save();
+
+      await this.recordAudit(actor, {
+        action: 'tenant.dpdp_permanently_purged',
+        severity: 'critical',
+        targetTenant: tenant,
+        summary: `PERMANENT DPDP PURGE completed for ${originalName} (#${tenant.accountId}): erased ${userDel.deletedCount} users & ${purgedDocumentsCount} CRM records.`,
+        reason: dto.reason.trim(),
+        ipAddress,
+        metadata: {
+          originalName,
+          deletedUsers: userDel.deletedCount,
+          deletedCrmRecords: purgedDocumentsCount,
+        },
+      });
+
+      return this.getTenantDetail(tenantId);
+    }
+
+    throw new BadRequestException('Invalid DPDP erasure mode.');
+  }
+
+  async grantTenantQuotaAddon(
+    actor: SuperAdminActor,
+    tenantId: string,
+    dto: GrantQuotaAddonDto,
+    ipAddress = '',
+  ) {
+    if (!Types.ObjectId.isValid(tenantId)) {
+      throw new NotFoundException('Workspace not found.');
+    }
+    const tenant = await this.tenantModel.findById(tenantId).exec();
+    if (!tenant || tenant.isPlatformHq) {
+      throw new NotFoundException('Customer workspace not found.');
+    }
+
+    const addAi = Math.max(0, Math.round(Number(dto.addonAiCalls || 0)));
+    const addWa = Math.max(0, Math.round(Number(dto.addonWhatsapp || 0)));
+    const addMb = Math.max(0, Math.round(Number(dto.addonStorageMb || 0)));
+
+    if (addAi === 0 && addWa === 0 && addMb === 0) {
+      throw new BadRequestException('Specify at least one add-on quota top-up (> 0).');
+    }
+
+    const config = await this.ensureGlobalConfig();
+    const planSpec = config.planMatrix?.[tenant.plan] || DEFAULT_PLAN_MATRIX[tenant.plan];
+    const current = tenant.quotas || {
+      maxMonthlyAiCalls: planSpec.maxMonthlyAiCalls,
+      maxMonthlyWhatsapp: planSpec.maxMonthlyWhatsapp,
+      aiCallsUsed: 0,
+      whatsappUsed: 0,
+      maxStorageMb: planSpec.maxStorageMb,
+      aiCostInr: 0,
+      whatsappCostInr: 0,
+      addonAiCalls: 0,
+      addonWhatsapp: 0,
+      lastMeterResetAt: '',
+    };
+
+    current.maxMonthlyAiCalls = (current.maxMonthlyAiCalls ?? planSpec.maxMonthlyAiCalls) + addAi;
+    current.maxMonthlyWhatsapp = (current.maxMonthlyWhatsapp ?? planSpec.maxMonthlyWhatsapp) + addWa;
+    current.maxStorageMb = (current.maxStorageMb ?? planSpec.maxStorageMb) + addMb;
+    current.addonAiCalls = (current.addonAiCalls || 0) + addAi;
+    current.addonWhatsapp = (current.addonWhatsapp || 0) + addWa;
+
+    tenant.quotas = current;
+    tenant.markModified('quotas');
+
+    if (dto.issueGstInvoice && Number(dto.addonPriceInr || 0) > 0) {
+      const gst = this.calculateGstSplit(
+        Number(dto.addonPriceInr),
+        tenant.state || 'Uttar Pradesh (09)',
+      );
+      const now = new Date();
+      const periodEnd = new Date(now);
+      periodEnd.setMonth(periodEnd.getMonth() + 1);
+      const invNum = `LS-ADDON-${String(now.getFullYear()).slice(-2)}/${tenant.accountId || '00000'}/${String((tenant.subscriptionInvoices?.length || 0) + 1).padStart(3, '0')}`;
+      const addonInv: SubscriptionInvoiceRecord = {
+        id: `addon_${Date.now()}`,
+        invoiceNumber: invNum,
+        plan: tenant.plan,
+        planName: `Quota Add-On (+${addAi} AI / +${addWa} WA)`,
+        billingCycle: 'monthly',
+        seatsIncluded: this.resolveSeatLimit(tenant, config),
+        baseAmount: gst.baseAmount,
+        gstRate: 18,
+        cgstAmount: gst.cgstAmount,
+        sgstAmount: gst.sgstAmount,
+        igstAmount: gst.igstAmount,
+        totalAmount: gst.totalAmount,
+        status: 'paid',
+        paymentMode: 'Add-On Top-Up Pack',
+        paymentReference: dto.paymentReference?.trim() || `PACK-${now.getTime().toString().slice(-5)}`,
+        issuedAt: now.toISOString(),
+        periodStart: now.toISOString(),
+        periodEnd: periodEnd.toISOString(),
+        sacCode: '998314',
+        greetingNote: `Quota Pack Top-Up: +${addAi} AI calls, +${addWa} WhatsApp, +${addMb} MB`,
+        buyerCompany: tenant.name,
+        buyerGstin: tenant.gstin || '',
+        buyerState: tenant.state || 'Uttar Pradesh (09)',
+        buyerAddress: tenant.address || tenant.city || 'India',
+        buyerEmail: tenant.email || '',
+        sellerCompany: 'Leadsetu Technologies (Anujalite Tech Pvt. Ltd.)',
+        sellerGstin: '07AABCL4821K1Z5',
+        sellerAddress:
+          'Tower B, 7th Floor, Sector 62, Noida & Connaught Place, New Delhi – 110001, India',
+        sellerEmail: 'billing@leadsetu.in',
+        issuedByEmail: actor.email,
+      };
+      tenant.subscriptionInvoices = [addonInv, ...(tenant.subscriptionInvoices || [])];
+      tenant.markModified('subscriptionInvoices');
+    }
+
+    await tenant.save();
+
+    await this.recordAudit(actor, {
+      action: 'tenant.quota_addon_granted',
+      severity: 'info',
+      targetTenant: tenant,
+      summary: `Granted Quota Add-on Pack to ${tenant.name}: +${addAi} AI calls, +${addWa} WhatsApp msgs, +${addMb} MB storage.`,
+      reason: dto.reason || 'Super Admin quota pack top-up',
+      ipAddress,
+    });
+
+    return this.getTenantDetail(tenantId);
+  }
+
+  private applyAiAuthorityPatchToTenant(
+    tenant: TenantDocument,
+    dto: ManageTenantAiAuthorityDto,
+    config: PlatformConfigDocument,
+  ): string {
+    const planSpec = config.planMatrix?.[tenant.plan] || DEFAULT_PLAN_MATRIX[tenant.plan];
+    const current = tenant.quotas || {
+      maxMonthlyAiCalls: planSpec.maxMonthlyAiCalls,
+      maxMonthlyWhatsapp: planSpec.maxMonthlyWhatsapp,
+      aiCallsUsed: 0,
+      whatsappUsed: 0,
+      maxStorageMb: planSpec.maxStorageMb,
+      aiCostInr: 0,
+      whatsappCostInr: 0,
+      addonAiCalls: 0,
+      addonWhatsapp: 0,
+      lastMeterResetAt: '',
+    };
+    const changes: string[] = [];
+
+    if (dto.mode === 'assign_balance') {
+      const addCalls = Math.max(0, Math.round(Number(dto.aiCallsDelta || 0)));
+      current.maxMonthlyAiCalls =
+        (current.maxMonthlyAiCalls ?? planSpec.maxMonthlyAiCalls) + addCalls;
+      current.addonAiCalls = (current.addonAiCalls || 0) + addCalls;
+      changes.push(`+${addCalls} AI balance (cap ${current.maxMonthlyAiCalls})`);
+    } else if (dto.mode === 'remove_balance') {
+      if (dto.maxMonthlyAiCalls === 0) {
+        current.maxMonthlyAiCalls = 0;
+        changes.push('AI balance removed (cap set to 0)');
+      } else {
+        const subCalls = Math.max(0, Math.round(Number(dto.aiCallsDelta || 0)));
+        const prev = current.maxMonthlyAiCalls ?? planSpec.maxMonthlyAiCalls;
+        current.maxMonthlyAiCalls = Math.max(0, prev - subCalls);
+        changes.push(`-${subCalls} AI balance (cap ${current.maxMonthlyAiCalls})`);
+      }
+    } else if (dto.mode === 'set_balance') {
+      if (typeof dto.maxMonthlyAiCalls === 'number') {
+        current.maxMonthlyAiCalls = Math.max(0, Math.round(dto.maxMonthlyAiCalls));
+        changes.push(`AI cap set to ${current.maxMonthlyAiCalls}`);
+      }
+      if (typeof dto.aiCallsUsed === 'number') {
+        current.aiCallsUsed = Math.max(0, Math.round(dto.aiCallsUsed));
+        changes.push(`AI used set to ${current.aiCallsUsed}`);
+      }
+    } else if (dto.mode === 'reset_used') {
+      current.aiCallsUsed = 0;
+      current.aiCostInr = 0;
+      current.lastMeterResetAt = new Date().toISOString();
+      changes.push('AI used counter reset to 0');
+    }
+
+    tenant.quotas = current;
+    tenant.markModified('quotas');
+
+    const pillarPatch: Array<[string, boolean | null | undefined]> = [
+      ['aiScoring', dto.aiScoring],
+      ['aiWorkflows', dto.aiWorkflows],
+      ['aiCreditRisk', dto.aiCreditRisk],
+      ['aiVoiceCrm', dto.aiVoiceCrm],
+      ['aiDealerDesk', dto.aiDealerDesk],
+      ['aiCopilot', dto.aiCopilot],
+    ];
+    if (pillarPatch.some(([, v]) => v !== undefined)) {
+      const nextOverrides: Record<string, boolean> = {
+        ...(tenant.featureOverrides || {}),
+      };
+      for (const [k, val] of pillarPatch) {
+        if (val === undefined) continue;
+        if (val === null) {
+          delete nextOverrides[k];
+          changes.push(`${k}: plan default`);
+        } else {
+          nextOverrides[k] = val;
+          changes.push(`${k}: ${val ? 'ENABLED' : 'REMOVED'}`);
+        }
+      }
+      tenant.featureOverrides = nextOverrides;
+      tenant.markModified('featureOverrides');
+    }
+
+    return changes.join(', ') || `mode=${dto.mode}`;
+  }
+
+  async manageTenantAiAuthority(
+    actor: SuperAdminActor,
+    tenantId: string,
+    dto: ManageTenantAiAuthorityDto,
+    ipAddress = '',
+  ) {
+    if (!Types.ObjectId.isValid(tenantId)) {
+      throw new NotFoundException('Workspace not found.');
+    }
+    const [tenant, config] = await Promise.all([
+      this.tenantModel.findById(tenantId).exec(),
+      this.ensureGlobalConfig(),
+    ]);
+    if (!tenant || tenant.isPlatformHq) {
+      throw new NotFoundException('Customer workspace not found.');
+    }
+
+    const detailSummary = this.applyAiAuthorityPatchToTenant(tenant, dto, config);
+    await tenant.save();
+
+    await this.recordAudit(actor, {
+      action: 'tenant.ai_authority_updated',
+      severity: dto.mode === 'remove_balance' || dto.aiScoring === false ? 'warning' : 'info',
+      targetTenant: tenant,
+      summary: `AI Authority updated for ${tenant.name}: ${detailSummary}`,
+      reason: dto.reason || `Super Admin ${dto.mode}`,
+      ipAddress,
+    });
+
+    return this.getTenantDetail(tenantId);
+  }
+
+  async bulkManageAiAuthority(
+    actor: SuperAdminActor,
+    dto: BulkManageAiAuthorityDto,
+    ipAddress = '',
+  ) {
+    const config = await this.ensureGlobalConfig();
+    const filter: Record<string, unknown> = {
+      isPlatformHq: { $ne: true },
+      slug: { $ne: 'leadsetu-platform-hq' },
+    };
+    if (Array.isArray(dto.tenantIds) && dto.tenantIds.length > 0) {
+      const validIds = dto.tenantIds
+        .filter((id) => Types.ObjectId.isValid(id))
+        .map((id) => new Types.ObjectId(id));
+      if (validIds.length > 0) {
+        filter._id = { $in: validIds };
+      }
+    }
+
+    const tenants = await this.tenantModel.find(filter).exec();
+    let lastSummary = `mode=${dto.mode}`;
+    for (const tenant of tenants) {
+      lastSummary = this.applyAiAuthorityPatchToTenant(tenant, dto, config);
+      await tenant.save();
+    }
+
+    await this.recordAudit(actor, {
+      action: 'platform.bulk_ai_authority_updated',
+      severity: dto.mode === 'remove_balance' || dto.aiScoring === false ? 'warning' : 'info',
+      summary: `Bulk AI Authority applied across ${tenants.length} Admin account(s): ${lastSummary}`,
+      reason: dto.reason || `Bulk Super Admin ${dto.mode}`,
+      ipAddress,
+    });
+
+    const refreshed = await this.listTenants({});
+    return {
+      updatedCount: tenants.length,
+      data: refreshed.data,
+    };
+  }
+
+  // ─── AI / WhatsApp Top-Up Request Queue ─────────────────────────────────
+
+  async listTopupRequests(status?: string) {
+    const tenants = await this.tenantModel
+      .find({
+        isPlatformHq: { $ne: true },
+        slug: { $ne: 'leadsetu-platform-hq' },
+        'topupRequests.0': { $exists: true },
+      })
+      .select('name accountId plan status city topupRequests quotas')
+      .exec();
+
+    const rows = tenants.flatMap((t) =>
+      (t.topupRequests || []).map((r) => ({
+        tenantId: t._id.toString(),
+        tenantName: t.name,
+        accountId: t.accountId || '',
+        plan: t.plan,
+        tenantStatus: t.status,
+        city: t.city || '',
+        currentAiCap: t.quotas?.maxMonthlyAiCalls ?? 0,
+        currentAiUsed: t.quotas?.aiCallsUsed ?? 0,
+        currentWaCap: t.quotas?.maxMonthlyWhatsapp ?? 0,
+        currentWaUsed: t.quotas?.whatsappUsed ?? 0,
+        id: r.id,
+        resource: r.resource,
+        quantity: r.quantity,
+        note: r.note || '',
+        status: r.status,
+        requestedByName: r.requestedByName || '',
+        requestedByEmail: r.requestedByEmail || '',
+        createdAt: r.createdAt || '',
+        resolvedAt: r.resolvedAt || '',
+        resolvedByEmail: r.resolvedByEmail || '',
+        resolutionNote: r.resolutionNote || '',
+        grantedQuantity: r.grantedQuantity || 0,
+      })),
+    );
+
+    const filtered =
+      status && status !== 'all' ? rows.filter((r) => r.status === status) : rows;
+    filtered.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+
+    return {
+      data: filtered,
+      stats: {
+        pending: rows.filter((r) => r.status === 'pending').length,
+        approved: rows.filter((r) => r.status === 'approved').length,
+        rejected: rows.filter((r) => r.status === 'rejected').length,
+      },
+    };
+  }
+
+  async resolveTopupRequest(
+    actor: SuperAdminActor,
+    tenantId: string,
+    requestId: string,
+    dto: ResolveTopupRequestDto,
+    ipAddress = '',
+  ) {
+    if (!Types.ObjectId.isValid(tenantId)) {
+      throw new NotFoundException('Workspace not found.');
+    }
+    const tenant = await this.tenantModel.findById(tenantId).exec();
+    if (!tenant || tenant.isPlatformHq) {
+      throw new NotFoundException('Customer workspace not found.');
+    }
+    const request = (tenant.topupRequests || []).find((r) => r.id === requestId);
+    if (!request) throw new NotFoundException('Top-up request not found.');
+    if (request.status !== 'pending') {
+      throw new BadRequestException(`This request is already ${request.status}.`);
+    }
+    if (dto.action !== 'approve' && dto.action !== 'reject') {
+      throw new BadRequestException('Action must be approve or reject.');
+    }
+
+    let granted = 0;
+    if (dto.action === 'approve') {
+      granted = Math.max(
+        1,
+        Math.round(Number(dto.grantedQuantity ?? request.quantity) || request.quantity),
+      );
+      await this.grantTenantQuotaAddon(
+        actor,
+        tenantId,
+        {
+          addonAiCalls: request.resource === 'ai' ? granted : 0,
+          addonWhatsapp: request.resource === 'whatsapp' ? granted : 0,
+          issueGstInvoice: Boolean(dto.issueGstInvoice),
+          addonPriceInr: Number(dto.priceInr || 0),
+          reason:
+            dto.note?.trim() ||
+            `Approved top-up request ${request.id} from ${request.requestedByName || 'Company Admin'}`,
+        },
+        ipAddress,
+      );
+    }
+
+    // Reload: grantTenantQuotaAddon saved the document independently.
+    const fresh = await this.tenantModel.findById(tenantId).exec();
+    if (!fresh) throw new NotFoundException('Customer workspace not found.');
+    fresh.topupRequests = (fresh.topupRequests || []).map((r) =>
+      r.id === requestId
+        ? {
+            ...r,
+            status: dto.action === 'approve' ? 'approved' : 'rejected',
+            resolvedAt: new Date().toISOString(),
+            resolvedByEmail: actor.email,
+            resolutionNote: dto.note?.trim() || '',
+            grantedQuantity: granted,
+          }
+        : r,
+    );
+    fresh.markModified('topupRequests');
+    await fresh.save();
+
+    await this.recordAudit(actor, {
+      action: 'tenant.topup_request_resolved',
+      severity: dto.action === 'reject' ? 'warning' : 'info',
+      targetTenant: fresh,
+      summary: `${dto.action === 'approve' ? 'Approved' : 'Rejected'} ${request.resource.toUpperCase()} top-up request (${request.quantity} requested${granted ? `, ${granted} granted` : ''}) for ${fresh.name}.`,
+      reason: dto.note || '',
+      ipAddress,
+    });
+
+    return this.listTopupRequests('all');
+  }
+
+  // ─── Territory & Industry Cluster Analytics ─────────────────────────────
+
+  async getTerritoryAnalytics() {
+    const config = await this.ensureGlobalConfig();
+    const tenants = await this.tenantModel
+      .find({ isPlatformHq: { $ne: true }, slug: { $ne: 'leadsetu-platform-hq' } })
+      .exec();
+    const tenantIds = tenants.map((t) => t._id as Types.ObjectId);
+
+    const [userCounts, leadCounts, dealAgg] = await Promise.all([
+      this.userModel
+        .aggregate<{ _id: Types.ObjectId; total: number }>([
+          { $match: { tenantId: { $in: tenantIds }, role: { $ne: 'super_admin' } } },
+          { $group: { _id: '$tenantId', total: { $sum: 1 } } },
+        ])
+        .exec(),
+      this.connection
+        .collection('leads')
+        .aggregate<{ _id: Types.ObjectId; count: number }>([
+          { $match: { tenantId: { $in: tenantIds } } },
+          { $group: { _id: '$tenantId', count: { $sum: 1 } } },
+        ])
+        .toArray()
+        .catch(() => []),
+      this.connection
+        .collection('deals')
+        .aggregate<{ _id: Types.ObjectId; wonRev: number }>([
+          { $match: { tenantId: { $in: tenantIds } } },
+          {
+            $group: {
+              _id: '$tenantId',
+              wonRev: { $sum: { $cond: [{ $eq: ['$stage', 'won'] }, '$value', 0] } },
+            },
+          },
+        ])
+        .toArray()
+        .catch(() => []),
+    ]);
+
+    const userMap = new Map(userCounts.map((r) => [String(r._id), r.total]));
+    const leadMap = new Map(leadCounts.map((r) => [String(r._id), r.count]));
+    const dealMap = new Map(dealAgg.map((r) => [String(r._id), r.wonRev || 0]));
+
+    const normalizeCity = (raw?: string) => {
+      const c = (raw || '').trim();
+      if (!c) return 'Unassigned';
+      return c
+        .split(/\s+/)
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+        .join(' ');
+    };
+
+    const tenantsHealth = tenants.map((t) => {
+      const key = t._id.toString();
+      const planSpec = config.planMatrix?.[t.plan] || DEFAULT_PLAN_MATRIX[t.plan];
+      const seatLimit = this.resolveSeatLimit(t, config);
+      const seatsUsed = userMap.get(key) || 0;
+      const leadsCount = leadMap.get(key) || 0;
+      const wonRevenueInr = dealMap.get(key) || 0;
+      const aiCap = t.quotas?.maxMonthlyAiCalls ?? planSpec.maxMonthlyAiCalls;
+      const aiUsed = t.quotas?.aiCallsUsed ?? 0;
+      const waCap = t.quotas?.maxMonthlyWhatsapp ?? planSpec.maxMonthlyWhatsapp;
+      const waUsed = t.quotas?.whatsappUsed ?? 0;
+      const mrrInr = t.status === 'active' ? planSpec.monthlyPrice || 0 : 0;
+
+      let score = 50;
+      const reasons: string[] = [];
+      if (t.status === 'active') {
+        score += 20;
+      } else if (t.status === 'suspended') {
+        score -= 30;
+        reasons.push('Workspace suspended');
+      } else {
+        reasons.push('Still on trial');
+      }
+      if (seatLimit > 0 && seatsUsed / seatLimit >= 0.5) score += 10;
+      else reasons.push('Low seat adoption');
+      if (leadsCount > 0) score += 10;
+      else reasons.push('No leads captured yet');
+      if (wonRevenueInr > 0) score += 10;
+      else reasons.push('No won deals yet');
+      const aiOver = aiCap > 0 && aiUsed >= aiCap;
+      const waOver = waCap > 0 && waUsed >= waCap;
+      if (aiOver || waOver) {
+        score -= 15;
+        reasons.push(aiOver ? 'AI quota exhausted' : 'WhatsApp quota exhausted');
+      }
+      if (t.status === 'trial' && t.trialEndsAt) {
+        const msLeft = new Date(t.trialEndsAt).getTime() - Date.now();
+        if (msLeft > 0 && msLeft <= 3 * 86400000) {
+          score -= 10;
+          reasons.push('Trial ends within 3 days');
+        }
+      }
+      const healthScore = Math.max(0, Math.min(100, score));
+      const healthBand: 'healthy' | 'watch' | 'at_risk' =
+        healthScore >= 70 ? 'healthy' : healthScore >= 40 ? 'watch' : 'at_risk';
+
+      return {
+        id: key,
+        name: t.name,
+        accountId: t.accountId || '',
+        city: normalizeCity(t.city),
+        plan: t.plan,
+        status: t.status,
+        seatsUsed,
+        seatLimit,
+        leadsCount,
+        wonRevenueInr,
+        mrrInr,
+        aiUsed,
+        aiCap,
+        healthScore,
+        healthBand,
+        reasons,
+      };
+    });
+
+    const byCity = new Map<
+      string,
+      {
+        city: string;
+        tenants: number;
+        active: number;
+        trial: number;
+        suspended: number;
+        mrrInr: number;
+        seatsUsed: number;
+        aiCallsUsed: number;
+        aiCap: number;
+        leadsCount: number;
+        wonRevenueInr: number;
+        healthTotal: number;
+      }
+    >();
+    for (const h of tenantsHealth) {
+      const row =
+        byCity.get(h.city) ||
+        {
+          city: h.city,
+          tenants: 0,
+          active: 0,
+          trial: 0,
+          suspended: 0,
+          mrrInr: 0,
+          seatsUsed: 0,
+          aiCallsUsed: 0,
+          aiCap: 0,
+          leadsCount: 0,
+          wonRevenueInr: 0,
+          healthTotal: 0,
+        };
+      row.tenants += 1;
+      if (h.status === 'active') row.active += 1;
+      else if (h.status === 'suspended') row.suspended += 1;
+      else row.trial += 1;
+      row.mrrInr += h.mrrInr;
+      row.seatsUsed += h.seatsUsed;
+      row.aiCallsUsed += h.aiUsed;
+      row.aiCap += h.aiCap;
+      row.leadsCount += h.leadsCount;
+      row.wonRevenueInr += h.wonRevenueInr;
+      row.healthTotal += h.healthScore;
+      byCity.set(h.city, row);
+    }
+
+    const territories = Array.from(byCity.values())
+      .map(({ healthTotal, ...r }) => ({
+        ...r,
+        avgHealthScore: r.tenants > 0 ? Math.round(healthTotal / r.tenants) : 0,
+      }))
+      .sort((a, b) => b.mrrInr - a.mrrInr || b.tenants - a.tenants);
+
+    tenantsHealth.sort((a, b) => a.healthScore - b.healthScore);
+
+    return {
+      territories,
+      tenantsHealth,
+      summary: {
+        totalTerritories: territories.length,
+        totalTenants: tenantsHealth.length,
+        healthy: tenantsHealth.filter((h) => h.healthBand === 'healthy').length,
+        watch: tenantsHealth.filter((h) => h.healthBand === 'watch').length,
+        atRisk: tenantsHealth.filter((h) => h.healthBand === 'at_risk').length,
+        totalMrrInr: territories.reduce((s, t) => s + t.mrrInr, 0),
+      },
+    };
   }
 }

@@ -62,4 +62,25 @@ export class TenantsController {
     const auth = await this.tenantsService.verifyAuth(authorization);
     return this.tenantsService.subscribePlan(auth, dto);
   }
+
+  @Get('me/topup-requests')
+  @ApiOperation({
+    summary: 'List AI and WhatsApp top-up requests submitted by this workspace',
+  })
+  async listTopupRequests(@Headers('authorization') authorization?: string) {
+    const auth = await this.tenantsService.verifyAuth(authorization);
+    return this.tenantsService.listTopupRequests(auth);
+  }
+
+  @Post('me/topup-requests')
+  @ApiOperation({
+    summary: 'Request an AI or WhatsApp quota top-up from Leadsetu Super Admin',
+  })
+  async createTopupRequest(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: { resource: 'ai' | 'whatsapp'; quantity: number; note?: string },
+  ) {
+    const auth = await this.tenantsService.verifyAuth(authorization);
+    return this.tenantsService.createTopupRequest(auth, body);
+  }
 }

@@ -1,4 +1,5 @@
 import { Global, Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { MongooseModule } from '@nestjs/mongoose';
 import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -16,6 +17,7 @@ import {
 } from './schemas/platform-config.schema';
 import { SuperAdminService } from './super-admin.service';
 import { SuperAdminController } from './super-admin.controller';
+import { TenantSecurityGuard } from './tenant-security.guard';
 
 @Global()
 @Module({
@@ -40,7 +42,13 @@ import { SuperAdminController } from './super-admin.controller';
     }),
   ],
   controllers: [SuperAdminController],
-  providers: [SuperAdminService],
+  providers: [
+    SuperAdminService,
+    {
+      provide: APP_GUARD,
+      useClass: TenantSecurityGuard,
+    },
+  ],
   exports: [SuperAdminService],
 })
 export class SuperAdminModule {}

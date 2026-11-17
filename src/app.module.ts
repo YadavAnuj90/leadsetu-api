@@ -18,6 +18,7 @@ import { ProductsModule } from './modules/products/products.module';
 import { DocumentsModule } from './modules/documents/documents.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { SuperAdminModule } from './modules/super-admin/super-admin.module';
+import { AiBridgeModule } from './modules/ai-bridge/ai-bridge.module';
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { SuperAdminModule } from './modules/super-admin/super-admin.module';
         };
       },
     }),
+    AiBridgeModule,
     AuditModule,
     AuthModule,
     LeadsModule,

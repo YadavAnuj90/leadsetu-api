@@ -122,6 +122,20 @@ export class ContactsController {
     return this.contactsService.update(auth, id, dto);
   }
 
+  @Post(':id/verify-gstin')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Verify 15-digit Indian GSTIN format, state code & Mod-36 checksum',
+  })
+  async verifyGstin(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() body: { gstin?: string },
+  ) {
+    const auth = await this.contactsService.verifyAuth(authorization);
+    return this.contactsService.verifyGstin(auth, id, body?.gstin);
+  }
+
   @Delete(':id')
   @ApiOperation({
     summary: 'Delete a contact from the directory',
