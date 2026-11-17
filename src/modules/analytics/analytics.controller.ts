@@ -28,7 +28,7 @@ export class AnalyticsController {
   @ApiResponse({
     status: 200,
     description:
-      'Returns full cross-module MongoDB analytics including trend, AI tiers, Udhaar aging, and rep leaderboard.',
+      'Returns full cross-module workspace analytics including trend, AI tiers, Udhaar aging, and rep leaderboard.',
   })
   async getOverview(
     @Headers('authorization') authorization: string | undefined,

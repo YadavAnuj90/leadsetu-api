@@ -19,6 +19,8 @@ import {
 } from '../auth/schemas/tenant.schema';
 import { User, UserDocument } from '../auth/schemas/user.schema';
 import { AuditService } from '../audit/audit.module';
+import { sanitizeOrganizationLogoUrl } from '../auth/identity.util';
+import { uploadToCloudinary } from '../auth/cloudinary.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import {
   SubscribePlanDto,
@@ -56,7 +58,7 @@ export const PLAN_CATALOG: Record<'starter' | 'growth' | 'enterprise', PlanSpec>
     seatLimit: 12,
     highlights: [
       'Up to 12 Team Members Included',
-      'Unlimited Gemini AI Lead Scoring',
+      'Unlimited SetuAI Lead Scoring',
       'Official WhatsApp Cloud API Sync & AR Ledger',
     ],
   },
@@ -157,7 +159,8 @@ export class TenantsService {
       params.paymentReference?.trim() ||
       `LSPAY-${randomBytes(3).toString('hex').toUpperCase()}`;
 
-    const defaultGreeting = `Dear ${tenant.name} Team, thank you for choosing Leadsetu to bridge every B2B lead, deal, and GST workflow! Your ${spec.name} is active with 18% GST Input Tax Credit eligibility. Warm regards, Team Leadsetu (New Delhi).`;
+    const recipientLabel = tenant.companyName?.trim() || 'Leadsetu Workspace';
+    const defaultGreeting = `Dear ${recipientLabel} Team, thank you for choosing Leadsetu to bridge every B2B lead, deal, and GST workflow! Your ${spec.name} is active with 18% GST Input Tax Credit eligibility. Warm regards, Team Leadsetu (New Delhi).`;
 
     return {
       id: `sub-${Date.now()}-${randomBytes(2).toString('hex')}`,
@@ -180,7 +183,7 @@ export class TenantsService {
       periodEnd: periodEndDate.toISOString().slice(0, 10),
       sacCode: '998314',
       greetingNote: params.greetingNote?.trim() || defaultGreeting,
-      buyerCompany: tenant.name,
+      buyerCompany: recipientLabel,
       buyerGstin: tenant.gstin || 'Unregistered / Applied',
       buyerState,
       buyerAddress:
@@ -226,10 +229,13 @@ export class TenantsService {
       createdAt?: Date;
       updatedAt?: Date;
     };
+    const companyName = (tenant.companyName || '').trim();
     return {
       id: tenant._id.toString(),
       accountId: tenant.accountId || '',
       name: tenant.name,
+      companyName,
+      logoUrl: tenant.logoUrl || '',
       slug: tenant.slug,
       plan: tenant.plan,
       status: tenant.status,
@@ -309,12 +315,29 @@ export class TenantsService {
       throw new NotFoundException('Workspace not found.');
     }
 
-    if (dto.name !== undefined) {
+    if (dto.companyName !== undefined) {
+      const nextCompany = dto.companyName.trim();
+      tenant.companyName = nextCompany;
+      tenant.name = nextCompany || 'Leadsetu Workspace';
+    } else if (dto.name !== undefined) {
       const nextName = dto.name.trim();
-      if (!nextName) {
-        throw new BadRequestException('Workspace name cannot be empty.');
+      if (!nextName || nextName === 'Leadsetu Workspace') {
+        tenant.companyName = '';
+        tenant.name = 'Leadsetu Workspace';
+      } else {
+        tenant.companyName = nextName;
+        tenant.name = nextName;
       }
-      tenant.name = nextName;
+    }
+    if (dto.logoUrl !== undefined) {
+      const sanitizedLogo = sanitizeOrganizationLogoUrl(dto.logoUrl);
+      tenant.logoUrl = sanitizedLogo
+        ? await uploadToCloudinary(sanitizedLogo, {
+            folder: 'leadsetu/org-logos',
+            publicId: `tenant-${tenant._id.toString()}`,
+            resourceType: 'image',
+          })
+        : '';
     }
     if (dto.city !== undefined) tenant.city = dto.city.trim();
     if (dto.gstin !== undefined)

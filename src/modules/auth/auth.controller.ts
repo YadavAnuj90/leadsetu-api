@@ -51,10 +51,15 @@ export class RegisterSwaggerDto implements RegisterInput {
   password!: string;
 
   @ApiPropertyOptional({
-    description: 'Company or Business Workspace Name',
+    description: 'Optional Company or Organization Name',
     example: 'RS Electricals Pvt. Ltd.',
   })
   companyName?: string;
+
+  @ApiPropertyOptional({
+    description: 'Optional Organization Logo image (PNG/JPG/WEBP data URL or HTTPS URL)',
+  })
+  logoUrl?: string;
 
   @ApiPropertyOptional({
     description: 'Primary business city / hub',
@@ -124,7 +129,7 @@ export class AuthController {
   @ApiOperation({
     summary: 'Register a new Workspace Tenant & Owner User',
     description:
-      'Creates a new Tenant workspace in MongoDB Atlas, sets the 7-day refreshToken in an HttpOnly cookie, and returns `{ accessToken, user, tenant }`.',
+      'Creates a new Tenant workspace in Leadsetu Cloud, sets the 7-day refreshToken in an HttpOnly cookie, and returns `{ accessToken, user, tenant }`.',
   })
   @ApiBody({ type: RegisterSwaggerDto })
   @ApiResponse({

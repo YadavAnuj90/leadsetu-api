@@ -22,9 +22,11 @@ import {
   hashSecret,
   normalizeIndianPhone,
   normalizeUserFeatureAccess,
+  sanitizeOrganizationLogoUrl,
   sha256Hex,
   verifySecret,
 } from './identity.util';
+import { uploadToCloudinary } from './cloudinary.util';
 
 export interface RegisterInput {
   name: string;
@@ -32,6 +34,7 @@ export interface RegisterInput {
   phone?: string;
   password: string;
   companyName?: string;
+  logoUrl?: string;
   city?: string;
 }
 
@@ -199,6 +202,8 @@ export class AuthService {
         id: tenant._id.toString(),
         accountId: tenant.accountId || '',
         name: tenant.name,
+        companyName: (tenant.companyName || '').trim(),
+        logoUrl: tenant.logoUrl || '',
         slug: tenant.slug,
         plan: tenant.plan,
         status: tenant.status,
@@ -266,10 +271,20 @@ export class AuthService {
     const trialDays = platformConfig?.defaultTrialDays || 14;
     const trialEndsAt = new Date(Date.now() + trialDays * 86400000).toISOString();
 
-    const companyName = input.companyName?.trim() || `${name}'s Workspace`;
+    const cleanCompanyName = input.companyName?.trim() || '';
+    const sanitizedLogo = sanitizeOrganizationLogoUrl(input.logoUrl);
+    const cleanLogoUrl = sanitizedLogo
+      ? await uploadToCloudinary(sanitizedLogo, {
+          folder: 'leadsetu/org-logos',
+          resourceType: 'image',
+        })
+      : '';
+    const workspaceTitle = cleanCompanyName || 'Leadsetu Workspace';
     const tenant = await this.tenantModel.create({
-      name: companyName,
-      slug: this.generateSlug(companyName),
+      name: workspaceTitle,
+      companyName: cleanCompanyName,
+      logoUrl: cleanLogoUrl,
+      slug: this.generateSlug(cleanCompanyName || 'workspace'),
       accountId: await generateAccountId(this.tenantModel),
       plan: 'growth',
       status: 'trial',
@@ -324,8 +339,9 @@ export class AuthService {
     let tenant = await this.tenantModel.findById(user.tenantId).exec();
     if (!tenant) {
       tenant = await this.tenantModel.create({
-        name: `${user.name}'s Workspace`,
-        slug: this.generateSlug(user.name),
+        name: 'Leadsetu Workspace',
+        companyName: '',
+        slug: this.generateSlug('workspace'),
         plan: 'growth',
         status: 'trial',
       });
@@ -467,6 +483,8 @@ export class AuthService {
             id: tenant._id.toString(),
             accountId: tenant.accountId || '',
             name: tenant.name,
+            companyName: (tenant.companyName || '').trim(),
+            logoUrl: tenant.logoUrl || '',
             slug: tenant.slug,
             plan: tenant.plan,
             status: tenant.status,
@@ -590,11 +608,26 @@ export class AuthService {
     if (!tenant) {
       throw new BadRequestException('Workspace not found for this invite.');
     }
-    const effectiveState = this.superAdminService
-      ? await this.superAdminService
-          .getTenantEffectiveState(tenant._id.toString())
-          .catch(() => null)
-      : null;
+    const [effectiveState, inviterUser] = await Promise.all([
+      this.superAdminService
+        ? this.superAdminService
+            .getTenantEffectiveState(tenant._id.toString())
+            .catch(() => null)
+        : Promise.resolve(null),
+      user.invitedBy
+        ? this.userModel
+            .findById(user.invitedBy)
+            .select({ name: 1 })
+            .exec()
+        : this.userModel
+            .findOne({ tenantId: tenant._id, role: 'owner' })
+            .select({ name: 1 })
+            .exec(),
+    ]);
+
+    const companyName = (tenant.companyName || '').trim();
+    const invitedByDisplay =
+      companyName || inviterUser?.name || 'Workspace Admin';
 
     return {
       valid: true,
@@ -605,7 +638,10 @@ export class AuthService {
       role: user.role,
       territory: user.territory || '',
       inviteStatus: user.inviteStatus || 'pending',
-      workspaceName: tenant.name,
+      workspaceName: companyName || 'Leadsetu CRM',
+      companyName,
+      logoUrl: tenant.logoUrl || '',
+      invitedByDisplay,
       accountId: tenant.accountId || '',
       featureAccess: normalizeUserFeatureAccess(
         user.featureAccess,

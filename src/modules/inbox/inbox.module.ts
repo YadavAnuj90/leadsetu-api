@@ -39,7 +39,7 @@ import {
 import { HydratedDocument, Model, Types } from 'mongoose';
 import { randomBytes } from 'crypto';
 import { AuditService } from '../audit/audit.module';
-import { maskPhoneNumber } from '../auth/identity.util';
+import { maskPhoneNumber, resolveOwnerScopeFilter } from '../auth/identity.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 
 export type ConversationDocument = HydratedDocument<ConversationThread>;
@@ -58,6 +58,9 @@ export interface ChatMessage {
 export class ConversationThread {
   @Prop({ type: Types.ObjectId, ref: 'Tenant', required: true, index: true })
   tenantId!: Types.ObjectId;
+
+  @Prop({ type: Types.ObjectId, ref: 'User', index: true })
+  ownerId?: Types.ObjectId;
 
   @Prop({ required: true, trim: true })
   contactName!: string;
@@ -112,7 +115,7 @@ export class SendInboxMessageSwaggerDto {
   content!: string;
 
   @ApiPropertyOptional({
-    description: 'Whether this message was drafted using Gemini AI Smart Reply',
+    description: 'Whether this message was drafted using SetuAI Smart Reply',
     example: true,
     default: false,
   })
@@ -209,7 +212,11 @@ export class InboxService {
     query: { status?: string; channel?: string; search?: string },
   ) {
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
-    const filter: Record<string, unknown> = { tenantId: tenantObjectId };
+    const ownerScope = await resolveOwnerScopeFilter(this.convModel.db, auth);
+    const filter: Record<string, unknown> = {
+      tenantId: tenantObjectId,
+      ...ownerScope,
+    };
 
     if (query.status && query.status !== 'all') filter.status = query.status;
     if (query.channel && query.channel !== 'all') filter.channel = query.channel;
@@ -243,10 +250,12 @@ export class InboxService {
     if (!body.content?.trim())
       throw new BadRequestException('Message cannot be empty.');
 
+    const ownerScope = await resolveOwnerScopeFilter(this.convModel.db, auth);
     const doc = await this.convModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Conversation not found.');
@@ -281,10 +290,12 @@ export class InboxService {
   ) {
     if (!Types.ObjectId.isValid(id))
       throw new NotFoundException('Conversation not found.');
+    const ownerScope = await resolveOwnerScopeFilter(this.convModel.db, auth);
     const doc = await this.convModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Conversation not found.');
@@ -294,116 +305,6 @@ export class InboxService {
       ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
       : false;
     return this.toDto(doc, maskPhones);
-  }
-
-  async seedSamples(auth: { tenantId: string; email: string }) {
-    const now = Date.now();
-    const threads = [
-      {
-        contactName: 'Rajesh Sharma',
-        company: 'RS Electricals Pvt. Ltd.',
-        phone: '+91 98112 45678',
-        city: 'Karol Bagh, New Delhi',
-        channel: 'whatsapp' as const,
-        status: 'open' as const,
-        aiScore: 94,
-        estimatedValue: 450000,
-        aiSummary:
-          'High-intent wholesale buyer requesting 500 industrial units with 18% GST proforma invoice & bulk discount.',
-        aiSuggestedReply:
-          'Namaste Rajesh ji! 500 units par 12% bulk discount approve ho gaya hai. Sharing GST proforma invoice & Razorpay advance link right away.',
-        messages: [
-          {
-            id: randomBytes(5).toString('hex'),
-            direction: 'inbound' as const,
-            content:
-              'Hi team, hume Karol Bagh warehouse ke liye 500 units chahiye. Kya aaj quotation mil sakta hai with GST?',
-            senderName: 'Rajesh Sharma',
-            status: 'read' as const,
-            createdAt: new Date(now - 1800000).toISOString(),
-          },
-          {
-            id: randomBytes(5).toString('hex'),
-            direction: 'outbound' as const,
-            content:
-              'Namaste Rajesh ji! Bilkul, 500 units ready stock mein hain. Sharing catalogue & pricing sheet.',
-            senderName: auth.email.split('@')[0],
-            status: 'read' as const,
-            isAiDrafted: true,
-            createdAt: new Date(now - 1500000).toISOString(),
-          },
-          {
-            id: randomBytes(5).toString('hex'),
-            direction: 'inbound' as const,
-            content:
-              'Great, please share final GST proforma invoice and payment link so accounts team can release 50% advance today.',
-            senderName: 'Rajesh Sharma',
-            status: 'read' as const,
-            createdAt: new Date(now - 300000).toISOString(),
-          },
-        ],
-      },
-      {
-        contactName: 'Priya Malhotra',
-        company: 'Malhotra Luxury Interiors',
-        phone: '+91 98180 23451',
-        city: 'Sector 62, Noida',
-        channel: 'whatsapp' as const,
-        status: 'open' as const,
-        aiScore: 88,
-        estimatedValue: 380000,
-        aiSummary:
-          'Commercial architect in Noida Sector 62 looking for modular office workstations. Wants Thursday 11 AM site visit.',
-        aiSuggestedReply:
-          'Hi Priya, Thursday 11:00 AM site visit at Sector 62 Noida is confirmed! Our senior project engineer will bring physical finish samples.',
-        messages: [
-          {
-            id: randomBytes(5).toString('hex'),
-            direction: 'inbound' as const,
-            content:
-              'Hello, we saw your Meta ad. We need 45 modular workstations for our client in Sector 62 Noida. Can your team visit Thursday at 11 AM?',
-            senderName: 'Priya Malhotra',
-            status: 'read' as const,
-            createdAt: new Date(now - 3600000).toISOString(),
-          },
-        ],
-      },
-      {
-        contactName: 'Vikramjit Singh',
-        company: 'Apex Auto Components',
-        phone: '+91 99104 88712',
-        city: 'Udyog Vihar, Gurugram',
-        channel: 'indiamart' as const,
-        status: 'open' as const,
-        aiScore: 79,
-        estimatedValue: 620000,
-        aiSummary:
-          'IndiaMART verified buyer comparing MOQ and delivery schedule for Gurugram plant.',
-        aiSuggestedReply:
-          'Hello Vikramjit ji, for Gurugram Udyog Vihar we offer same-day dispatch from our Okhla hub with MOQ of 100 units. Shall we schedule a quick call?',
-        messages: [
-          {
-            id: randomBytes(5).toString('hex'),
-            direction: 'inbound' as const,
-            content:
-              '[IndiaMART Lead] Requirement for Annual CNC Spare Parts supply at Udyog Vihar Phase IV, Gurugram. Please share MOQ and HSN code details.',
-            senderName: 'Vikramjit Singh',
-            status: 'read' as const,
-            createdAt: new Date(now - 7200000).toISOString(),
-          },
-        ],
-      },
-    ];
-
-    const created = [];
-    for (const t of threads) {
-      const doc = await this.convModel.create({
-        tenantId: new Types.ObjectId(auth.tenantId),
-        ...t,
-      });
-      created.push(this.toDto(doc));
-    }
-    return { count: created.length, data: created };
   }
 }
 
@@ -416,7 +317,7 @@ export class InboxController {
   @Get()
   @ApiOperation({
     summary:
-      'List all WhatsApp & IndiaMART buyer conversations with Gemini AI summaries',
+      'List all WhatsApp & IndiaMART buyer conversations with SetuAI summaries',
   })
   @ApiQuery({
     name: 'status',
@@ -447,27 +348,15 @@ export class InboxController {
     return this.inboxService.findAll(auth, query);
   }
 
-  @Post('seed')
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({
-    summary:
-      'Seed 3 realistic Hinglish/English WhatsApp & IndiaMART buyer conversations',
-  })
-  @ApiResponse({ status: 201, description: '3 sample conversations created.' })
-  async seed(@Headers('authorization') authorization: string | undefined) {
-    const auth = await this.inboxService.verifyAuth(authorization);
-    return this.inboxService.seedSamples(auth);
-  }
-
   @Post(':id/messages')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
-    summary: 'Send an outbound message (or Gemini AI Smart Reply) in a conversation thread',
+    summary: 'Send an outbound message (or SetuAI Smart Reply) in a conversation thread',
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the conversation thread',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique conversation thread ID',
+    example: 'thr_01a2b3c4d5e6',
   })
   @ApiBody({ type: SendInboxMessageSwaggerDto })
   @ApiResponse({ status: 201, description: 'Message appended to conversation.' })
@@ -486,8 +375,8 @@ export class InboxController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the conversation thread',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique conversation thread ID',
+    example: 'thr_01a2b3c4d5e6',
   })
   @ApiBody({ type: UpdateInboxStatusSwaggerDto })
   @ApiResponse({ status: 200, description: 'Conversation status updated.' })

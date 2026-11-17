@@ -20,6 +20,7 @@ import {
   CreateCampaignDto,
 } from './dto/campaigns.dto';
 import { SuperAdminService } from '../super-admin/super-admin.service';
+import { resolveOwnerScopeFilter } from '../auth/identity.util';
 
 export type CampaignDocument = HydratedDocument<Campaign>;
 
@@ -136,7 +137,10 @@ export class CampaignsService {
     };
   }
 
-  private async getLiveSegmentCounts(tenantObjectId: Types.ObjectId) {
+  private async getLiveSegmentCounts(
+    tenantObjectId: Types.ObjectId,
+    ownerScope: Record<string, unknown> = {},
+  ) {
     try {
       const db = this.campaignModel.db;
       const leadsCol = db.collection('leads');
@@ -149,31 +153,35 @@ export class CampaignsService {
         indiamartLeads,
         gstContacts,
       ] = await Promise.all([
-        leadsCol.countDocuments({ tenantId: tenantObjectId }),
+        leadsCol.countDocuments({ tenantId: tenantObjectId, ...ownerScope }),
         leadsCol.countDocuments({
           tenantId: tenantObjectId,
+          ...ownerScope,
           $or: [{ aiScore: { $gte: 75 } }, { aiLabel: 'Hot' }],
         }),
         leadsCol.countDocuments({
           tenantId: tenantObjectId,
+          ...ownerScope,
           city: { $regex: /noida|delhi|gurugram|gurgaon|ghaziabad|faridabad/i },
         }),
         leadsCol.countDocuments({
           tenantId: tenantObjectId,
+          ...ownerScope,
           source: 'indiamart',
         }),
         contactsCol.countDocuments({
           tenantId: tenantObjectId,
+          ...ownerScope,
           gstin: { $exists: true, $ne: '' },
         }),
       ]);
 
       return {
-        all_leads: Math.max(totalLeads, 140),
-        hot_leads: Math.max(hotLeads, 48),
-        noida_delhi_ncr: Math.max(ncrLeads, 112),
-        indiamart_buyers: Math.max(indiamartLeads, 64),
-        gst_customers: Math.max(gstContacts, 38),
+        all_leads: totalLeads,
+        hot_leads: hotLeads,
+        noida_delhi_ncr: ncrLeads,
+        indiamart_buyers: indiamartLeads,
+        gst_customers: gstContacts,
         rawDbCounts: {
           totalLeads,
           hotLeads,
@@ -184,11 +192,11 @@ export class CampaignsService {
       };
     } catch {
       return {
-        all_leads: 140,
-        hot_leads: 48,
-        noida_delhi_ncr: 112,
-        indiamart_buyers: 64,
-        gst_customers: 38,
+        all_leads: 0,
+        hot_leads: 0,
+        noida_delhi_ncr: 0,
+        indiamart_buyers: 0,
+        gst_customers: 0,
         rawDbCounts: {
           totalLeads: 0,
           hotLeads: 0,
@@ -275,11 +283,16 @@ export class CampaignsService {
   }
 
   async findAll(
-    auth: { tenantId: string },
+    auth: { userId: string; tenantId: string },
     query: { search?: string; status?: string; targetSegment?: string },
   ) {
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
-    const filter: Record<string, unknown> = { tenantId: tenantObjectId };
+    const ownerScope = await resolveOwnerScopeFilter(this.campaignModel.db, auth);
+    const baseScope: Record<string, unknown> = {
+      tenantId: tenantObjectId,
+      ...ownerScope,
+    };
+    const filter: Record<string, unknown> = { ...baseScope };
 
     if (query.status && query.status !== 'all') {
       filter.status = query.status;
@@ -298,8 +311,8 @@ export class CampaignsService {
 
     const [docs, all, segmentCounts] = await Promise.all([
       this.campaignModel.find(filter).sort({ createdAt: -1 }).exec(),
-      this.campaignModel.find({ tenantId: tenantObjectId }).exec(),
-      this.getLiveSegmentCounts(tenantObjectId),
+      this.campaignModel.find(baseScope).exec(),
+      this.getLiveSegmentCounts(tenantObjectId, ownerScope),
     ]);
 
     const totalSent = all.reduce((s, c) => s + (c.sentCount || 0), 0);
@@ -331,14 +344,16 @@ export class CampaignsService {
     };
   }
 
-  async findOne(auth: { tenantId: string }, id: string) {
+  async findOne(auth: { userId: string; tenantId: string }, id: string) {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Campaign not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.campaignModel.db, auth);
     const doc = await this.campaignModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Campaign not found.');
@@ -404,14 +419,16 @@ export class CampaignsService {
     return this.toDto(doc);
   }
 
-  async launchCampaign(auth: { tenantId: string }, id: string) {
+  async launchCampaign(auth: { userId: string; tenantId: string }, id: string) {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Campaign not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.campaignModel.db, auth);
     const doc = await this.campaignModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Campaign not found.');
@@ -439,17 +456,19 @@ export class CampaignsService {
   }
 
   async update(
-    auth: { tenantId: string },
+    auth: { userId: string; tenantId: string },
     id: string,
     dto: Partial<CreateCampaignDto>,
   ) {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Campaign not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.campaignModel.db, auth);
     const doc = await this.campaignModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Campaign not found.');
@@ -470,79 +489,18 @@ export class CampaignsService {
     return this.toDto(doc);
   }
 
-  async remove(auth: { tenantId: string }, id: string) {
+  async remove(auth: { userId: string; tenantId: string }, id: string) {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Campaign not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.campaignModel.db, auth);
     await this.campaignModel
       .deleteOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     return { success: true, id };
-  }
-
-  async seedSamples(auth: { userId: string; tenantId: string }) {
-    const samples: CreateCampaignDto[] = [
-      {
-        name: 'Noida & Delhi-NCR Q4 Industrial Price List Broadcast',
-        templateName: 'ncr_industrial_pricelist_v2',
-        language: 'hinglish',
-        channel: 'whatsapp_cloud',
-        targetSegment: 'noida_delhi_ncr',
-        audienceCount: 340,
-        status: 'completed',
-        attributedRevenue: 840000,
-        ctaLabel: 'Download PDF Price List',
-        messageBody:
-          'Namaste {{name}} ji 👋, {{company}} ke liye humara updated Q4 Factory Price List & 18% GST Catalogue ready hai from Noida Electronic City. Click below to get instant distributor pricing!',
-      },
-      {
-        name: 'IndiaMART Hot Leads — 15-Min Instant Quote Follow-up',
-        templateName: 'indiamart_instant_quote_ai',
-        language: 'hinglish',
-        channel: 'whatsapp_ai_drip',
-        targetSegment: 'indiamart_buyers',
-        audienceCount: 185,
-        status: 'completed',
-        attributedRevenue: 620000,
-        ctaLabel: 'Book Free Site Visit',
-        messageBody:
-          'Hello {{name}} ji, thank you for your inquiry on IndiaMART for {{company}}. Humari engineering team Noida & Delhi-NCR me same-day site inspection provide karti hai. Reply YES to confirm!',
-      },
-      {
-        name: 'AI Score 80+ Hot Prospects — Special Corporate Credit Offer',
-        templateName: 'hot_leads_credit_unlock',
-        language: 'english',
-        channel: 'whatsapp_cloud',
-        targetSegment: 'hot_leads',
-        audienceCount: 92,
-        status: 'completed',
-        attributedRevenue: 510000,
-        ctaLabel: 'Claim 30-Day Credit Line',
-        messageBody:
-          'Hi {{name}}, exclusive offer for {{company}}: Get 30-day B2B credit cycle + priority dispatch from our Noida Electronic City hub on orders confirmed this week.',
-      },
-      {
-        name: 'GST Verified B2B Buyers — Year-End AMC Renewal Drive',
-        templateName: 'amc_renewal_gst_2026',
-        language: 'hinglish',
-        channel: 'whatsapp_cloud',
-        targetSegment: 'gst_customers',
-        audienceCount: 128,
-        status: 'scheduled',
-        scheduledFor: '15 Nov 2026, 11:00 AM IST',
-        ctaLabel: 'Renew Annual AMC',
-        messageBody:
-          'Namaste {{name}} ji, {{company}} ka Annual Maintenance Contract (AMC) renew karne par flat 15% loyalty discount + 100% GST input tax credit invoice milega.',
-      },
-    ];
-
-    const created = [];
-    for (const s of samples) {
-      created.push(await this.create(auth, s));
-    }
-    return { count: created.length, data: created };
   }
 }

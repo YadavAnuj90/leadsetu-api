@@ -135,13 +135,13 @@ export class CreateInvoiceDto {
 
   @ApiPropertyOptional({
     description: 'Optional linked Deal ID',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    example: 'del_01a2b3c4d5e6',
   })
   linkedDealId?: string;
 
   @ApiPropertyOptional({
     description: 'Optional linked Lead ID',
-    example: '672e1a2b3c4d5e6f7a8b9c0e',
+    example: 'ld_01a2b3c4d5e6',
   })
   linkedLeadId?: string;
 

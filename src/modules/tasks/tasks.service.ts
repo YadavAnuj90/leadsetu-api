@@ -9,6 +9,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { HydratedDocument, Model, Types } from 'mongoose';
 import { CreateTaskDto } from './dto/tasks.dto';
+import { resolveOwnerScopeFilter } from '../auth/identity.util';
 
 export type TaskDocument = HydratedDocument<TaskItem>;
 
@@ -119,11 +120,16 @@ export class TasksService {
   }
 
   async findAll(
-    auth: { tenantId: string },
+    auth: { userId: string; tenantId: string },
     query: { status?: string; priority?: string; search?: string },
   ) {
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
-    const filter: Record<string, unknown> = { tenantId: tenantObjectId };
+    const ownerScope = await resolveOwnerScopeFilter(this.taskModel.db, auth);
+    const baseScope: Record<string, unknown> = {
+      tenantId: tenantObjectId,
+      ...ownerScope,
+    };
+    const filter: Record<string, unknown> = { ...baseScope };
 
     if (query.status && query.status !== 'all') filter.status = query.status;
     if (query.priority && query.priority !== 'all')
@@ -139,7 +145,7 @@ export class TasksService {
 
     const [docs, all] = await Promise.all([
       this.taskModel.find(filter).sort({ status: -1, createdAt: -1 }).exec(),
-      this.taskModel.find({ tenantId: tenantObjectId }).exec(),
+      this.taskModel.find(baseScope).exec(),
     ]);
 
     return {
@@ -177,16 +183,18 @@ export class TasksService {
   }
 
   async update(
-    auth: { tenantId: string },
+    auth: { userId: string; tenantId: string },
     id: string,
     dto: Partial<CreateTaskDto>,
   ) {
     if (!Types.ObjectId.isValid(id))
       throw new NotFoundException('Task not found.');
+    const ownerScope = await resolveOwnerScopeFilter(this.taskModel.db, auth);
     const doc = await this.taskModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Task not found.');
@@ -207,72 +215,17 @@ export class TasksService {
     return this.toDto(doc);
   }
 
-  async remove(auth: { tenantId: string }, id: string) {
+  async remove(auth: { userId: string; tenantId: string }, id: string) {
     if (!Types.ObjectId.isValid(id))
       throw new NotFoundException('Task not found.');
+    const ownerScope = await resolveOwnerScopeFilter(this.taskModel.db, auth);
     await this.taskModel
       .deleteOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     return { success: true, id };
-  }
-
-  async seedSamples(auth: { userId: string; tenantId: string }) {
-    const today = new Date().toISOString().slice(0, 10);
-    const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
-    const samples: CreateTaskDto[] = [
-      {
-        title: 'Share revised 18% GST proforma quote for 500 units',
-        description:
-          'Include 12% bulk discount + Razorpay advance payment link on WhatsApp.',
-        priority: 'high',
-        status: 'pending',
-        category: 'quote',
-        dueDate: today,
-        relatedName: 'Rajesh Sharma',
-        relatedCompany: 'RS Electricals Pvt. Ltd.',
-        relatedPhone: '+91 98112 45678',
-      },
-      {
-        title: 'Confirm Thursday 11 AM site visit at Sector 62 Noida',
-        description: 'Send Google Maps pin and 3D layout PDF via WhatsApp.',
-        priority: 'high',
-        status: 'in_progress',
-        category: 'meeting',
-        dueDate: today,
-        relatedName: 'Priya Malhotra',
-        relatedCompany: 'Malhotra Luxury Interiors',
-        relatedPhone: '+91 98180 23451',
-      },
-      {
-        title: 'Follow-up call on CNC sample testing feedback',
-        description: 'Discuss annual rate contract and MOQ schedule.',
-        priority: 'medium',
-        status: 'pending',
-        category: 'call',
-        dueDate: tomorrow,
-        relatedName: 'Vikramjit Singh',
-        relatedCompany: 'Apex Auto Components',
-        relatedPhone: '+91 99104 88712',
-      },
-      {
-        title: 'Send dispatch tracking ID for Okhla warehouse order',
-        description: '50% advance already received via Razorpay.',
-        priority: 'low',
-        status: 'done',
-        category: 'whatsapp',
-        dueDate: today,
-        relatedName: 'Sandeep Bansal',
-        relatedCompany: 'Bansal Steel & Infra',
-        relatedPhone: '+91 98711 65090',
-      },
-    ];
-    const created = [];
-    for (const s of samples) {
-      created.push(await this.create(auth, s));
-    }
-    return { count: created.length, data: created };
   }
 }

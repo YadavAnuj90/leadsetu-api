@@ -17,7 +17,7 @@ import { ConfigService } from '@nestjs/config';
 import { HydratedDocument, Model, Types } from 'mongoose';
 import { randomBytes } from 'crypto';
 import { AuditService } from '../audit/audit.service';
-import { maskPhoneNumber } from '../auth/identity.util';
+import { maskPhoneNumber, resolveOwnerScopeFilter } from '../auth/identity.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 import {
@@ -559,7 +559,11 @@ export class InvoicesService {
     query: { search?: string; status?: string; docType?: string },
   ) {
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
-    const filter: Record<string, unknown> = { tenantId: tenantObjectId };
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
+    const filter: Record<string, unknown> = {
+      tenantId: tenantObjectId,
+      ...ownerScope,
+    };
 
     if (query.docType && query.docType !== 'all') {
       filter.docType = query.docType;
@@ -577,7 +581,7 @@ export class InvoicesService {
 
     const [docs, all, maskPhones] = await Promise.all([
       this.invoiceModel.find(filter).sort({ createdAt: -1 }).exec(),
-      this.invoiceModel.find({ tenantId: tenantObjectId }).exec(),
+      this.invoiceModel.find({ tenantId: tenantObjectId, ...ownerScope }).exec(),
       this.auditService
         ? this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
         : Promise.resolve(false),
@@ -677,8 +681,9 @@ export class InvoicesService {
       }
     }
 
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
     const docs = await this.invoiceModel
-      .find({ tenantId: new Types.ObjectId(auth.tenantId) })
+      .find({ tenantId: new Types.ObjectId(auth.tenantId), ...ownerScope })
       .sort({ createdAt: -1 })
       .exec();
 
@@ -770,10 +775,12 @@ export class InvoicesService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Invoice not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
     const doc = await this.invoiceModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Invoice not found.');
@@ -827,6 +834,7 @@ export class InvoicesService {
     tenantId: string,
     clientName: string,
     gstin?: string,
+    ownerScope: Record<string, unknown> = {},
   ) {
     const db = this.invoiceModel.db;
     if (!db || !Types.ObjectId.isValid(tenantId)) return null;
@@ -835,7 +843,7 @@ export class InvoicesService {
     if (cleanGstin) {
       const byGstin = await db
         .collection('contacts')
-        .findOne({ tenantId: tenantOid, gstin: cleanGstin });
+        .findOne({ tenantId: tenantOid, ...ownerScope, gstin: cleanGstin });
       if (byGstin) return byGstin;
     }
     const cleanName = String(clientName || '').trim();
@@ -844,6 +852,7 @@ export class InvoicesService {
     const rx = new RegExp(`^${escaped}$`, 'i');
     return db.collection('contacts').findOne({
       tenantId: tenantOid,
+      ...ownerScope,
       $or: [{ company: rx }, { name: rx }],
     });
   }
@@ -859,10 +868,12 @@ export class InvoicesService {
       overrideReason?: string;
     },
   ): Promise<{ creditTermDays: number; overrideActorName: string }> {
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
     const contact = await this.findMatchingBuyerContact(
       auth.tenantId,
       params.clientName,
       params.gstin,
+      ownerScope,
     );
     const creditTermDays = Number(contact?.creditTermDays ?? 15);
     if (params.status === 'paid' || params.status === 'draft') {
@@ -887,6 +898,7 @@ export class InvoicesService {
         ? await this.invoiceModel
             .find({
               tenantId: tenantOid,
+              ...ownerScope,
               docType: { $ne: 'proforma_quote' },
               status: { $nin: ['paid', 'cancelled'] },
               $or: orFilter,
@@ -1119,10 +1131,12 @@ export class InvoicesService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Invoice not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
     const doc = await this.invoiceModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Invoice not found.');
@@ -1185,10 +1199,12 @@ export class InvoicesService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Invoice not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
     const doc = await this.invoiceModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Invoice not found.');
@@ -1252,10 +1268,12 @@ export class InvoicesService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Invoice not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
     const doc = await this.invoiceModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Invoice not found.');
@@ -1356,10 +1374,12 @@ export class InvoicesService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Invoice not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
     const doc = await this.invoiceModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Invoice not found.');
@@ -1411,8 +1431,13 @@ export class InvoicesService {
       throw new NotFoundException('Proforma quotation not found.');
     }
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
     const quote = await this.invoiceModel
-      .findOne({ _id: new Types.ObjectId(quoteId), tenantId: tenantObjectId })
+      .findOne({
+        _id: new Types.ObjectId(quoteId),
+        tenantId: tenantObjectId,
+        ...ownerScope,
+      })
       .exec();
     if (!quote) throw new NotFoundException('Proforma quotation not found.');
 
@@ -1667,10 +1692,12 @@ export class InvoicesService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Invoice not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
     const doc = await this.invoiceModel
       .findOneAndDelete({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (doc) {
@@ -1685,133 +1712,6 @@ export class InvoicesService {
       });
     }
     return { success: true, id };
-  }
-
-  async seedSamples(auth: { userId: string; tenantId: string }) {
-    const samples: CreateInvoiceDto[] = [
-      {
-        invoiceNumber: 'INV-2026-1001',
-        docType: 'tax_invoice',
-        clientName: 'Malhotra Luxury Interiors Pvt. Ltd.',
-        contactPerson: 'Priya Malhotra',
-        phone: '+91 98180 23451',
-        email: 'priya@malhotrainteriors.com',
-        gstin: '09AAECM5678G1Z2',
-        placeOfSupply: '09 - Uttar Pradesh',
-        taxType: 'cgst_sgst',
-        gstRate: 18,
-        status: 'paid',
-        paymentMethod: 'razorpay',
-        dueDate: '2026-11-15',
-        items: [
-          {
-            description: 'Modular Acoustic Office Workstations (Cluster of 24)',
-            hsnSac: '940330',
-            quantity: 2,
-            unitPrice: 140000,
-          },
-          {
-            description: 'On-site Installation & Commissioning (Noida Sector 62)',
-            hsnSac: '998314',
-            quantity: 1,
-            unitPrice: 35000,
-          },
-        ],
-        notes: 'Paid in full via Razorpay Corporate Netbanking. Dispatched from Noida Electronic City.',
-      },
-      {
-        invoiceNumber: 'INV-2026-1002',
-        docType: 'tax_invoice',
-        clientName: 'RS Electricals & Switchgear Pvt. Ltd.',
-        contactPerson: 'Rajesh Sharma',
-        phone: '+91 98112 45678',
-        email: 'rajesh@rselectricals.in',
-        gstin: '07AABCR1234F1Z5',
-        placeOfSupply: '07 - Delhi',
-        taxType: 'igst',
-        gstRate: 18,
-        status: 'sent',
-        paymentMethod: 'unpaid',
-        dueDate: '2026-11-20',
-        items: [
-          {
-            description: 'Three-Phase Industrial Servo Voltage Stabilizer 150 KVA',
-            hsnSac: '850440',
-            quantity: 2,
-            unitPrice: 225000,
-          },
-        ],
-        notes: 'Inter-state supply from Noida (UP) to Karol Bagh (New Delhi). 18% IGST applicable.',
-      },
-      {
-        invoiceNumber: 'QTN-2026-1003',
-        docType: 'proforma_quote',
-        clientName: 'Apex Auto Components Ltd.',
-        contactPerson: 'Vikramjit Singh',
-        phone: '+91 99104 88712',
-        email: 'vikram@apexauto.in',
-        gstin: '06AABCA9012H1Z8',
-        placeOfSupply: '06 - Haryana',
-        taxType: 'igst',
-        gstRate: 18,
-        status: 'sent',
-        paymentMethod: 'unpaid',
-        dueDate: '2026-11-25',
-        items: [
-          {
-            description: 'Annual Enterprise AMC + IoT Energy Telemetry Sensors',
-            hsnSac: '998313',
-            quantity: 4,
-            unitPrice: 155000,
-          },
-        ],
-        discount: 20000,
-        notes: 'Proforma Quotation valid for 15 days. 50% advance required to release purchase order.',
-      },
-      {
-        invoiceNumber: 'INV-2026-1004',
-        docType: 'tax_invoice',
-        clientName: 'Bansal Steel & Infra Projects',
-        contactPerson: 'Sandeep Bansal',
-        phone: '+91 98711 65090',
-        email: 'sandeep@bansalinfra.in',
-        gstin: '07AABCB3456J1Z1',
-        placeOfSupply: '07 - Delhi',
-        taxType: 'igst',
-        gstRate: 18,
-        status: 'overdue',
-        paymentMethod: 'unpaid',
-        dueDate: '2026-11-05',
-        items: [
-          {
-            description: 'Heavy Duty LT Power Distribution Panel Board (Okhla Site)',
-            hsnSac: '853710',
-            quantity: 1,
-            unitPrice: 380000,
-          },
-        ],
-        notes: 'Credit period expired. Automated WhatsApp reminder triggered via Leadsetu AI.',
-      },
-    ];
-
-    const created = [];
-    for (const s of samples) {
-      const inv = await this.create(auth, s, { skipCreditGuardrail: true });
-      if (s.invoiceNumber === 'INV-2026-1002') {
-        const withPartial = await this.recordPayment(auth, inv.id, {
-          amountPaid: 150000,
-          tdsDeducted: 9000,
-          paymentMode: 'NEFT',
-          utrOrChequeNo: 'HDFCR520261114009812',
-          paymentDate: new Date().toISOString().slice(0, 10),
-          note: '30% Advance + 2% TDS u/s 194C deducted by buyer',
-        });
-        created.push(withPartial);
-      } else {
-        created.push(inv);
-      }
-    }
-    return { count: created.length, data: created };
   }
 
   private composeChaserMessage(params: {
@@ -1860,12 +1760,13 @@ export class InvoicesService {
   async getRecoveryOverview(auth: { userId: string; tenantId: string }) {
     const tenantOid = new Types.ObjectId(auth.tenantId);
     const db = this.invoiceModel.db;
+    const ownerScope = await resolveOwnerScopeFilter(db, auth);
     const [invoices, contacts, recoveryConfig, maskPhones] = await Promise.all([
-      this.invoiceModel.find({ tenantId: tenantOid }).sort({ createdAt: -1 }).exec(),
+      this.invoiceModel.find({ tenantId: tenantOid, ...ownerScope }).sort({ createdAt: -1 }).exec(),
       db
         ? db
             .collection('contacts')
-            .find({ tenantId: tenantOid })
+            .find({ tenantId: tenantOid, ...ownerScope })
             .sort({ createdAt: -1 })
             .toArray()
         : Promise.resolve([]),
@@ -2123,10 +2024,12 @@ export class InvoicesService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Invoice not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
     const doc = await this.invoiceModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Invoice not found.');
@@ -2165,10 +2068,12 @@ export class InvoicesService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Invoice not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
     const doc = await this.invoiceModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Invoice not found.');
@@ -2340,10 +2245,12 @@ export class InvoicesService {
 
   async runBatchChasers(auth: { userId: string; tenantId: string }) {
     const tenantOid = new Types.ObjectId(auth.tenantId);
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
     const config = await this.getTenantRecoveryConfig(auth.tenantId);
     const openDocs = await this.invoiceModel
       .find({
         tenantId: tenantOid,
+        ...ownerScope,
         docType: { $ne: 'proforma_quote' },
         status: { $nin: ['paid', 'cancelled'] },
       })
@@ -2418,8 +2325,9 @@ export class InvoicesService {
       }
     }
 
+    const ownerScope = await resolveOwnerScopeFilter(db, auth);
     const docs = await this.invoiceModel
-      .find({ tenantId: tenantOid, docType: 'tax_invoice', status: { $ne: 'cancelled' } })
+      .find({ tenantId: tenantOid, ...ownerScope, docType: 'tax_invoice', status: { $ne: 'cancelled' } })
       .sort({ createdAt: -1 })
       .exec();
 
@@ -2532,9 +2440,11 @@ export class InvoicesService {
       throw new BadRequestException('Provide at least one bank statement credit entry.');
     }
 
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
     const openDocs = await this.invoiceModel
       .find({
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
         docType: { $ne: 'proforma_quote' },
         status: { $nin: ['paid', 'cancelled'] },
       })

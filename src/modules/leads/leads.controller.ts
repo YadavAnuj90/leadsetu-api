@@ -103,7 +103,7 @@ export class CreateLeadSwaggerDto implements CreateLeadDto {
 
   @ApiPropertyOptional({
     description:
-      'Buyer requirement notes (analyzed by Gemini AI Lead Scorer for urgency & budget keywords)',
+      'Buyer requirement notes (analyzed by SetuAI Lead Scorer for urgency & budget keywords)',
     example:
       'Urgent requirement for 500 industrial switchgear units with GST proforma invoice.',
   })
@@ -115,7 +115,7 @@ export class UpdateLeadSwaggerDto
   implements UpdateLeadDto
 {
   @ApiPropertyOptional({
-    description: 'Force re-calculation of Gemini AI Lead Score (1–100)',
+    description: 'Force re-calculation of SetuAI Lead Score (1–100)',
     example: true,
   })
   rescoreAi?: boolean;
@@ -137,7 +137,7 @@ export class AddLeadActivitySwaggerDto {
   description!: string;
 }
 
-@ApiTags('2. Leads & Gemini AI Scoring')
+@ApiTags('2. Leads & SetuAI Scoring')
 @ApiBearerAuth('access-token')
 @Controller('leads')
 export class LeadsController {
@@ -181,7 +181,7 @@ export class LeadsController {
     name: 'aiLabel',
     required: false,
     enum: ['all', 'Hot', 'Warm', 'Cold'],
-    description: 'Filter by Gemini AI heat label',
+    description: 'Filter by SetuAI heat label',
   })
   @ApiQuery({
     name: 'sortBy',
@@ -199,19 +199,6 @@ export class LeadsController {
   ) {
     const auth = await this.leadsService.verifyAuth(authorization);
     return this.leadsService.findAll(auth, query);
-  }
-
-  @Post('seed')
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({
-    summary: 'Seed 5 realistic Delhi-NCR sample leads into MongoDB Atlas',
-    description:
-      'Populates 5 pre-scored B2B leads (WhatsApp, IndiaMART, Meta Ads, Website, Referral) for testing.',
-  })
-  @ApiResponse({ status: 201, description: '5 sample leads created.' })
-  async seed(@Headers('authorization') authorization: string | undefined) {
-    const auth = await this.leadsService.verifyAuth(authorization);
-    return this.leadsService.seedSampleLeads(auth);
   }
 
   @Post('bulk-import')
@@ -276,8 +263,8 @@ export class LeadsController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the lead',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique lead record ID',
+    example: 'ld_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Lead object with activities timeline.' })
   @ApiResponse({ status: 404, description: 'Lead not found.' })
@@ -292,7 +279,7 @@ export class LeadsController {
   @Post()
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
-    summary: 'Create a new lead (auto-scored 1–100 by Gemini AI engine)',
+    summary: 'Create a new lead (auto-scored 1–100 by SetuAI engine)',
     description:
       'Automatically computes `aiScore` (1–100), `aiLabel` (`Hot`/`Warm`/`Cold`), and `aiInsight` based on source, value, and requirement notes.',
   })
@@ -312,8 +299,8 @@ export class LeadsController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the lead',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique lead record ID',
+    example: 'ld_01a2b3c4d5e6',
   })
   @ApiBody({ type: UpdateLeadSwaggerDto })
   @ApiResponse({ status: 200, description: 'Updated lead returned.' })
@@ -333,8 +320,8 @@ export class LeadsController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the lead',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique lead record ID',
+    example: 'ld_01a2b3c4d5e6',
   })
   @ApiBody({ type: AddLeadActivitySwaggerDto })
   @ApiResponse({ status: 201, description: 'Updated lead with new timeline event.' })
@@ -354,8 +341,8 @@ export class LeadsController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the lead',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique lead record ID',
+    example: 'ld_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Lead deleted.' })
   async remove(

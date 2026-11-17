@@ -39,7 +39,7 @@ export interface FeatureSpec {
 export const PLATFORM_FEATURE_CATALOG: FeatureSpec[] = [
   {
     key: 'aiScoring',
-    label: 'Gemini AI Lead Scoring',
+    label: 'SetuAI Lead Scoring',
     category: 'AI & Automation',
     description: '1–100 Hinglish/English buyer intent ranking & next-best-action summaries',
   },

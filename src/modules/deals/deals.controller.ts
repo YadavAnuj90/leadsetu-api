@@ -176,25 +176,14 @@ export class DealsController {
     return this.dealsService.findAll(auth, query);
   }
 
-  @Post('seed')
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({
-    summary: 'Seed 5 sample Delhi-NCR B2B deals across all Kanban stages',
-  })
-  @ApiResponse({ status: 201, description: '5 sample deals created.' })
-  async seed(@Headers('authorization') authorization: string | undefined) {
-    const auth = await this.dealsService.verifyAuth(authorization);
-    return this.dealsService.seedSampleDeals(auth);
-  }
-
   @Get(':id')
   @ApiOperation({
     summary: 'Get single deal details, 18% GST breakdown & negotiation log',
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the deal',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique deal record ID',
+    example: 'del_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Deal object returned.' })
   async findOne(
@@ -228,8 +217,8 @@ export class DealsController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the deal',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique deal record ID',
+    example: 'del_01a2b3c4d5e6',
   })
   @ApiBody({ type: UpdateDealSwaggerDto })
   @ApiResponse({ status: 200, description: 'Deal updated.' })
@@ -249,8 +238,8 @@ export class DealsController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the deal',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique deal record ID',
+    example: 'del_01a2b3c4d5e6',
   })
   @ApiBody({ type: AddDealActivitySwaggerDto })
   @ApiResponse({ status: 201, description: 'Activity added to deal.' })
@@ -270,8 +259,8 @@ export class DealsController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the deal',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique deal record ID',
+    example: 'del_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Deal deleted.' })
   async remove(

@@ -36,7 +36,7 @@ src/
 
 ```bash
 cp .env.example .env
-# Fill in DATABASE_URL, JWT_SECRET, etc.
+
 npm install
 npm run db:migrate     # Run Prisma migrations
 npm run db:seed        # Seed dev data
@@ -45,10 +45,8 @@ npm run start:dev      # Start on port 3001
 
 ## 🗄️ Database
 
-Uses **PostgreSQL** with **Prisma ORM**.
-Every tenant-owned table has `tenant_id` — enforced via PostgreSQL Row Level Security (RLS) + application-level guards.
 
-**Money is always stored as integers (paise), never floats.**
+
 
 ## 🔐 Auth Flow
 

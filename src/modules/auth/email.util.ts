@@ -9,6 +9,7 @@ export interface InviteEmailInput {
   userCode: string;
   accountId: string;
   workspaceName: string;
+  companyName?: string;
   inviterName: string;
   inviteUrl: string;
   temporaryPassword?: string | null;
@@ -41,11 +42,16 @@ export async function dispatchTeamInviteEmail(
     (k) => USER_FEATURE_LABELS[k],
   );
 
-  const emailSubject = `You're invited to ${input.workspaceName} on Leadsetu CRM (${roleLabel})`;
+  // Send company name in invitations; fall back to admin/inviter name only when no company name is configured.
+  const companyLabel = input.companyName?.trim() || '';
+  const senderDisplayName =
+    companyLabel || input.inviterName?.trim() || 'Leadsetu CRM';
+
+  const emailSubject = `You're invited to ${senderDisplayName} on Leadsetu CRM (${roleLabel})`;
   const emailPreview = [
     `Hi ${input.memberName},`,
     '',
-    `${input.inviterName} has invited you to join ${input.workspaceName} as a ${roleLabel}.`,
+    `${senderDisplayName} has invited you to join Leadsetu CRM as a ${roleLabel}.`,
     '',
     `Workspace Account ID: #${input.accountId}`,
     `Your 10-Digit User ID: #${input.userCode}`,
@@ -64,9 +70,9 @@ export async function dispatchTeamInviteEmail(
 
   const htmlBody = `
     <div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;background:#f8faff;border:1px solid #e2e8f0;border-radius:16px;color:#0f172a;">
-      <h2 style="margin:0 0 8px;color:#0f172a;">Welcome to ${input.workspaceName} on Leadsetu CRM</h2>
+      <h2 style="margin:0 0 8px;color:#0f172a;">Welcome to ${senderDisplayName} on Leadsetu CRM</h2>
       <p style="margin:0 0 16px;font-size:14px;color:#334155;">
-        Hi <strong>${input.memberName}</strong>, ${input.inviterName} has created your <strong>${roleLabel}</strong> account.
+        Hi <strong>${input.memberName}</strong>, <strong>${senderDisplayName}</strong> has created your <strong>${roleLabel}</strong> account and invited you to Leadsetu CRM.
       </p>
       <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin-bottom:16px;font-size:13px;">
         <div><strong>Workspace Account ID:</strong> #${input.accountId}</div>

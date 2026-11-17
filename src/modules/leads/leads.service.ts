@@ -18,7 +18,11 @@ import {
   LeadStatus,
 } from './schemas/lead.schema';
 import { AuditService } from '../audit/audit.module';
-import { maskPhoneNumber, normalizeIndianPhone } from '../auth/identity.util';
+import {
+  maskPhoneNumber,
+  normalizeIndianPhone,
+  resolveOwnerScopeFilter,
+} from '../auth/identity.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 
 export interface CreateLeadDto {
@@ -190,7 +194,12 @@ export class LeadsService {
 
   async findAll(auth: AuthContext, query: LeadsQuery) {
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
-    const filter: Record<string, unknown> = { tenantId: tenantObjectId };
+    const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
+    const baseScope: Record<string, unknown> = {
+      tenantId: tenantObjectId,
+      ...ownerScope,
+    };
+    const filter: Record<string, unknown> = { ...baseScope };
 
     if (query.status && query.status !== 'all') {
       filter.status = query.status;
@@ -222,7 +231,7 @@ export class LeadsService {
 
     const [docs, allTenantLeads, maskPhones] = await Promise.all([
       this.leadModel.find(filter).sort(sortObj).exec(),
-      this.leadModel.find({ tenantId: tenantObjectId }).exec(),
+      this.leadModel.find(baseScope).exec(),
       this.auditService
         ? this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
         : Promise.resolve(false),
@@ -264,10 +273,12 @@ export class LeadsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Lead not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
     const doc = await this.leadModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
 
@@ -297,14 +308,14 @@ export class LeadsService {
       : {
           aiScore: 0,
           aiLabel: 'Warm' as const,
-          aiInsight: 'Gemini AI Lead Scoring disabled by Leadsetu HQ.',
+          aiInsight: 'SetuAI Lead Scoring disabled by Leadsetu HQ.',
         };
     const nowIso = new Date().toISOString();
 
     const initialActivity: LeadActivity = {
       id: randomBytes(6).toString('hex'),
       type: 'created',
-      description: `Lead captured via ${(dto.source || 'whatsapp').toUpperCase()} · Gemini AI scored ${ai.aiScore}/100 (${ai.aiLabel})`,
+      description: `Lead captured via ${(dto.source || 'whatsapp').toUpperCase()} · SetuAI scored ${ai.aiScore}/100 (${ai.aiLabel})`,
       authorName: auth.email.split('@')[0],
       createdAt: nowIso,
     };
@@ -328,7 +339,7 @@ export class LeadsService {
       activities: [initialActivity],
     });
 
-    // Auto-trigger active CRM Workflows in MongoDB (`lead.created` & `lead.hot_scored`)
+    // Auto-trigger active CRM Workflows (`lead.created` & `lead.hot_scored`)
     try {
       const wfTriggers =
         ai.aiScore >= 80
@@ -385,11 +396,12 @@ export class LeadsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Lead not found.');
     }
-
+    const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
     const doc = await this.leadModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
 
@@ -477,10 +489,12 @@ export class LeadsService {
       throw new BadRequestException('Activity note cannot be empty.');
     }
 
+    const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
     const doc = await this.leadModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
 
@@ -508,10 +522,12 @@ export class LeadsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Lead not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
     const doc = await this.leadModel
       .findOneAndDelete({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
 
@@ -531,82 +547,6 @@ export class LeadsService {
     return { success: true, id };
   }
 
-  async seedSampleLeads(auth: AuthContext) {
-    const samples: CreateLeadDto[] = [
-      {
-        name: 'Rajesh Sharma',
-        company: 'RS Electricals Pvt. Ltd.',
-        phone: '+91 98112 45678',
-        email: 'rajesh@rselectricals.in',
-        city: 'Karol Bagh, New Delhi',
-        source: 'whatsapp',
-        status: 'proposal',
-        estimatedValue: 450000,
-        tags: ['Bulk Order', 'GST Quote Sent'],
-        notes:
-          'Urgent requirement for 500 industrial switchgear units. Asked for bulk discount + GST proforma invoice.',
-      },
-      {
-        name: 'Priya Malhotra',
-        company: 'Malhotra Luxury Interiors',
-        phone: '+91 98180 23451',
-        email: 'priya@malhotrainteriors.com',
-        city: 'Sector 62, Noida',
-        source: 'meta_ads',
-        status: 'qualified',
-        estimatedValue: 280000,
-        tags: ['Site Visit', 'Noida Commercial'],
-        notes:
-          'Booked site visit for Thursday 11 AM. Ready budget for commercial office modular setup.',
-      },
-      {
-        name: 'Vikramjit Singh',
-        company: 'Apex Auto Components',
-        phone: '+91 99104 88712',
-        email: 'vikram@apexauto.in',
-        city: 'Udyog Vihar, Gurugram',
-        source: 'indiamart',
-        status: 'contacted',
-        estimatedValue: 620000,
-        tags: ['B2B Annual', 'IndiaMART Verified'],
-        notes:
-          'Comparing MOQ and delivery schedule for Gurugram plant. Follow-up call scheduled.',
-      },
-      {
-        name: 'Ananya Verma',
-        company: 'Verma Agro Foods',
-        phone: '+91 97172 33901',
-        email: 'ananya@vermafoods.co.in',
-        city: 'NIT Faridabad',
-        source: 'website',
-        status: 'new',
-        estimatedValue: 125000,
-        tags: ['Brochure Downloaded'],
-        notes: 'Submitted pricing inquiry via website form.',
-      },
-      {
-        name: 'Sandeep Bansal',
-        company: 'Bansal Steel & Infra',
-        phone: '+91 98711 65090',
-        email: 'sandeep@bansalinfra.in',
-        city: 'Okhla Phase III, New Delhi',
-        source: 'referral',
-        status: 'converted',
-        estimatedValue: 850000,
-        tags: ['Advance Paid', 'VIP Client'],
-        notes:
-          '50% advance received via Razorpay. Dispatch scheduled for Monday.',
-      },
-    ];
-
-    const created = [];
-    for (const s of samples) {
-      const lead = await this.create(auth, s);
-      created.push(lead);
-    }
-    return { count: created.length, data: created };
-  }
-
   private last10Digits(raw?: string): string {
     if (!raw) return '';
     const digits = raw.replace(/\D/g, '');
@@ -617,6 +557,7 @@ export class LeadsService {
     tenantObjectId: Types.ObjectId,
     phone?: string,
     email?: string,
+    ownerScope: Record<string, unknown> = {},
   ): Promise<LeadDocument | null> {
     const orClauses: Record<string, unknown>[] = [];
     const tenDigits = this.last10Digits(phone);
@@ -629,7 +570,9 @@ export class LeadsService {
       orClauses.push({ email: cleanEmail });
     }
     if (orClauses.length === 0) return null;
-    return this.leadModel.findOne({ tenantId: tenantObjectId, $or: orClauses }).exec();
+    return this.leadModel
+      .findOne({ tenantId: tenantObjectId, ...ownerScope, $or: orClauses })
+      .exec();
   }
 
   async bulkImport(auth: AuthContext, rows: CreateLeadDto[]) {
@@ -637,6 +580,7 @@ export class LeadsService {
       throw new BadRequestException('Provide at least one CSV lead row to import.');
     }
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
+    const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
     const batch = rows.slice(0, 500);
     const data = [];
     let importedCount = 0;
@@ -658,6 +602,7 @@ export class LeadsService {
         tenantObjectId,
         formattedPhone,
         email,
+        ownerScope,
       );
 
       if (existing) {

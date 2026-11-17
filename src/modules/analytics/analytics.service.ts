@@ -8,7 +8,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { Connection, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.service';
-import { maskPhoneNumber } from '../auth/identity.util';
+import { maskPhoneNumber, resolveOwnerScopeFilter } from '../auth/identity.util';
 import { AnalyticsAuthContext } from './dto/analytics.dto';
 
 @Injectable()
@@ -44,12 +44,22 @@ export class AnalyticsService {
     }
   }
 
-  async getOverview(auth: { tenantId: string }, range: string = 'all') {
+  async getOverview(
+    auth: { userId?: string; tenantId: string },
+    range: string = 'all',
+  ) {
     const tenantId = new Types.ObjectId(auth.tenantId);
     const db = this.connection.db;
     if (!db) {
       throw new UnauthorizedException('Database connection not ready.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(db, auth);
+    const isScopedNonAdmin = Object.keys(ownerScope).length > 0;
+    const scopedFilter = { tenantId, ...ownerScope };
+    const usersFilter =
+      isScopedNonAdmin && auth.userId && Types.ObjectId.isValid(auth.userId)
+        ? { _id: new Types.ObjectId(auth.userId), tenantId, isActive: { $ne: false } }
+        : { tenantId, isActive: { $ne: false } };
 
     const now = Date.now();
     const daysMap: Record<string, number> = {
@@ -73,16 +83,16 @@ export class AnalyticsService {
       tickets,
       productsCount,
     ] = await Promise.all([
-      db.collection('leads').find({ tenantId }).toArray(),
-      db.collection('deals').find({ tenantId }).toArray(),
-      db.collection('invoices').find({ tenantId }).toArray(),
-      db.collection('contacts').find({ tenantId }).toArray(),
-      db.collection('tasks').find({ tenantId }).toArray(),
-      db.collection('campaigns').find({ tenantId }).toArray(),
-      db.collection('workflows').find({ tenantId }).toArray(),
-      db.collection('users').find({ tenantId, isActive: { $ne: false } }).toArray(),
-      db.collection('tickets').find({ tenantId }).toArray(),
-      db.collection('products').countDocuments({ tenantId }),
+      db.collection('leads').find(scopedFilter).toArray(),
+      db.collection('deals').find(scopedFilter).toArray(),
+      db.collection('invoices').find(scopedFilter).toArray(),
+      db.collection('contacts').find(scopedFilter).toArray(),
+      db.collection('tasks').find(scopedFilter).toArray(),
+      db.collection('campaigns').find(scopedFilter).toArray(),
+      db.collection('workflows').find(scopedFilter).toArray(),
+      db.collection('users').find(usersFilter).toArray(),
+      db.collection('tickets').find(scopedFilter).toArray(),
+      db.collection('products').countDocuments(scopedFilter),
     ]);
 
     const inRange = (doc: Record<string, unknown>) => {
@@ -114,10 +124,10 @@ export class AnalyticsService {
     const avgAiScore =
       totalLeads > 0
         ? Math.round(
-            leads.reduce((s, l) => s + (Number(l.aiScore) || 70), 0) /
+            leads.reduce((s, l) => s + (Number(l.aiScore) || 0), 0) /
               totalLeads,
           )
-        : 82;
+        : 0;
 
     // 2. Deals Aggregation
     const totalDeals = deals.length;
@@ -210,36 +220,26 @@ export class AnalyticsService {
       key: string;
       label: string;
       color: string;
-      fallbackShare: number;
-      fallbackWinRate: number;
     }[] = [
       {
         key: 'whatsapp',
         label: 'WhatsApp Business Cloud',
         color: '#10B981',
-        fallbackShare: 42,
-        fallbackWinRate: 38,
       },
       {
         key: 'indiamart',
         label: 'IndiaMART B2B Leads',
         color: '#3978EA',
-        fallbackShare: 28,
-        fallbackWinRate: 32,
       },
       {
         key: 'meta_ads',
         label: 'Meta (FB & Instagram) Lead Ads',
         color: '#8B5CF6',
-        fallbackShare: 18,
-        fallbackWinRate: 25,
       },
       {
         key: 'website',
         label: 'Website, Google Ads & Referrals',
         color: '#F59E0B',
-        fallbackShare: 12,
-        fallbackWinRate: 44,
       },
     ];
 
@@ -255,9 +255,7 @@ export class AnalyticsService {
       });
       const count = matching.length;
       const sharePct =
-        totalLeads > 0
-          ? Math.max(5, Math.round((count / totalLeads) * 100))
-          : meta.fallbackShare;
+        totalLeads > 0 ? Math.round((count / totalLeads) * 100) : 0;
       const pipelineValue = matching.reduce(
         (s, l) => s + (Number(l.estimatedValue) || 0),
         0,
@@ -265,8 +263,7 @@ export class AnalyticsService {
       const won = matching.filter((l) =>
         ['qualified', 'converted'].includes(String(l.status)),
       ).length;
-      const winRatePct =
-        count > 0 ? Math.round((won / count) * 100) : meta.fallbackWinRate;
+      const winRatePct = count > 0 ? Math.round((won / count) * 100) : 0;
 
       return {
         key: meta.key,
@@ -284,22 +281,18 @@ export class AnalyticsService {
       {
         label: 'Noida Electronic City & Greater Noida (UP)',
         regex: /noida/i,
-        fallbackShare: 38,
       },
       {
         label: 'New Delhi (Connaught Place, Okhla, Karol Bagh)',
         regex: /delhi|okhla|karol/i,
-        fallbackShare: 32,
       },
       {
         label: 'Gurugram (Cyber City, Udyog Vihar, Manesar)',
         regex: /gurugram|gurgaon|manesar/i,
-        fallbackShare: 20,
       },
       {
         label: 'Faridabad, Ghaziabad & Rest of India',
         regex: /.*/,
-        fallbackShare: 10,
       },
     ];
 
@@ -308,7 +301,7 @@ export class AnalyticsService {
       const matchingLeads = leads.filter((l) => {
         const idStr = String(l._id);
         if (matchedIds.has(idStr)) return false;
-        const cityStr = String(l.city || 'New Delhi');
+        const cityStr = String(l.city || '');
         if (idx === cityBuckets.length - 1 || bucket.regex.test(cityStr)) {
           matchedIds.add(idStr);
           return true;
@@ -322,9 +315,7 @@ export class AnalyticsService {
         0,
       );
       const sharePct =
-        totalLeads > 0
-          ? Math.max(5, Math.round((count / totalLeads) * 100))
-          : bucket.fallbackShare;
+        totalLeads > 0 ? Math.round((count / totalLeads) * 100) : 0;
 
       return {
         label: bucket.label,
@@ -652,9 +643,12 @@ export class AnalyticsService {
       throw new UnauthorizedException('Database connection not ready.');
     }
 
-    const maskPhones = this.auditService
-      ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
-      : false;
+    const [maskPhones, ownerScope] = await Promise.all([
+      this.auditService
+        ? this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
+        : Promise.resolve(false),
+      resolveOwnerScopeFilter(db, auth),
+    ]);
 
     const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const rx = escaped ? new RegExp(escaped, 'i') : null;
@@ -662,6 +656,7 @@ export class AnalyticsService {
     const leadFilter = rx
       ? {
           tenantId,
+          ...ownerScope,
           $or: [
             { name: rx },
             { company: rx },
@@ -670,11 +665,12 @@ export class AnalyticsService {
             { email: rx },
           ],
         }
-      : { tenantId };
+      : { tenantId, ...ownerScope };
 
     const contactFilter = rx
       ? {
           tenantId,
+          ...ownerScope,
           $or: [
             { name: rx },
             { company: rx },
@@ -683,18 +679,20 @@ export class AnalyticsService {
             ...(maskPhones ? [] : [{ phone: rx }]),
           ],
         }
-      : { tenantId };
+      : { tenantId, ...ownerScope };
 
     const dealFilter = rx
       ? {
           tenantId,
+          ...ownerScope,
           $or: [{ title: rx }, { company: rx }, { contactName: rx }, { city: rx }],
         }
-      : { tenantId };
+      : { tenantId, ...ownerScope };
 
     const invoiceFilter = rx
       ? {
           tenantId,
+          ...ownerScope,
           $or: [
             { invoiceNumber: rx },
             { clientName: rx },
@@ -702,22 +700,28 @@ export class AnalyticsService {
             { gstin: rx },
           ],
         }
-      : { tenantId };
+      : { tenantId, ...ownerScope };
 
     const taskFilter = rx
-      ? { tenantId, $or: [{ title: rx }, { relatedName: rx }, { relatedCompany: rx }] }
-      : { tenantId };
+      ? {
+          tenantId,
+          ...ownerScope,
+          $or: [{ title: rx }, { relatedName: rx }, { relatedCompany: rx }],
+        }
+      : { tenantId, ...ownerScope };
 
     const ticketFilter = rx
       ? {
           tenantId,
+          ...ownerScope,
           $or: [{ ticketNumber: rx }, { subject: rx }, { customerName: rx }, { company: rx }],
         }
-      : { tenantId };
+      : { tenantId, ...ownerScope };
 
     const documentFilter = rx
       ? {
           tenantId,
+          ...ownerScope,
           $or: [
             { docCode: rx },
             { title: rx },
@@ -726,7 +730,7 @@ export class AnalyticsService {
             { category: rx },
           ],
         }
-      : { tenantId };
+      : { tenantId, ...ownerScope };
 
     const limitPerGroup = rx ? 4 : 2;
 
@@ -838,35 +842,36 @@ export class AnalyticsService {
       throw new UnauthorizedException('Database connection not ready.');
     }
 
+    const ownerScope = await resolveOwnerScopeFilter(db, auth);
     const [hotLeads, pendingTasks, unpaidInvoices, openThreads, openTickets] =
       await Promise.all([
         db
           .collection('leads')
-          .find({ tenantId, status: { $in: ['new', 'contacted'] } })
+          .find({ tenantId, ...ownerScope, status: { $in: ['new', 'contacted'] } })
           .sort({ createdAt: -1 })
           .limit(5)
           .toArray(),
         db
           .collection('tasks')
-          .find({ tenantId, status: { $ne: 'done' } })
+          .find({ tenantId, ...ownerScope, status: { $ne: 'done' } })
           .sort({ createdAt: -1 })
           .limit(5)
           .toArray(),
         db
           .collection('invoices')
-          .find({ tenantId, status: { $in: ['sent', 'partial', 'overdue'] } })
+          .find({ tenantId, ...ownerScope, status: { $in: ['sent', 'partial', 'overdue'] } })
           .sort({ createdAt: -1 })
           .limit(5)
           .toArray(),
         db
           .collection('conversations')
-          .find({ tenantId, status: 'open' })
+          .find({ tenantId, ...ownerScope, status: 'open' })
           .sort({ updatedAt: -1 })
           .limit(4)
           .toArray(),
         db
           .collection('tickets')
-          .find({ tenantId, status: { $in: ['open', 'in_progress'] } })
+          .find({ tenantId, ...ownerScope, status: { $in: ['open', 'in_progress'] } })
           .sort({ createdAt: -1 })
           .limit(4)
           .toArray(),

@@ -13,6 +13,7 @@ import { timingSafeEqual } from 'crypto';
 import axios from 'axios';
 import { Tenant, TenantDocument } from '../auth/schemas/tenant.schema';
 import { User, UserDocument } from '../auth/schemas/user.schema';
+import { resolveOwnerScopeFilter } from '../auth/identity.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import type { FeatureKey } from '../super-admin/schemas/platform-config.schema';
 
@@ -442,12 +443,17 @@ export class AiBridgeService {
 
   private async loadTenantRagRecords(
     tenantId: string,
+    userId?: string,
   ): Promise<Array<{ entityType: string; entityId: string; text: string }>> {
     const tenantFilterValues: Array<string | Types.ObjectId> = [tenantId];
     if (Types.ObjectId.isValid(tenantId)) {
       tenantFilterValues.push(new Types.ObjectId(tenantId));
     }
-    const query = { tenantId: { $in: tenantFilterValues } };
+    const ownerScope = await resolveOwnerScopeFilter(this.tenantModel.db, {
+      userId,
+      tenantId,
+    });
+    const query = { tenantId: { $in: tenantFilterValues }, ...ownerScope };
 
     const sources: Array<{
       collection: string;
@@ -526,7 +532,7 @@ export class AiBridgeService {
     const records =
       Array.isArray(existingRecords) && existingRecords.length > 0
         ? existingRecords
-        : await this.loadTenantRagRecords(input.tenantId);
+        : await this.loadTenantRagRecords(input.tenantId, input.userId);
 
     return this.postAi('/ai/chat', {
       ...input,

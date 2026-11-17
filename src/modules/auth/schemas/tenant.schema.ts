@@ -241,6 +241,14 @@ export class Tenant {
   @Prop({ required: true, trim: true })
   name!: string;
 
+  /** Optional legal/display company name entered by Owner or Admin. */
+  @Prop({ trim: true, default: '' })
+  companyName?: string;
+
+  /** Optional company/organization logo (data URL or HTTPS URL). */
+  @Prop({ type: String, default: '' })
+  logoUrl?: string;
+
   @Prop({ required: true, unique: true, lowercase: true, trim: true })
   slug!: string;
 

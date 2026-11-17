@@ -35,7 +35,7 @@ export class CampaignsController {
   @Get()
   @ApiOperation({
     summary:
-      'List all WhatsApp Broadcast Campaigns with delivery/read/reply rates & live MongoDB segment counts',
+      'List all WhatsApp Broadcast Campaigns with delivery/read/reply rates & live CRM segment counts',
   })
   @ApiQuery({
     name: 'search',
@@ -75,26 +75,14 @@ export class CampaignsController {
     return this.campaignsService.findAll(auth, query);
   }
 
-  @Post('seed')
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({
-    summary:
-      'Seed 4 sample Delhi-NCR / Noida WhatsApp Cloud API broadcast campaigns',
-  })
-  @ApiResponse({ status: 201, description: '4 sample campaigns created.' })
-  async seed(@Headers('authorization') authorization: string | undefined) {
-    const auth = await this.campaignsService.verifyAuth(authorization);
-    return this.campaignsService.seedSamples(auth);
-  }
-
   @Get(':id')
   @ApiOperation({
     summary: 'Get a single WhatsApp Broadcast Campaign by ID',
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the campaign',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique campaign record ID',
+    example: 'cmp_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Campaign returned.' })
   async findOne(
@@ -129,8 +117,8 @@ export class CampaignsController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the campaign',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique campaign record ID',
+    example: 'cmp_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Campaign dispatched.' })
   async launch(
@@ -147,8 +135,8 @@ export class CampaignsController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the campaign',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique campaign record ID',
+    example: 'cmp_01a2b3c4d5e6',
   })
   @ApiBody({ type: UpdateCampaignDto })
   @ApiResponse({ status: 200, description: 'Campaign updated.' })
@@ -167,8 +155,8 @@ export class CampaignsController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the campaign',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique campaign record ID',
+    example: 'cmp_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Campaign deleted.' })
   async remove(

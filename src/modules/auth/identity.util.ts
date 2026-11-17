@@ -1,5 +1,6 @@
-import { ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'crypto';
+import { Types, type Connection } from 'mongoose';
 
 /** Minimal structural type for a Mongoose model that supports `.exists(...)`. */
 export interface ExistsCapableModel {
@@ -153,7 +154,7 @@ export type UserFeatureKey = (typeof USER_FEATURE_KEYS)[number];
 
 export const USER_FEATURE_LABELS: Record<UserFeatureKey, string> = {
   leads: 'Leads Pipeline',
-  aiScoring: 'Gemini AI Lead Scoring',
+  aiScoring: 'SetuAI Lead Scoring',
   contacts: 'Contacts (B2B)',
   deals: 'Deals Pipeline',
   whatsappCloud: 'WhatsApp Cloud Inbox',
@@ -203,4 +204,77 @@ export function normalizeUserFeatureAccess(
     out[key] = workspaceAllowed && requested;
   }
   return out;
+}
+
+/**
+ * Resolves per-user data visibility inside a workspace:
+ * - Company Owners, Admins & Super Admins retain full workspace visibility (`{}`).
+ * - Non-admin invited/added users (Sales Users, Sales Managers) only access records
+ *   where `ownerId` matches their own User ID so Admin platform data is never shared
+ *   and newly invited users start with clean blank modules.
+ */
+export async function resolveOwnerScopeFilter(
+  connOrDb: Connection | Connection['db'] | undefined,
+  auth: { userId?: string; tenantId?: string; role?: string },
+): Promise<Record<string, unknown>> {
+  if (!auth.userId || !Types.ObjectId.isValid(auth.userId)) {
+    return { ownerId: null };
+  }
+  const userObjId = new Types.ObjectId(auth.userId);
+  let liveRole = auth.role || '';
+  const db =
+    connOrDb && 'db' in connOrDb && connOrDb.db
+      ? connOrDb.db
+      : (connOrDb as Connection['db'] | undefined);
+
+  if (db && typeof db.collection === 'function') {
+    try {
+      const userDoc = await db
+        .collection('users')
+        .findOne(
+          { _id: userObjId },
+          { projection: { role: 1 } },
+        );
+      if (userDoc?.role) {
+        liveRole = String(userDoc.role);
+      }
+    } catch {
+      // fall through using JWT role if lookup fails transiently
+    }
+  }
+
+  if (
+    liveRole === 'super_admin' ||
+    liveRole === 'owner' ||
+    liveRole === 'admin'
+  ) {
+    return {};
+  }
+
+  return { ownerId: userObjId };
+}
+
+/**
+ * Validates and normalizes an optional organization logo URL or data URL.
+ * Empty string clears the logo. Rejects non-image or oversized (> 2MB) payloads.
+ */
+export function sanitizeOrganizationLogoUrl(raw?: string | null): string {
+  const val = String(raw || '').trim();
+  if (!val) return '';
+  if (val.length > 2_000_000) {
+    throw new BadRequestException(
+      'Organization logo image is too large. Please upload an image under 1.5 MB.',
+    );
+  }
+  const isDataImage =
+    /^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml);base64,[A-Za-z0-9+/=]+$/i.test(
+      val,
+    );
+  const isHttpImage = /^https?:\/\/\S+$/i.test(val);
+  if (!isDataImage && !isHttpImage) {
+    throw new BadRequestException(
+      'Invalid logo format. Please upload a PNG, JPG, WEBP, or SVG image.',
+    );
+  }
+  return val;
 }

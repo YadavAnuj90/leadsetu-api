@@ -61,7 +61,7 @@ export class CreateWorkflowDto {
   @ApiProperty({
     description: 'Human-readable action description (THEN action)',
     example:
-      'Send WhatsApp Catalogue PDF + Score with Gemini AI + Create High-Priority Call Task',
+      'Send WhatsApp Catalogue PDF + Score with SetuAI + Create High-Priority Call Task',
   })
   actionSummary!: string;
 

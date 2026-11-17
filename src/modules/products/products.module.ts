@@ -39,6 +39,7 @@ import {
 } from '@nestjs/swagger';
 import { HydratedDocument, Model, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.module';
+import { resolveOwnerScopeFilter } from '../auth/identity.util';
 
 export type ProductUnit = 'pcs' | 'box' | 'set' | 'kg' | 'mtr' | 'service' | 'license';
 export type ProductDocument = HydratedDocument<ProductItem>;
@@ -208,7 +209,12 @@ export class ProductsService {
     query: { search?: string; category?: string; gstRate?: string },
   ) {
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
-    const filter: Record<string, unknown> = { tenantId: tenantObjectId };
+    const ownerScope = await resolveOwnerScopeFilter(this.productModel.db, auth);
+    const baseScope: Record<string, unknown> = {
+      tenantId: tenantObjectId,
+      ...ownerScope,
+    };
+    const filter: Record<string, unknown> = { ...baseScope };
 
     if (query.category && query.category !== 'all') {
       filter.category = query.category;
@@ -229,7 +235,7 @@ export class ProductsService {
 
     const [docs, all] = await Promise.all([
       this.productModel.find(filter).sort({ createdAt: -1 }).exec(),
-      this.productModel.find({ tenantId: tenantObjectId }).exec(),
+      this.productModel.find(baseScope).exec(),
     ]);
 
     const categories = Array.from(
@@ -302,10 +308,12 @@ export class ProductsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Product not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.productModel.db, auth);
     const doc = await this.productModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Product not found.');
@@ -336,84 +344,15 @@ export class ProductsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Product not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.productModel.db, auth);
     await this.productModel
       .deleteOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     return { success: true, id };
-  }
-
-  async seedSamples(auth: AuthContext) {
-    const samples: CreateProductDto[] = [
-      {
-        sku: 'ELEC-150KVA',
-        name: 'Three-Phase Industrial Servo Voltage Stabilizer 150 KVA',
-        category: 'Power & Electrical',
-        hsnSac: '850440',
-        unit: 'pcs',
-        unitPrice: 225000,
-        gstRate: 18,
-        moq: 1,
-        description: 'Oil-cooled digital copper wound stabilizer for CNC & factory lines.',
-        inStock: true,
-      },
-      {
-        sku: 'SWG-500A',
-        name: 'LT Industrial Switchgear Distribution Panel (500A)',
-        category: 'Power & Electrical',
-        hsnSac: '853710',
-        unit: 'set',
-        unitPrice: 78500,
-        gstRate: 18,
-        moq: 2,
-        description: 'IP54 powder-coated CPRI-approved industrial switchgear panel.',
-        inStock: true,
-      },
-      {
-        sku: 'INT-MOD-24',
-        name: 'Modular Acoustic Office Workstation (Cluster of 24)',
-        category: 'Commercial Interiors',
-        hsnSac: '940330',
-        unit: 'set',
-        unitPrice: 140000,
-        gstRate: 18,
-        moq: 1,
-        description: 'Sound-absorbing acoustic workstation pods with concealed cable raceways.',
-        inStock: true,
-      },
-      {
-        sku: 'PKG-COLD-50',
-        name: 'Insulated Export-Grade Corrugated Cold Storage Cartons',
-        category: 'Packaging & Supply',
-        hsnSac: '481910',
-        unit: 'box',
-        unitPrice: 1850,
-        gstRate: 12,
-        moq: 100,
-        description: 'Moisture-resistant 7-ply thermal boxes (Bundle of 50 units).',
-        inStock: true,
-      },
-      {
-        sku: 'AMC-CNC-YR',
-        name: 'Annual Preventive Maintenance & Calibration Contract (AMC)',
-        category: 'Services & AMC',
-        hsnSac: '998719',
-        unit: 'service',
-        unitPrice: 48000,
-        gstRate: 18,
-        moq: 1,
-        description: '4 quarterly NCR engineer visits + 24x7 emergency breakdown SLA.',
-        inStock: true,
-      },
-    ];
-
-    const created = [];
-    for (const s of samples) {
-      created.push(await this.create(auth, s));
-    }
-    return { count: created.length, data: created };
   }
 }
 
@@ -448,17 +387,9 @@ export class ProductsController {
     return this.productsService.create(auth, dto);
   }
 
-  @Post('seed')
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({ summary: 'Seed 5 sample Indian B2B SKUs with HSN/SAC codes' })
-  async seed(@Headers('authorization') authorization: string | undefined) {
-    const auth = await this.productsService.verifyAuth(authorization);
-    return this.productsService.seedSamples(auth);
-  }
-
   @Patch(':id')
   @ApiOperation({ summary: 'Update a catalog SKU, price, or stock flag' })
-  @ApiParam({ name: 'id', description: 'Product ObjectId' })
+  @ApiParam({ name: 'id', description: 'Unique product SKU record ID' })
   async update(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,
@@ -470,7 +401,7 @@ export class ProductsController {
 
   @Delete(':id')
   @ApiOperation({ summary: 'Delete a catalog SKU' })
-  @ApiParam({ name: 'id', description: 'Product ObjectId' })
+  @ApiParam({ name: 'id', description: 'Unique product SKU record ID' })
   async remove(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,

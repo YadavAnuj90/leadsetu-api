@@ -72,17 +72,6 @@ export class WorkflowsController {
     return this.workflowsService.findAll(auth, query);
   }
 
-  @Post('seed')
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({
-    summary: 'Seed 4 sample B2B AI Workflows (IndiaMART, Hot Leads, GST Invoices)',
-  })
-  @ApiResponse({ status: 201, description: '4 sample workflows created.' })
-  async seed(@Headers('authorization') authorization: string | undefined) {
-    const auth = await this.workflowsService.verifyAuth(authorization);
-    return this.workflowsService.seedSamples(auth);
-  }
-
   @Post()
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
@@ -104,8 +93,8 @@ export class WorkflowsController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the workflow',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique workflow record ID',
+    example: 'wf_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Workflow status toggled.' })
   async toggle(
@@ -120,12 +109,12 @@ export class WorkflowsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Execute / Test a workflow immediately (creates a real follow-up task in MongoDB & logs execution)',
+      'Execute / Test a workflow immediately (creates a real follow-up task & logs execution)',
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the workflow',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique workflow record ID',
+    example: 'wf_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Workflow executed.' })
   async execute(
@@ -142,8 +131,8 @@ export class WorkflowsController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the workflow',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique workflow record ID',
+    example: 'wf_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Workflow deleted.' })
   async remove(

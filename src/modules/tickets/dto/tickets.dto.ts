@@ -68,7 +68,7 @@ export class CreateTicketDto {
   })
   siteAddress?: string;
 
-  @ApiPropertyOptional({ example: '672e1a2b3c4d5e6f7a8b9c0d' })
+  @ApiPropertyOptional({ example: 'cnt_01a2b3c4d5e6' })
   linkedContactId?: string;
 
   @ApiPropertyOptional({ example: 'INV-2026-1002' })

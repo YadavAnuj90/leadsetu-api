@@ -16,7 +16,7 @@ import { ConfigService } from '@nestjs/config';
 import { HydratedDocument, Model, Types } from 'mongoose';
 import { randomBytes } from 'crypto';
 import { AuditService } from '../audit/audit.module';
-import { maskPhoneNumber } from '../auth/identity.util';
+import { maskPhoneNumber, resolveOwnerScopeFilter } from '../auth/identity.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import {
   AddTicketCommentDto,
@@ -260,7 +260,12 @@ export class TicketsService {
     },
   ) {
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
-    const filter: Record<string, unknown> = { tenantId: tenantObjectId };
+    const ownerScope = await resolveOwnerScopeFilter(this.ticketModel.db, auth);
+    const baseScope: Record<string, unknown> = {
+      tenantId: tenantObjectId,
+      ...ownerScope,
+    };
+    const filter: Record<string, unknown> = { ...baseScope };
 
     if (query.status && query.status !== 'all') {
       filter.status = query.status;
@@ -287,7 +292,7 @@ export class TicketsService {
 
     const [docs, allDocs, maskPhones] = await Promise.all([
       this.ticketModel.find(filter).sort({ createdAt: -1 }).exec(),
-      this.ticketModel.find({ tenantId: tenantObjectId }).exec(),
+      this.ticketModel.find(baseScope).exec(),
       this.auditService
         ? this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
         : Promise.resolve(false),
@@ -305,7 +310,7 @@ export class TicketsService {
         ? Math.round(
             (rated.reduce((s, t) => s + t.csatRating, 0) / rated.length) * 10,
           ) / 10
-        : 4.8;
+        : 0;
 
     return {
       data: mappedFiltered,
@@ -335,10 +340,12 @@ export class TicketsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Ticket not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.ticketModel.db, auth);
     const doc = await this.ticketModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) {
@@ -434,10 +441,12 @@ export class TicketsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Ticket not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.ticketModel.db, auth);
     const doc = await this.ticketModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) {
@@ -558,10 +567,12 @@ export class TicketsService {
     if (!dto.message?.trim()) {
       throw new BadRequestException('Comment message is required.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.ticketModel.db, auth);
     const doc = await this.ticketModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) {
@@ -619,10 +630,12 @@ export class TicketsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Ticket not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.ticketModel.db, auth);
     const doc = await this.ticketModel
       .findOneAndDelete({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
 
@@ -640,109 +653,5 @@ export class TicketsService {
     }
 
     return { success: true, id };
-  }
-
-  async seedSampleTickets(auth: TicketAuthContext) {
-    const samples: CreateTicketDto[] = [
-      {
-        subject: 'Switchgear Dispatch Transporter E-Way Bill Part-B Update',
-        category: 'dispatch_delay',
-        priority: 'urgent',
-        status: 'in_progress',
-        customerName: 'Rajesh Sharma',
-        company: 'RS Electricals & Switchgear Pvt. Ltd.',
-        phone: '+91 98112 45678',
-        email: 'rajesh@rselectricals.in',
-        siteAddress:
-          'Plot 14, Bhagirath Palace Electrical Market, Chandni Chowk, Delhi',
-        slaDueAt: new Date(Date.now() + 86400000).toISOString().slice(0, 10),
-        linkedInvoiceNumber: 'INV-2026-1002',
-        productSerialOrSku: 'IND-STAB-150 · 2 Units',
-        assignedToName: 'Deepak Tyagi (Noida Dispatch Desk)',
-        assignedToPhone: '+91 98184 22190',
-        notes:
-          'Vehicle No. DL-1GC-4821 waiting at UP-Delhi Ghazipur border for updated E-Way Bill Part-B.',
-      },
-      {
-        subject:
-          'Update Buyer GSTIN & Place of Supply on Proforma QTN-2026-1003',
-        category: 'gst_correction',
-        priority: 'high',
-        status: 'open',
-        customerName: 'Vikramjit Singh',
-        company: 'Apex Auto Components Ltd.',
-        phone: '+91 99104 88712',
-        email: 'vikram@apexauto.in',
-        siteAddress: 'Sector 8, IMT Manesar, Gurugram, Haryana – 122050',
-        slaDueAt: new Date(Date.now() + 2 * 86400000)
-          .toISOString()
-          .slice(0, 10),
-        linkedInvoiceNumber: 'QTN-2026-1003',
-        productSerialOrSku: 'AMC-IOT-2026',
-        assignedToName: 'Neha Gupta (GST Accounts)',
-        assignedToPhone: '+91 98110 77812',
-        notes:
-          'Buyer requested 18% IGST billing under Gurugram plant GSTIN 06AABCA9012H1Z8 instead of Delhi.',
-      },
-      {
-        subject:
-          '150 KVA Servo Voltage Stabilizer Output Fluctuation Inspection',
-        category: 'warranty',
-        priority: 'urgent',
-        status: 'waiting_client',
-        customerName: 'Sandeep Bansal',
-        company: 'Bansal Steel & Infra Projects',
-        phone: '+91 98711 65090',
-        email: 'sandeep@bansalinfra.in',
-        siteAddress: 'B-42, Okhla Industrial Area Phase-II, New Delhi',
-        slaDueAt: new Date(Date.now() - 2 * 86400000)
-          .toISOString()
-          .slice(0, 10),
-        linkedInvoiceNumber: 'INV-2026-1004',
-        productSerialOrSku: 'IND-STAB-150 · SN#260194',
-        assignedToName: 'Er. Pradeep Verma (Senior Field Engineer)',
-        assignedToPhone: '+91 98109 44120',
-        notes:
-          'Engineer diagnosed carbon brush wear on Phase-R variac. Waiting for plant shutdown window from client.',
-      },
-      {
-        subject: 'Modular Workstations & LT Panel Commissioning Sign-Off',
-        category: 'installation',
-        priority: 'medium',
-        status: 'resolved',
-        customerName: 'Priya Malhotra',
-        company: 'Malhotra Luxury Interiors Pvt. Ltd.',
-        phone: '+91 98180 23451',
-        email: 'priya@malhotrainteriors.com',
-        siteAddress: 'Tower B, Sector 62, Noida Electronic City, UP',
-        slaDueAt: new Date(Date.now() - 86400000).toISOString().slice(0, 10),
-        linkedInvoiceNumber: 'INV-2026-1001',
-        productSerialOrSku: 'MOD-WS-24 · Cluster',
-        assignedToName: 'Er. Pradeep Verma (Senior Field Engineer)',
-        assignedToPhone: '+91 98109 44120',
-        resolutionSummary:
-          'Completed earthing test, load balancing, and signed off Job Sheet #JS-884 with client facility manager.',
-        csatRating: 5,
-        notes: 'On-site installation completed within 24h SLA.',
-      },
-    ];
-
-    const created = [];
-    for (const s of samples) {
-      const t = await this.create(auth, s);
-      if (s.category === 'dispatch_delay') {
-        const updated = await this.addComment(auth, t.id, {
-          authorName: 'Deepak Tyagi (Noida Dispatch Desk)',
-          authorRole: 'engineer',
-          message:
-            'Generated updated E-Way Bill #341900881234 with Vehicle DL-1GC-4821 and shared PDF on WhatsApp with driver & Rajesh Ji.',
-          isInternal: false,
-        });
-        created.push(updated);
-      } else {
-        created.push(t);
-      }
-    }
-    return { count: created.length, data: created };
   }
 }

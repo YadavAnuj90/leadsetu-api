@@ -61,21 +61,11 @@ export class TicketsController {
     return this.ticketsService.findAll(auth, query);
   }
 
-  @Post('seed')
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({
-    summary: 'Seed 4 sample Delhi-NCR dispatch, warranty & GST support tickets',
-  })
-  async seed(@Headers('authorization') authorization: string | undefined) {
-    const auth = await this.ticketsService.verifyAuth(authorization);
-    return this.ticketsService.seedSampleTickets(auth);
-  }
-
   @Get(':id')
   @ApiOperation({
     summary: 'Get a single SLA ticket with full comment & resolution timeline',
   })
-  @ApiParam({ name: 'id', description: 'Ticket ObjectId' })
+  @ApiParam({ name: 'id', description: 'Unique ticket record ID' })
   async findOne(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,
@@ -101,7 +91,7 @@ export class TicketsController {
     summary:
       'Update ticket status, priority, engineer assignment, resolution summary, or CSAT',
   })
-  @ApiParam({ name: 'id', description: 'Ticket ObjectId' })
+  @ApiParam({ name: 'id', description: 'Unique ticket record ID' })
   async update(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,
@@ -117,7 +107,7 @@ export class TicketsController {
     summary:
       'Add a customer reply or internal engineer note to a ticket (optionally updating status)',
   })
-  @ApiParam({ name: 'id', description: 'Ticket ObjectId' })
+  @ApiParam({ name: 'id', description: 'Unique ticket record ID' })
   @ApiBody({ type: AddTicketCommentDto })
   async addComment(
     @Headers('authorization') authorization: string | undefined,
@@ -130,7 +120,7 @@ export class TicketsController {
 
   @Delete(':id')
   @ApiOperation({ summary: 'Delete a support ticket' })
-  @ApiParam({ name: 'id', description: 'Ticket ObjectId' })
+  @ApiParam({ name: 'id', description: 'Unique ticket record ID' })
   async remove(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,

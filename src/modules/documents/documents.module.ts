@@ -39,6 +39,8 @@ import {
 import { HydratedDocument, Model, Types } from 'mongoose';
 import { randomBytes } from 'crypto';
 import { AuditService } from '../audit/audit.module';
+import { resolveOwnerScopeFilter } from '../auth/identity.util';
+import { uploadToCloudinary } from '../auth/cloudinary.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 
 export type DocumentCategory =
@@ -152,7 +154,7 @@ export class CreateCrmDocumentDto {
   @ApiPropertyOptional({ example: 'RS Electricals Pvt. Ltd.' })
   linkedCustomerName?: string;
 
-  @ApiPropertyOptional({ example: '672e1a2b3c4d5e6f7a8b9c0d' })
+  @ApiPropertyOptional({ example: 'cnt_01a2b3c4d5e6' })
   linkedContactId?: string;
 
   @ApiPropertyOptional({ example: '2026-04-01' })
@@ -228,37 +230,6 @@ export class UpdateCrmDocumentDto {
 
   @ApiPropertyOptional()
   isVerified?: boolean;
-}
-
-function buildSampleCertificateHtmlDataUrl(params: {
-  heading: string;
-  subHeading: string;
-  docNumber: string;
-  bodyLines: string[];
-}): string {
-  const html = `<!doctype html>
-<html>
-<head><meta charset="utf-8"><title>${params.heading}</title>
-<style>
-  body { font-family: Arial, sans-serif; margin: 36px; color: #0f172a; line-height: 1.6; }
-  .box { border: 2px solid #1e3a8a; border-radius: 12px; padding: 28px; max-width: 720px; }
-  .tag { color: #2563eb; font-weight: bold; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
-  h1 { margin: 8px 0 4px; font-size: 22px; color: #0B192C; }
-  .ref { font-family: monospace; background: #eff6ff; padding: 6px 10px; border-radius: 6px; display: inline-block; margin: 8px 0 18px; font-weight: bold; }
-  li { margin-bottom: 6px; }
-</style>
-</head>
-<body>
-  <div class="box">
-    <div class="tag">${params.subHeading}</div>
-    <h1>${params.heading}</h1>
-    <div class="ref">Ref / ID: ${params.docNumber}</div>
-    <ul>${params.bodyLines.map((l) => `<li>${l}</li>`).join('')}</ul>
-    <p style="margin-top:24px;font-size:12px;color:#64748b;">Verified in Leadsetu CRM Document Center · Noida Electronic City, Uttar Pradesh</p>
-  </div>
-</body>
-</html>`;
-  return `data:text/html;base64,${Buffer.from(html, 'utf8').toString('base64')}`;
 }
 
 @Injectable()
@@ -346,7 +317,12 @@ export class DocumentsService {
     query: { search?: string; category?: string; customer?: string },
   ) {
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
-    const filter: Record<string, unknown> = { tenantId: tenantObjectId };
+    const ownerScope = await resolveOwnerScopeFilter(this.documentModel.db, auth);
+    const baseScope: Record<string, unknown> = {
+      tenantId: tenantObjectId,
+      ...ownerScope,
+    };
+    const filter: Record<string, unknown> = { ...baseScope };
 
     if (query.category && query.category !== 'all') {
       filter.category = query.category;
@@ -370,7 +346,7 @@ export class DocumentsService {
     const [docs, all] = await Promise.all([
       this.documentModel.find(filter).sort({ createdAt: -1 }).exec(),
       this.documentModel
-        .find({ tenantId: tenantObjectId })
+        .find(baseScope)
         .select('-fileDataUrl')
         .exec(),
     ]);
@@ -409,10 +385,12 @@ export class DocumentsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Document not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.documentModel.db, auth);
     const doc = await this.documentModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Document not found.');
@@ -438,19 +416,26 @@ export class DocumentsService {
       ? dto.category
       : 'customer_document';
 
-    const fileDataUrl = String(dto.fileDataUrl || '').trim();
+    const rawFileDataUrl = String(dto.fileDataUrl || '').trim();
     const externalUrl = String(dto.externalUrl || '').trim();
-    if (!fileDataUrl && !externalUrl) {
+    if (!rawFileDataUrl && !externalUrl) {
       throw new BadRequestException(
         'Please upload a file or provide an external document link.',
       );
     }
 
-    if (fileDataUrl.length > 8 * 1024 * 1024) {
+    if (rawFileDataUrl.length > 8 * 1024 * 1024) {
       throw new BadRequestException(
         'Uploaded file is too large. Please keep files under 5 MB.',
       );
     }
+
+    const fileDataUrl = rawFileDataUrl.startsWith('data:image/')
+      ? await uploadToCloudinary(rawFileDataUrl, {
+          folder: `leadsetu/documents/${auth.tenantId}`,
+          resourceType: 'image',
+        })
+      : rawFileDataUrl;
 
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
     const count = await this.documentModel.countDocuments({
@@ -507,10 +492,12 @@ export class DocumentsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Document not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.documentModel.db, auth);
     const doc = await this.documentModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Document not found.');
@@ -554,10 +541,12 @@ export class DocumentsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Document not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.documentModel.db, auth);
     const doc = await this.documentModel
       .findOneAndDelete({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (doc) {
@@ -573,145 +562,6 @@ export class DocumentsService {
       });
     }
     return { success: true, id };
-  }
-
-  async seedSamples(auth: {
-    userId: string;
-    tenantId: string;
-    email: string;
-    name?: string;
-  }) {
-    const samples: CreateCrmDocumentDto[] = [
-      {
-        title: 'GST Registration Certificate (Form GST REG-06)',
-        category: 'gst_certificate',
-        description:
-          'Active Uttar Pradesh CGST/SGST registration certificate for Noida Electronic City HQ. Ready for vendor onboarding.',
-        documentNumber: '09AABCL2026F1Z9',
-        issueDate: '2024-04-01',
-        tags: ['GSTIN', 'Vendor Onboarding', 'Tax Compliance'],
-        fileName: 'Leadsetu-GST-REG06-Certificate.html',
-        mimeType: 'text/html',
-        fileSizeBytes: 24800,
-        fileDataUrl: buildSampleCertificateHtmlDataUrl({
-          heading: 'Form GST REG-06 — Certificate of Registration',
-          subHeading: 'Government of India · Goods & Services Tax',
-          docNumber: '09AABCL2026F1Z9',
-          bodyLines: [
-            'Legal Name: Leadsetu Technologies Pvt. Ltd.',
-            'Principal Place of Business: Sector 62, Noida Electronic City, Gautam Buddha Nagar, UP – 201309',
-            'Constitution of Business: Private Limited Company',
-            'Date of Liability: 01/04/2024 · Status: ACTIVE',
-          ],
-        }),
-        isVerified: true,
-      },
-      {
-        title: 'Company Profile, Bank Mandate & Cancelled Cheque Pack',
-        category: 'company_profile',
-        description:
-          'Corporate capability deck with HDFC Bank NEFT/RTGS mandate, PAN card details, and MSME Udyam number.',
-        documentNumber: 'UDYAM-UP-28-0045120',
-        issueDate: '2026-01-15',
-        tags: ['Company Profile', 'NEFT Mandate', 'MSME'],
-        fileName: 'Leadsetu-Corporate-Profile-2026.html',
-        mimeType: 'text/html',
-        fileSizeBytes: 38400,
-        fileDataUrl: buildSampleCertificateHtmlDataUrl({
-          heading: 'Leadsetu Corporate Profile & Vendor Onboarding Dossier',
-          subHeading: 'Corporate Credentials & Bank Mandate',
-          docNumber: 'UDYAM-UP-28-0045120',
-          bodyLines: [
-            'PAN: AABCL2026F · TAN: DELI04821E · MSME Udyam Registered',
-            'Bank: HDFC Bank Ltd., Noida Electronic City Branch',
-            'Account No: 50200088515208 · IFSC: HDFC0001245',
-            'Core Offerings: B2B Industrial Automation, Servo Stabilizers & Annual AMC',
-          ],
-        }),
-        isVerified: true,
-      },
-      {
-        title: '2026 Industrial Servo Stabilizer & Switchgear Brochure',
-        category: 'brochure',
-        description:
-          'Technical datasheet covering 50 KVA – 500 KVA Three-Phase Servo Stabilizers, LT Panels, HSN codes & warranty terms.',
-        documentNumber: 'BRO-IND-2026-V4',
-        issueDate: '2026-05-10',
-        tags: ['Brochure', 'HSN 850440', 'Product Specs'],
-        fileName: 'Industrial-Servo-Brochure-2026.html',
-        mimeType: 'text/html',
-        fileSizeBytes: 51200,
-        fileDataUrl: buildSampleCertificateHtmlDataUrl({
-          heading: 'Industrial Servo Voltage Stabilizer & LT Switchgear Brochure',
-          subHeading: 'Product Technical Catalogue · 2026 Edition',
-          docNumber: 'BRO-IND-2026-V4',
-          bodyLines: [
-            'Model Range: 50 KVA to 500 KVA Air / Oil Cooled (HSN 850440)',
-            'Input Voltage Range: 300V – 480V AC · Output Accuracy: ±1%',
-            'Efficiency: >98.5% with Automatic Bypass & Surge Protection',
-            'Standard Warranty: 36 Months On-Site Service across Delhi-NCR & Pan-India',
-          ],
-        }),
-        isVerified: true,
-      },
-      {
-        title: 'Master Supply & Annual AMC Contract — Apex Auto Components',
-        category: 'contract',
-        description:
-          'Signed 12-month preventive maintenance SLA and fixed-rate spare parts supply contract.',
-        documentNumber: 'MSA-2026-APEX-09',
-        linkedCustomerName: 'Apex Auto Components Ltd.',
-        issueDate: '2026-11-01',
-        expiryDate: new Date(Date.now() + 20 * 86400000).toISOString().slice(0, 10),
-        tags: ['Contract', 'AMC', 'SLA Signed'],
-        fileName: 'MSA-Contract-Apex-Auto.html',
-        mimeType: 'text/html',
-        fileSizeBytes: 42100,
-        fileDataUrl: buildSampleCertificateHtmlDataUrl({
-          heading: 'Master Supply & Preventive Maintenance Agreement (AMC)',
-          subHeading: 'Executed B2B Commercial Contract',
-          docNumber: 'MSA-2026-APEX-09',
-          bodyLines: [
-            'Client: Apex Auto Components Ltd. (Gurugram, Haryana)',
-            'GSTIN: 06AABCA9012H1Z8 · Quarterly Preventive Visits Included',
-            'SLA Response Time: 4 Hours Priority Dispatch in NCR',
-            'Payment Terms: 30% Advance, 70% within 15 days of Invoice',
-          ],
-        }),
-        isVerified: true,
-      },
-      {
-        title: 'Buyer GSTIN, Signed NDA & PO #8841 — RS Electricals',
-        category: 'customer_document',
-        description:
-          'Customer KYC packet containing signed NDA, verified Delhi GSTIN certificate, and Purchase Order copy.',
-        documentNumber: 'PO-RS-2026-8841',
-        linkedCustomerName: 'RS Electricals & Switchgear Pvt. Ltd.',
-        issueDate: '2026-11-08',
-        tags: ['Customer PO', 'NDA', 'Buyer KYC'],
-        fileName: 'RS-Electricals-KYC-and-PO-8841.html',
-        mimeType: 'text/html',
-        fileSizeBytes: 31900,
-        fileDataUrl: buildSampleCertificateHtmlDataUrl({
-          heading: 'Customer Purchase Order & Verified Buyer KYC Packet',
-          subHeading: 'Customer Document · RS Electricals & Switchgear Pvt. Ltd.',
-          docNumber: 'PO-RS-2026-8841',
-          bodyLines: [
-            'Buyer Legal Name: RS Electricals & Switchgear Pvt. Ltd.',
-            'Buyer GSTIN: 07AABCR1234F1Z5 (Karol Bagh, New Delhi)',
-            'Contact Person: Rajesh Sharma (+91 98112 45678)',
-            'Order Value: ₹4,50,000 + 18% IGST · Authorized Signatory Verified',
-          ],
-        }),
-        isVerified: true,
-      },
-    ];
-
-    const created = [];
-    for (const item of samples) {
-      created.push(await this.create(auth, item));
-    }
-    return { count: created.length, data: created };
   }
 }
 
@@ -746,17 +596,6 @@ export class DocumentsController {
   ) {
     const auth = await this.documentsService.verifyAuth(authorization);
     return this.documentsService.findAll(auth, query);
-  }
-
-  @Post('seed')
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({
-    summary:
-      'Seed 5 sample B2B documents across GST Certificate, Company Profile, Brochure, Contract & Customer Docs',
-  })
-  async seed(@Headers('authorization') authorization: string | undefined) {
-    const auth = await this.documentsService.verifyAuth(authorization);
-    return this.documentsService.seedSamples(auth);
   }
 
   @Get(':id')

@@ -17,7 +17,7 @@ import {
   DealStage,
 } from './schemas/deal.schema';
 import { AuditService } from '../audit/audit.module';
-import { maskPhoneNumber } from '../auth/identity.util';
+import { maskPhoneNumber, resolveOwnerScopeFilter } from '../auth/identity.util';
 
 export interface CreateDealDto {
   title: string;
@@ -127,7 +127,12 @@ export class DealsService {
     query: { search?: string; stage?: string },
   ) {
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
-    const filter: Record<string, unknown> = { tenantId: tenantObjectId };
+    const ownerScope = await resolveOwnerScopeFilter(this.dealModel.db, auth);
+    const baseScope: Record<string, unknown> = {
+      tenantId: tenantObjectId,
+      ...ownerScope,
+    };
+    const filter: Record<string, unknown> = { ...baseScope };
 
     if (query.stage && query.stage !== 'all') {
       filter.stage = query.stage;
@@ -144,7 +149,7 @@ export class DealsService {
 
     const [docs, allDeals, maskPhones] = await Promise.all([
       this.dealModel.find(filter).sort({ updatedAt: -1 }).exec(),
-      this.dealModel.find({ tenantId: tenantObjectId }).exec(),
+      this.dealModel.find(baseScope).exec(),
       this.auditService
         ? this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
         : Promise.resolve(false),
@@ -187,10 +192,12 @@ export class DealsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Deal not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.dealModel.db, auth);
     const doc = await this.dealModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) {
@@ -251,10 +258,12 @@ export class DealsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Deal not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.dealModel.db, auth);
     const doc = await this.dealModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) {
@@ -326,10 +335,12 @@ export class DealsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Deal not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.dealModel.db, auth);
     const doc = await this.dealModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) {
@@ -354,10 +365,12 @@ export class DealsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Deal not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.dealModel.db, auth);
     const doc = await this.dealModel
       .findOneAndDelete({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (doc) {
@@ -373,81 +386,5 @@ export class DealsService {
       });
     }
     return { success: true, id };
-  }
-
-  async seedSampleDeals(auth: AuthContext) {
-    const samples: CreateDealDto[] = [
-      {
-        title: '500 Industrial Switchgear Units',
-        company: 'RS Electricals Pvt. Ltd.',
-        contactName: 'Rajesh Sharma',
-        contactPhone: '+91 98112 45678',
-        contactEmail: 'rajesh@rselectricals.in',
-        city: 'Karol Bagh, New Delhi',
-        value: 450000,
-        stage: 'proposal',
-        source: 'whatsapp',
-        tags: ['18% GST Quote', 'Bulk Order'],
-        notes: 'Proforma invoice #LS-204 shared on WhatsApp. Final price negotiation at 2 PM.',
-      },
-      {
-        title: 'Commercial Modular Office Fitout',
-        company: 'Malhotra Luxury Interiors',
-        contactName: 'Priya Malhotra',
-        contactPhone: '+91 98180 23451',
-        contactEmail: 'priya@malhotrainteriors.com',
-        city: 'Sector 62, Noida',
-        value: 380000,
-        stage: 'negotiation',
-        source: 'meta_ads',
-        tags: ['Site Visit Done', 'Ready Budget'],
-        notes: 'Client approved 3D layout. Waiting for 30% booking advance.',
-      },
-      {
-        title: 'Annual CNC Spare Parts Contract',
-        company: 'Apex Auto Components',
-        contactName: 'Vikramjit Singh',
-        contactPhone: '+91 99104 88712',
-        contactEmail: 'vikram@apexauto.in',
-        city: 'Udyog Vihar, Gurugram',
-        value: 620000,
-        stage: 'discovery',
-        source: 'indiamart',
-        tags: ['IndiaMART Verified', 'Annual AMC'],
-        notes: 'Technical sample dispatched to Gurugram plant.',
-      },
-      {
-        title: 'Cold Storage Packaging Supply',
-        company: 'Verma Agro Foods',
-        contactName: 'Ananya Verma',
-        contactPhone: '+91 97172 33901',
-        contactEmail: 'ananya@vermafoods.co.in',
-        city: 'NIT Faridabad',
-        value: 195000,
-        stage: 'qualified',
-        source: 'website',
-        tags: ['Q4 Requirement'],
-        notes: 'Qualified by Gemini AI — MOQ 2,000 boxes confirmed.',
-      },
-      {
-        title: 'Warehouse Solar Rooftop 50kW',
-        company: 'Bansal Steel & Infra',
-        contactName: 'Sandeep Bansal',
-        contactPhone: '+91 98711 65090',
-        contactEmail: 'sandeep@bansalinfra.in',
-        city: 'Okhla Phase III, New Delhi',
-        value: 850000,
-        stage: 'won',
-        source: 'referral',
-        tags: ['Advance Paid', 'Razorpay Verified'],
-        notes: '50% advance collected via Razorpay. Installation team assigned.',
-      },
-    ];
-
-    const created = [];
-    for (const s of samples) {
-      created.push(await this.create(auth, s));
-    }
-    return { count: created.length, data: created };
   }
 }

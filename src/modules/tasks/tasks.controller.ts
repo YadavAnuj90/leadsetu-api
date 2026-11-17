@@ -62,17 +62,6 @@ export class TasksController {
     return this.tasksService.findAll(auth, query);
   }
 
-  @Post('seed')
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({
-    summary: 'Seed 4 sample sales follow-up & site visit tasks',
-  })
-  @ApiResponse({ status: 201, description: '4 sample tasks created.' })
-  async seed(@Headers('authorization') authorization: string | undefined) {
-    const auth = await this.tasksService.verifyAuth(authorization);
-    return this.tasksService.seedSamples(auth);
-  }
-
   @Post()
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
@@ -94,8 +83,8 @@ export class TasksController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the task',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique task record ID',
+    example: 'tsk_01a2b3c4d5e6',
   })
   @ApiBody({ type: UpdateTaskDto })
   @ApiResponse({ status: 200, description: 'Task updated.' })
@@ -114,8 +103,8 @@ export class TasksController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the task',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique task record ID',
+    example: 'tsk_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Task deleted.' })
   async remove(

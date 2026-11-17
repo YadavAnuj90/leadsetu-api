@@ -58,25 +58,14 @@ export class ContactsController {
     return this.contactsService.findAll(auth, query);
   }
 
-  @Post('seed')
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({
-    summary: 'Seed 4 sample Delhi-NCR B2B contacts with verified GSTIN numbers',
-  })
-  @ApiResponse({ status: 201, description: '4 sample contacts created.' })
-  async seed(@Headers('authorization') authorization: string | undefined) {
-    const auth = await this.contactsService.verifyAuth(authorization);
-    return this.contactsService.seedSamples(auth);
-  }
-
   @Get(':id')
   @ApiOperation({
     summary: 'Get 360° profile for a single B2B contact by ID',
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the contact',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique contact record ID',
+    example: 'cnt_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Contact profile returned.' })
   async findOne(
@@ -108,8 +97,8 @@ export class ContactsController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the contact',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique contact record ID',
+    example: 'cnt_01a2b3c4d5e6',
   })
   @ApiBody({ type: UpdateContactDto })
   @ApiResponse({ status: 200, description: 'Contact updated.' })
@@ -142,8 +131,8 @@ export class ContactsController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the contact',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique contact record ID',
+    example: 'cnt_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Contact deleted.' })
   async remove(

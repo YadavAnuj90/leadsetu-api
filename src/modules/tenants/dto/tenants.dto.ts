@@ -4,6 +4,17 @@ export class UpdateTenantProfileDto {
   @ApiPropertyOptional({ example: 'Anujalite Technologies Pvt. Ltd.' })
   name?: string;
 
+  @ApiPropertyOptional({
+    description: 'Optional Company / Organization display name (empty string clears it)',
+    example: 'Anujalite Technologies Pvt. Ltd.',
+  })
+  companyName?: string;
+
+  @ApiPropertyOptional({
+    description: 'Optional Organization Logo image (data URL or HTTPS URL, empty string clears it)',
+  })
+  logoUrl?: string;
+
   @ApiPropertyOptional({ example: 'New Delhi' })
   city?: string;
 

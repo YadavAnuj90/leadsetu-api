@@ -571,7 +571,7 @@ export class SuperAdminService implements OnModuleInit {
           resource,
           used: currentUsed,
           limit,
-          message: `Monthly ${isAi ? 'Gemini AI calls' : 'WhatsApp Cloud messages'} quota exceeded (${currentUsed}/${limit}). Upgrade your plan or contact Leadsetu HQ for an Add-on Quota Pack.`,
+          message: `Monthly ${isAi ? 'SetuAI calls' : 'WhatsApp Cloud messages'} quota exceeded (${currentUsed}/${limit}). Upgrade your plan or contact Leadsetu HQ for an Add-on Quota Pack.`,
         },
         HttpStatus.TOO_MANY_REQUESTS,
       );

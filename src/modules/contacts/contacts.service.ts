@@ -11,7 +11,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { HydratedDocument, Model, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.module';
-import { maskPhoneNumber } from '../auth/identity.util';
+import { maskPhoneNumber, resolveOwnerScopeFilter } from '../auth/identity.util';
 import { CreateContactDto } from './dto/contacts.dto';
 
 export type ContactDocument = HydratedDocument<Contact>;
@@ -257,7 +257,10 @@ export class ContactsService {
     }
   }
 
-  private async getReceivableMaps(tenantId: string) {
+  private async getReceivableMaps(
+    tenantId: string,
+    ownerScope: Record<string, unknown> = {},
+  ) {
     const byGstin = new Map<string, { open: number; overdue: number }>();
     const byName = new Map<string, { open: number; overdue: number }>();
     const rows =
@@ -265,6 +268,7 @@ export class ContactsService {
         ?.collection('invoices')
         .find({
           tenantId: new Types.ObjectId(tenantId),
+          ...ownerScope,
           status: { $nin: ['paid', 'cancelled'] },
           docType: { $ne: 'proforma_quote' },
         })
@@ -365,7 +369,12 @@ export class ContactsService {
     query: { search?: string; type?: string },
   ) {
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
-    const filter: Record<string, unknown> = { tenantId: tenantObjectId };
+    const ownerScope = await resolveOwnerScopeFilter(this.contactModel.db, auth);
+    const baseScope: Record<string, unknown> = {
+      tenantId: tenantObjectId,
+      ...ownerScope,
+    };
+    const filter: Record<string, unknown> = { ...baseScope };
 
     if (query.type && query.type !== 'all') {
       filter.type = query.type;
@@ -384,11 +393,11 @@ export class ContactsService {
 
     const [docs, all, maskPhones, recMaps] = await Promise.all([
       this.contactModel.find(filter).sort({ createdAt: -1 }).exec(),
-      this.contactModel.find({ tenantId: tenantObjectId }).exec(),
+      this.contactModel.find(baseScope).exec(),
       this.auditService
         ? this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
         : Promise.resolve(false),
-      this.getReceivableMaps(auth.tenantId),
+      this.getReceivableMaps(auth.tenantId, ownerScope),
     ]);
 
     const resolveRec = (c: ContactDocument) => {
@@ -415,10 +424,12 @@ export class ContactsService {
   async findOne(auth: { userId: string; tenantId: string }, id: string) {
     if (!Types.ObjectId.isValid(id))
       throw new NotFoundException('Contact not found.');
+    const ownerScope = await resolveOwnerScopeFilter(this.contactModel.db, auth);
     const doc = await this.contactModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Contact not found.');
@@ -426,7 +437,7 @@ export class ContactsService {
       this.auditService
         ? this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
         : Promise.resolve(false),
-      this.getReceivableMaps(auth.tenantId),
+      this.getReceivableMaps(auth.tenantId, ownerScope),
     ]);
     const rec =
       (doc.gstin && recMaps.byGstin.get(doc.gstin.trim().toUpperCase())) ||
@@ -483,10 +494,12 @@ export class ContactsService {
   ) {
     if (!Types.ObjectId.isValid(id))
       throw new NotFoundException('Contact not found.');
+    const ownerScope = await resolveOwnerScopeFilter(this.contactModel.db, auth);
     const doc = await this.contactModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Contact not found.');
@@ -559,10 +572,12 @@ export class ContactsService {
   ) {
     if (!Types.ObjectId.isValid(id))
       throw new NotFoundException('Contact not found.');
+    const ownerScope = await resolveOwnerScopeFilter(this.contactModel.db, auth);
     const doc = await this.contactModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Contact not found.');
@@ -596,10 +611,12 @@ export class ContactsService {
   async remove(auth: { userId: string; tenantId: string }, id: string) {
     if (!Types.ObjectId.isValid(id))
       throw new NotFoundException('Contact not found.');
+    const ownerScope = await resolveOwnerScopeFilter(this.contactModel.db, auth);
     const doc = await this.contactModel
       .findOneAndDelete({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (doc) {
@@ -614,77 +631,5 @@ export class ContactsService {
       });
     }
     return { success: true, id };
-  }
-
-  async seedSamples(auth: { userId: string; tenantId: string }) {
-    const samples: CreateContactDto[] = [
-      {
-        name: 'Rajesh Sharma',
-        company: 'RS Electricals Pvt. Ltd.',
-        designation: 'Managing Director',
-        phone: '+91 98112 45678',
-        email: 'rajesh@rselectricals.in',
-        city: 'Karol Bagh, New Delhi',
-        gstin: '07AABCR1234F1Z5',
-        type: 'customer',
-        lifetimeValue: 1250000,
-        creditLimitInr: 600000,
-        creditTermDays: 30,
-        tags: ['VIP Buyer', 'GST Registered'],
-        notes: 'Prefers WhatsApp proforma invoices before dispatch.',
-      },
-      {
-        name: 'Priya Malhotra',
-        company: 'Malhotra Luxury Interiors',
-        designation: 'Principal Architect',
-        phone: '+91 98180 23451',
-        email: 'priya@malhotrainteriors.com',
-        city: 'Sector 62, Noida',
-        gstin: '09AAECM5678G1Z2',
-        type: 'prospect',
-        lifetimeValue: 380000,
-        creditLimitInr: 400000,
-        creditTermDays: 15,
-        tags: ['Noida Commercial', 'Architect'],
-        notes: 'Looking for recurring modular furniture vendor.',
-      },
-      {
-        name: 'Vikramjit Singh',
-        company: 'Apex Auto Components',
-        designation: 'Head of Procurement',
-        phone: '+91 99104 88712',
-        email: 'vikram@apexauto.in',
-        city: 'Udyog Vihar, Gurugram',
-        gstin: '06AABCA9012H1Z8',
-        type: 'customer',
-        lifetimeValue: 1840000,
-        creditLimitInr: 1200000,
-        creditTermDays: 30,
-        tags: ['Annual AMC', 'Tier-1 OEM'],
-        notes: '30-day credit cycle approved.',
-      },
-      {
-        name: 'Sandeep Bansal',
-        company: 'Bansal Steel & Infra',
-        designation: 'Director',
-        phone: '+91 98711 65090',
-        email: 'sandeep@bansalinfra.in',
-        city: 'Okhla Phase III, New Delhi',
-        gstin: '07AABCB3456J1Z1',
-        type: 'partner',
-        lifetimeValue: 2400000,
-        creditLimitInr: 500000,
-        creditTermDays: 15,
-        creditHold: true,
-        creditHoldReason: 'Pending overdue settlement (>10 days) on LT Panel Board',
-        tags: ['Strategic Partner', 'Okhla Hub'],
-        notes: 'Refers 3-4 industrial buyers every quarter.',
-      },
-    ];
-    const created = [];
-    for (const s of samples) {
-      created.push(await this.create(auth, s));
-    }
-    return { count: created.length, data: created };
   }
 }

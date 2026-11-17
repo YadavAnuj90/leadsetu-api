@@ -442,6 +442,8 @@ export class TeamService {
       account: {
         accountId: actor.tenant.accountId,
         name: actor.tenant.name,
+        companyName: (actor.tenant.companyName || '').trim(),
+        logoUrl: actor.tenant.logoUrl || '',
         plan: actor.tenant.plan,
         status: actor.tenant.status,
         city: actor.tenant.city || 'Delhi-NCR',
@@ -554,13 +556,15 @@ export class TeamService {
               : 0,
           invitedBy: actor.user._id,
         });
+        const tenantCompanyName = (actor.tenant.companyName || '').trim();
+        const inviteSenderName = tenantCompanyName || actor.user.name;
         const emailDispatch =
           dto.sendInviteEmail === false
             ? {
                 sent: false,
                 provider: 'preview' as const,
                 inviteUrl,
-                emailSubject: `Invite for ${member.name}`,
+                emailSubject: `You're invited to ${inviteSenderName} on Leadsetu CRM`,
                 emailPreview: inviteUrl,
               }
             : await dispatchTeamInviteEmail({
@@ -570,6 +574,7 @@ export class TeamService {
                 userCode: member.userCode || '',
                 accountId: actor.tenant.accountId || '',
                 workspaceName: actor.tenant.name,
+                companyName: tenantCompanyName,
                 inviterName: actor.user.name,
                 inviteUrl,
                 temporaryPassword: generated ? password : null,
@@ -595,6 +600,8 @@ export class TeamService {
           member: this.toMemberDto(member, undefined, workspaceLimits),
           credentials: {
             accountId: actor.tenant.accountId,
+            companyName: tenantCompanyName,
+            organizationName: inviteSenderName,
             userCode: member.userCode,
             loginEmail: email,
             // Returned exactly once; it is only stored as a hash.
@@ -754,6 +761,8 @@ export class TeamService {
     ).replace(/\/+$/, '');
     const inviteUrl = `${frontendBase}/invite?token=${invite.rawToken}&email=${encodeURIComponent(member.email)}`;
 
+    const tenantCompanyName = (actor.tenant.companyName || '').trim();
+    const inviteSenderName = tenantCompanyName || actor.user.name;
     const emailDispatch = await dispatchTeamInviteEmail({
       toEmail: member.email,
       memberName: member.name,
@@ -761,6 +770,7 @@ export class TeamService {
       userCode: member.userCode || '',
       accountId: actor.tenant.accountId || '',
       workspaceName: actor.tenant.name,
+      companyName: tenantCompanyName,
       inviterName: actor.user.name,
       inviteUrl,
       temporaryPassword: null,
@@ -785,6 +795,8 @@ export class TeamService {
       member: this.toMemberDto(member, undefined, workspaceLimits),
       credentials: {
         accountId: actor.tenant.accountId,
+        companyName: tenantCompanyName,
+        organizationName: inviteSenderName,
         userCode: member.userCode,
         loginEmail: member.email,
         temporaryPassword: null,
@@ -1048,7 +1060,7 @@ export class TeamController {
 
   @Patch(':id')
   @ApiOperation({ summary: 'Update a member’s name, phone, role, territory or monthly target' })
-  @ApiParam({ name: 'id', description: 'MongoDB ObjectId of the member', example: '672e1a2b3c4d5e6f7a8b9c0d' })
+  @ApiParam({ name: 'id', description: 'Unique team member record ID', example: 'usr_01a2b3c4d5e6' })
   @ApiBody({ type: UpdateTeamMemberDto })
   async update(
     @Headers('authorization') authorization: string | undefined,
@@ -1061,7 +1073,7 @@ export class TeamController {
 
   @Patch(':id/status')
   @ApiOperation({ summary: 'Activate or deactivate a member (deactivated members cannot sign in)' })
-  @ApiParam({ name: 'id', description: 'MongoDB ObjectId of the member', example: '672e1a2b3c4d5e6f7a8b9c0d' })
+  @ApiParam({ name: 'id', description: 'Unique team member record ID', example: 'usr_01a2b3c4d5e6' })
   @ApiBody({ type: SetMemberStatusDto })
   async setStatus(
     @Headers('authorization') authorization: string | undefined,
@@ -1075,7 +1087,7 @@ export class TeamController {
   @Post(':id/reset-password')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Generate a new one-time temporary password for a member' })
-  @ApiParam({ name: 'id', description: 'MongoDB ObjectId of the member', example: '672e1a2b3c4d5e6f7a8b9c0d' })
+  @ApiParam({ name: 'id', description: 'Unique team member record ID', example: 'usr_01a2b3c4d5e6' })
   async resetPassword(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,
@@ -1087,7 +1099,7 @@ export class TeamController {
   @Post(':id/resend-invite')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Generate a fresh 7-day email invite login link for a member' })
-  @ApiParam({ name: 'id', description: 'MongoDB ObjectId of the member', example: '672e1a2b3c4d5e6f7a8b9c0d' })
+  @ApiParam({ name: 'id', description: 'Unique team member record ID', example: 'usr_01a2b3c4d5e6' })
   async resendInvite(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,
@@ -1100,7 +1112,7 @@ export class TeamController {
   @ApiOperation({
     summary: 'Remove a member; their leads, deals, tasks & contacts are re-assigned to the workspace owner',
   })
-  @ApiParam({ name: 'id', description: 'MongoDB ObjectId of the member', example: '672e1a2b3c4d5e6f7a8b9c0d' })
+  @ApiParam({ name: 'id', description: 'Unique team member record ID', example: 'usr_01a2b3c4d5e6' })
   async remove(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,

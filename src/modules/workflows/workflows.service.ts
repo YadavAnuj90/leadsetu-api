@@ -20,6 +20,7 @@ import {
   WorkflowTriggerType,
 } from './dto/workflows.dto';
 import { SuperAdminService } from '../super-admin/super-admin.service';
+import { resolveOwnerScopeFilter } from '../auth/identity.util';
 
 export type WorkflowDocument = HydratedDocument<Workflow>;
 
@@ -171,11 +172,16 @@ export class WorkflowsService {
   }
 
   async findAll(
-    auth: { tenantId: string },
+    auth: { userId: string; tenantId: string },
     query: { search?: string; triggerType?: string; active?: string },
   ) {
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
-    const filter: Record<string, unknown> = { tenantId: tenantObjectId };
+    const ownerScope = await resolveOwnerScopeFilter(this.workflowModel.db, auth);
+    const baseScope: Record<string, unknown> = {
+      tenantId: tenantObjectId,
+      ...ownerScope,
+    };
+    const filter: Record<string, unknown> = { ...baseScope };
 
     if (query.triggerType && query.triggerType !== 'all') {
       filter.triggerType = query.triggerType;
@@ -194,7 +200,7 @@ export class WorkflowsService {
 
     const [docs, all] = await Promise.all([
       this.workflowModel.find(filter).sort({ createdAt: -1 }).exec(),
-      this.workflowModel.find({ tenantId: tenantObjectId }).exec(),
+      this.workflowModel.find(baseScope).exec(),
     ]);
 
     const activeCount = all.filter((w) => w.active).length;
@@ -254,14 +260,16 @@ export class WorkflowsService {
     return this.toDto(doc);
   }
 
-  async toggleActive(auth: { tenantId: string }, id: string) {
+  async toggleActive(auth: { userId: string; tenantId: string }, id: string) {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Workflow not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.workflowModel.db, auth);
     const doc = await this.workflowModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Workflow not found.');
@@ -276,10 +284,12 @@ export class WorkflowsService {
       throw new NotFoundException('Workflow not found.');
     }
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
+    const ownerScope = await resolveOwnerScopeFilter(this.workflowModel.db, auth);
     const doc = await this.workflowModel
       .findOne({
         _id: new Types.ObjectId(id),
         tenantId: tenantObjectId,
+        ...ownerScope,
       })
       .exec();
     if (!doc) throw new NotFoundException('Workflow not found.');
@@ -327,78 +337,18 @@ export class WorkflowsService {
     return this.toDto(doc);
   }
 
-  async remove(auth: { tenantId: string }, id: string) {
+  async remove(auth: { userId: string; tenantId: string }, id: string) {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Workflow not found.');
     }
+    const ownerScope = await resolveOwnerScopeFilter(this.workflowModel.db, auth);
     await this.workflowModel
       .deleteOne({
         _id: new Types.ObjectId(id),
         tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
       })
       .exec();
     return { success: true, id };
-  }
-
-  async seedSamples(auth: { userId: string; tenantId: string }) {
-    const samples: CreateWorkflowDto[] = [
-      {
-        name: 'IndiaMART & Meta Ads -> 15-Sec WhatsApp Brochure + AI Score',
-        description:
-          'Instantly greets new inbound IndiaMART & Meta Lead Ads buyers on WhatsApp and scores intent with Gemini AI.',
-        triggerType: 'lead.created',
-        conditionSummary:
-          'Lead Source IN [IndiaMART, Meta Ads] AND Phone Verified',
-        actionType: 'send_whatsapp_create_task',
-        actionSummary:
-          'Send Hinglish Product Catalogue PDF on WhatsApp + Compute 1–100 Gemini AI Score',
-        active: true,
-        runsCount: 342,
-      },
-      {
-        name: 'Hot Lead (AI Score >= 80) -> Senior Closer Alert & Priority Call',
-        description:
-          'Routes high-value Noida & Delhi-NCR industrial leads directly to the senior sales closer.',
-        triggerType: 'lead.hot_scored',
-        conditionSummary:
-          'Gemini AI Score >= 80 OR Estimated Deal Value >= ₹3,00,000',
-        actionType: 'assign_senior_closer',
-        actionSummary:
-          'Assign to Senior Closer + Create 15-Min Priority Call Task + Send WhatsApp Alert',
-        active: true,
-        runsCount: 128,
-      },
-      {
-        name: 'Deal Closed Won -> Auto-Generate 18% GST Tax Invoice Draft',
-        description:
-          'Eliminates manual billing delays by creating a GSTIN-compliant invoice as soon as a deal is marked Won.',
-        triggerType: 'deal.stage_changed',
-        conditionSummary: 'Deal Stage changed to Closed Won (100%)',
-        actionType: 'generate_gst_invoice',
-        actionSummary:
-          'Generate 18% CGST/SGST or IGST Tax Invoice + Share Razorpay Link on WhatsApp',
-        active: true,
-        runsCount: 64,
-      },
-      {
-        name: 'Overdue GST Invoice -> Automated Polite Hinglish Payment Nudge',
-        description:
-          'Follows up on unpaid B2B invoices past due date with a one-click Razorpay/UPI link.',
-        triggerType: 'invoice.overdue',
-        conditionSummary:
-          'Invoice Status = Overdue AND Balance Due > ₹25,000',
-        actionType: 'send_payment_reminder',
-        actionSummary:
-          'Send WhatsApp Payment Reminder with Razorpay Link + Notify Accounts Team',
-        active: true,
-        runsCount: 89,
-      },
-    ];
-
-    const created = [];
-    for (const s of samples) {
-      created.push(await this.create(auth, s));
-    }
-    return { count: created.length, data: created };
   }
 }

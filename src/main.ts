@@ -30,7 +30,7 @@ async function bootstrap() {
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Leadsetu AI CRM — Backend API')
     .setDescription(
-      'Official OpenAPI 3.0 specification for Leadsetu CRM (Noida / Delhi-NCR). Includes Multi-Tenant Auth, Gemini AI Lead Scoring, Visual Kanban Deals Pipeline, B2B Contacts & GST Directory, Sales Follow-up Tasks, and Unified WhatsApp Inbox.'
+      'Official OpenAPI 3.0 specification for Leadsetu CRM (Noida / Delhi-NCR). Includes Multi-Tenant Auth, SetuAI Lead Scoring, Visual Kanban Deals Pipeline, B2B Contacts & GST Directory, Sales Follow-up Tasks, and Unified WhatsApp Inbox.'
     )
     .setVersion('2.0.0')
     .setContact(
@@ -51,11 +51,11 @@ async function bootstrap() {
       'access-token'
     )
     .addTag('1. Auth & Workspace', 'Multi-tenant registration, login, JWT refresh & profile')
-    .addTag('2. Leads & Gemini AI Scoring', 'Lead capture, 1–100 AI scoring, filtering & activity timeline')
+    .addTag('2. Leads & SetuAI Scoring', 'Lead capture, 1–100 AI scoring, filtering & activity timeline')
     .addTag('3. Deals & Kanban Pipeline', 'Visual sales stages, win probability, 18% GST & weighted forecast')
     .addTag('4. Contacts & GST Directory', 'B2B accounts, 15-digit GSTIN records & Lifetime Value (LTV)')
     .addTag('5. Tasks & Call Reminders', 'Daily follow-ups, site visits, WhatsApp & phone call tasks')
-    .addTag('6. Unified WhatsApp & AI Inbox', 'Omnichannel buyer threads & Gemini AI smart reply composer')
+    .addTag('6. Unified WhatsApp & AI Inbox', 'Omnichannel buyer threads & SetuAI smart reply composer')
     .addTag('7. GST Invoices & Quotations', '18% CGST/SGST & IGST compliant tax invoices, proforma quotes, HSN codes & Razorpay links')
     .addTag('8. WhatsApp Broadcast Campaigns', 'Official Meta Cloud API bulk broadcasts, Hinglish templates & segment funnel analytics')
     .addTag('9. AI Workflows & Automation', 'Zero-code IF-THIS-THEN-THAT CRM automations, auto-task creation & execution logs')

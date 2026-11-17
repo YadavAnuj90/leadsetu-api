@@ -74,18 +74,6 @@ export class InvoicesController {
     return this.invoicesService.findAll(auth, query);
   }
 
-  @Post('seed')
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({
-    summary:
-      'Seed 4 sample Delhi-NCR / Noida B2B GST Invoices & Proforma Quotations with HSN codes',
-  })
-  @ApiResponse({ status: 201, description: '4 sample GST invoices created.' })
-  async seed(@Headers('authorization') authorization: string | undefined) {
-    const auth = await this.invoicesService.verifyAuth(authorization);
-    return this.invoicesService.seedSamples(auth);
-  }
-
   @Get('export/gstr1')
   @ApiOperation({
     summary:
@@ -223,8 +211,8 @@ export class InvoicesController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the invoice',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique invoice record ID',
+    example: 'inv_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Full GST invoice returned.' })
   async findOne(
@@ -257,8 +245,8 @@ export class InvoicesController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the invoice',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique invoice record ID',
+    example: 'inv_01a2b3c4d5e6',
   })
   @ApiBody({ type: UpdateInvoiceDto })
   @ApiResponse({ status: 200, description: 'Invoice updated.' })
@@ -307,8 +295,8 @@ export class InvoicesController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the invoice',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique invoice record ID',
+    example: 'inv_01a2b3c4d5e6',
   })
   @ApiBody({ type: MarkInvoicePaidDto })
   @ApiResponse({ status: 200, description: 'Invoice marked as paid.' })
@@ -355,8 +343,8 @@ export class InvoicesController {
   })
   @ApiParam({
     name: 'id',
-    description: 'MongoDB ObjectId of the invoice',
-    example: '672e1a2b3c4d5e6f7a8b9c0d',
+    description: 'Unique invoice record ID',
+    example: 'inv_01a2b3c4d5e6',
   })
   @ApiResponse({ status: 200, description: 'Invoice deleted.' })
   async remove(

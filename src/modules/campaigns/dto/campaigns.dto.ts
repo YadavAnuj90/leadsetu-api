@@ -38,7 +38,7 @@ export class CreateCampaignDto {
   channel?: 'whatsapp_cloud' | 'whatsapp_ai_drip';
 
   @ApiPropertyOptional({
-    description: 'Target audience segment from MongoDB Leads & Contacts',
+    description: 'Target audience segment from CRM Leads & Contacts',
     enum: [
       'all_leads',
       'hot_leads',
