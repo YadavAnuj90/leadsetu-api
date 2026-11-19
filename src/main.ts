@@ -1,15 +1,31 @@
 import 'reflect-metadata';
+import type { RawBodyRequest } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import type { Request } from 'express';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    rawBody: true,
+  });
 
   // Allow uploading PDFs / certificates / brochures up to 10 MB via JSON payloads
-  app.useBodyParser('json', { limit: '10mb' });
-  app.useBodyParser('urlencoded', { limit: '10mb', extended: true });
+  // while preserving req.rawBody for Meta X-Hub-Signature-256 verification.
+  const preserveRawBody = (
+    req: RawBodyRequest<Request>,
+    _res: unknown,
+    buf: Buffer,
+  ) => {
+    req.rawBody = buf;
+  };
+  app.useBodyParser('json', { limit: '10mb', verify: preserveRawBody });
+  app.useBodyParser('urlencoded', {
+    limit: '10mb',
+    extended: true,
+    verify: preserveRawBody,
+  });
 
   // Set global prefix `/v1` so leadsetu-web proxy `/api/* -> /v1/*` maps cleanly
   app.setGlobalPrefix('v1');

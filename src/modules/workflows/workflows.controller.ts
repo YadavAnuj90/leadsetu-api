@@ -47,6 +47,7 @@ export class WorkflowsController {
       'all',
       'lead.created',
       'lead.hot_scored',
+      'lead.stale_followup',
       'deal.stage_changed',
       'invoice.overdue',
       'whatsapp.inbound',
@@ -103,6 +104,20 @@ export class WorkflowsController {
   ) {
     const auth = await this.workflowsService.verifyAuth(authorization);
     return this.workflowsService.toggleActive(auth, id);
+  }
+
+  @Post('run-stale-followups')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Run automated WhatsApp follow-up sweep for leads sitting in New / Proposal Sent past delay threshold',
+  })
+  async runStaleFollowUps(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body?: { workflowId?: string; forceImmediate?: boolean },
+  ) {
+    const auth = await this.workflowsService.verifyAuth(authorization);
+    return this.workflowsService.runStaleLeadFollowUps(auth, body);
   }
 
   @Post(':id/execute')

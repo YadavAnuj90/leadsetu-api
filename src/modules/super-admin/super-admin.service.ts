@@ -14,6 +14,7 @@ import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { Connection, Model, Types } from 'mongoose';
+import axios from 'axios';
 import { randomBytes, timingSafeEqual } from 'crypto';
 import { User, UserDocument, UserRole } from '../auth/schemas/user.schema';
 import {
@@ -22,9 +23,12 @@ import {
   TenantDocument,
 } from '../auth/schemas/tenant.schema';
 import {
+  decryptSecret,
+  encryptSecret,
   generateAccountId,
   generateUserCode,
   hashSecret,
+  maskSecret,
   verifySecret,
 } from '../auth/identity.util';
 import { PLAN_CATALOG } from '../tenants/tenants.service';
@@ -33,6 +37,7 @@ import {
   DEFAULT_DUNNING_POLICY,
   DEFAULT_GLOBAL_KILL_SWITCHES,
   DEFAULT_PLAN_MATRIX,
+  DEFAULT_PLATFORM_WHATSAPP_PROVIDER,
   DEFAULT_SECURITY_POLICIES,
   FeatureKey,
   PLATFORM_FEATURE_CATALOG,
@@ -40,6 +45,7 @@ import {
   PlatformAuditLogDocument,
   PlatformConfig,
   PlatformConfigDocument,
+  PlatformWhatsAppProviderConfig,
   SaasCoupon,
   SaasCouponDocument,
   SaasPartner,
@@ -3533,5 +3539,278 @@ export class SuperAdminService implements OnModuleInit {
         totalMrrInr: territories.reduce((s, t) => s + t.mrrInr, 0),
       },
     };
+  }
+
+  // ─── Leadsetu Built-In WhatsApp Provider Vault ───────────────────────────
+
+  private resolveEffectiveProvider(
+    cfgDoc: PlatformConfigDocument,
+  ): PlatformWhatsAppProviderConfig {
+    const raw = (cfgDoc.whatsappProvider ||
+      {}) as Partial<PlatformWhatsAppProviderConfig>;
+    const envAppId = this.configService.get<string>('META_APP_ID')?.trim() || '';
+    const envAppSecret =
+      this.configService.get<string>('META_APP_SECRET')?.trim() || '';
+    const envConfigId =
+      this.configService.get<string>('META_EMBEDDED_SIGNUP_CONFIG_ID')?.trim() ||
+      '';
+    const envVerify =
+      this.configService.get<string>('META_WHATSAPP_VERIFY_TOKEN')?.trim() || '';
+    const envManagedPhoneId =
+      this.configService.get<string>('META_MANAGED_PHONE_NUMBER_ID')?.trim() ||
+      '';
+    const envManagedWabaId =
+      this.configService.get<string>('META_MANAGED_WABA_ID')?.trim() || '';
+    const envManagedToken =
+      this.configService.get<string>('META_MANAGED_ACCESS_TOKEN')?.trim() || '';
+
+    const appSecretPlain = decryptSecret(raw.metaAppSecretEncrypted) || envAppSecret;
+    const managedTokenPlain =
+      decryptSecret(raw.managedAccessTokenEncrypted) || envManagedToken;
+
+    return {
+      ...DEFAULT_PLATFORM_WHATSAPP_PROVIDER,
+      ...raw,
+      metaAppId: raw.metaAppId || envAppId,
+      metaAppSecretEncrypted: raw.metaAppSecretEncrypted || (envAppSecret ? encryptSecret(envAppSecret) : ''),
+      metaAppSecretMask: raw.metaAppSecretMask || (appSecretPlain ? maskSecret(appSecretPlain) : ''),
+      embeddedSignupConfigId: raw.embeddedSignupConfigId || envConfigId,
+      webhookVerifyToken:
+        raw.webhookVerifyToken ||
+        envVerify ||
+        `lsw_plat_${randomBytes(12).toString('hex')}`,
+      managedSenderEnabled:
+        raw.managedSenderEnabled !== undefined
+          ? Boolean(raw.managedSenderEnabled)
+          : Boolean(envManagedPhoneId && envManagedToken),
+      managedPhoneNumberId: raw.managedPhoneNumberId || envManagedPhoneId,
+      managedWabaId: raw.managedWabaId || envManagedWabaId,
+      managedAccessTokenEncrypted:
+        raw.managedAccessTokenEncrypted ||
+        (envManagedToken ? encryptSecret(envManagedToken) : ''),
+      managedAccessTokenMask:
+        raw.managedAccessTokenMask ||
+        (managedTokenPlain ? maskSecret(managedTokenPlain) : ''),
+    };
+  }
+
+  private sanitizeProviderResponse(eff: PlatformWhatsAppProviderConfig) {
+    const hasAppSecret = Boolean(eff.metaAppSecretEncrypted);
+    const hasManagedToken = Boolean(eff.managedAccessTokenEncrypted);
+    return {
+      metaAppId: eff.metaAppId || '',
+      hasMetaAppSecret: hasAppSecret,
+      metaAppSecretMask: eff.metaAppSecretMask || '',
+      embeddedSignupConfigId: eff.embeddedSignupConfigId || '',
+      embeddedSignupReady: Boolean(
+        eff.metaAppId && hasAppSecret && eff.embeddedSignupConfigId,
+      ),
+      webhookPath: '/v1/webhooks/whatsapp',
+      webhookVerifyToken: eff.webhookVerifyToken || '',
+      managedSenderEnabled: Boolean(eff.managedSenderEnabled),
+      managedPhoneNumberId: eff.managedPhoneNumberId || '',
+      managedWabaId: eff.managedWabaId || '',
+      hasManagedAccessToken: hasManagedToken,
+      managedAccessTokenMask: eff.managedAccessTokenMask || '',
+      managedGatewayReady: Boolean(
+        eff.managedSenderEnabled && eff.managedPhoneNumberId && hasManagedToken,
+      ),
+      managedDisplayNumber: eff.managedDisplayNumber || '',
+      managedDisplayName: eff.managedDisplayName || '',
+      managedLastTestedAt: eff.managedLastTestedAt || '',
+      managedLastTestStatus: eff.managedLastTestStatus || 'untested',
+      managedLastError: eff.managedLastError || '',
+      updatedAt: eff.updatedAt || '',
+    };
+  }
+
+  async getWhatsAppProvider() {
+    const doc = await this.ensureGlobalConfig();
+    const storedVerify = doc.whatsappProvider?.webhookVerifyToken;
+    const eff = this.resolveEffectiveProvider(doc);
+    if (!storedVerify) {
+      doc.whatsappProvider = eff;
+      doc.markModified('whatsappProvider');
+      await doc.save();
+    }
+    return this.sanitizeProviderResponse(eff);
+  }
+
+  async updateWhatsAppProvider(
+    actor: SuperAdminActor,
+    dto: {
+      metaAppId?: string;
+      metaAppSecret?: string;
+      embeddedSignupConfigId?: string;
+      webhookVerifyToken?: string;
+      clearMetaAppSecret?: boolean;
+      managedSenderEnabled?: boolean;
+      managedPhoneNumberId?: string;
+      managedWabaId?: string;
+      managedAccessToken?: string;
+      clearManagedAccessToken?: boolean;
+    },
+    ipAddress?: string,
+  ) {
+    const doc = await this.ensureGlobalConfig();
+    const eff = this.resolveEffectiveProvider(doc);
+    const next: PlatformWhatsAppProviderConfig = {
+      ...eff,
+      metaAppId:
+        dto.metaAppId !== undefined ? String(dto.metaAppId).trim() : eff.metaAppId,
+      embeddedSignupConfigId:
+        dto.embeddedSignupConfigId !== undefined
+          ? String(dto.embeddedSignupConfigId).trim()
+          : eff.embeddedSignupConfigId,
+      webhookVerifyToken:
+        dto.webhookVerifyToken !== undefined
+          ? String(dto.webhookVerifyToken).trim() ||
+            `lsw_plat_${randomBytes(12).toString('hex')}`
+          : eff.webhookVerifyToken,
+      managedSenderEnabled:
+        dto.managedSenderEnabled !== undefined
+          ? Boolean(dto.managedSenderEnabled)
+          : eff.managedSenderEnabled,
+      managedPhoneNumberId:
+        dto.managedPhoneNumberId !== undefined
+          ? String(dto.managedPhoneNumberId).trim()
+          : eff.managedPhoneNumberId,
+      managedWabaId:
+        dto.managedWabaId !== undefined
+          ? String(dto.managedWabaId).trim()
+          : eff.managedWabaId,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (dto.clearMetaAppSecret) {
+      next.metaAppSecretEncrypted = '';
+      next.metaAppSecretMask = '';
+    } else if (dto.metaAppSecret?.trim()) {
+      const secret = dto.metaAppSecret.trim();
+      next.metaAppSecretEncrypted = encryptSecret(secret);
+      next.metaAppSecretMask = maskSecret(secret);
+    }
+
+    if (dto.clearManagedAccessToken) {
+      next.managedAccessTokenEncrypted = '';
+      next.managedAccessTokenMask = '';
+      next.managedLastTestStatus = 'untested';
+    } else if (dto.managedAccessToken?.trim()) {
+      const token = dto.managedAccessToken.trim();
+      next.managedAccessTokenEncrypted = encryptSecret(token);
+      next.managedAccessTokenMask = maskSecret(token);
+      next.managedLastTestStatus = 'untested';
+      next.managedLastError = '';
+    }
+
+    if (
+      dto.managedPhoneNumberId !== undefined &&
+      dto.managedPhoneNumberId.trim() !== eff.managedPhoneNumberId
+    ) {
+      next.managedDisplayNumber = '';
+      next.managedDisplayName = '';
+      next.managedLastTestStatus = 'untested';
+    }
+
+    doc.whatsappProvider = next;
+    doc.updatedByEmail = actor.email;
+    doc.markModified('whatsappProvider');
+    await doc.save();
+
+    await this.recordAudit(actor, {
+      action: 'platform.whatsapp_provider_updated',
+      severity: 'info',
+      summary: `Updated Leadsetu WhatsApp Provider config (embeddedApp=${Boolean(next.metaAppId)}, managedSender=${next.managedSenderEnabled})`,
+      ipAddress,
+    });
+
+    return this.sanitizeProviderResponse(next);
+  }
+
+  async testWhatsAppProvider(dto?: {
+    phoneNumberId?: string;
+    accessToken?: string;
+  }) {
+    const doc = await this.ensureGlobalConfig();
+    const eff = this.resolveEffectiveProvider(doc);
+    const phoneNumberId =
+      String(dto?.phoneNumberId || '').trim() || eff.managedPhoneNumberId;
+    const accessToken =
+      String(dto?.accessToken || '').trim() ||
+      decryptSecret(eff.managedAccessTokenEncrypted);
+
+    if (!phoneNumberId || !accessToken) {
+      throw new BadRequestException(
+        'Managed Phone Number ID and Access Token are required to test the Leadsetu gateway.',
+      );
+    }
+
+    const base = (
+      this.configService.get<string>('META_GRAPH_API_BASE') ||
+      'https://graph.facebook.com/v21.0'
+    ).replace(/\/+$/, '');
+    const nowIso = new Date().toISOString();
+    try {
+      const { data } = await axios.get<{
+        id?: string;
+        display_phone_number?: string;
+        verified_name?: string;
+        quality_rating?: string;
+      }>(`${base}/${encodeURIComponent(phoneNumberId)}`, {
+        params: {
+          fields: 'id,display_phone_number,verified_name,quality_rating',
+        },
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: 12000,
+      });
+
+      const updated: PlatformWhatsAppProviderConfig = {
+        ...eff,
+        managedDisplayNumber:
+          data?.display_phone_number || eff.managedDisplayNumber || '',
+        managedDisplayName: data?.verified_name || eff.managedDisplayName || '',
+        managedLastTestedAt: nowIso,
+        managedLastTestStatus: 'connected',
+        managedLastError: '',
+      };
+      if (!dto?.phoneNumberId || dto.phoneNumberId.trim() === eff.managedPhoneNumberId) {
+        doc.whatsappProvider = updated;
+        doc.markModified('whatsappProvider');
+        await doc.save();
+      }
+      return {
+        ok: true,
+        verifiedPhoneNumber: data?.display_phone_number || '',
+        businessDisplayName: data?.verified_name || '',
+        qualityRating: data?.quality_rating || '',
+        error: '',
+        config: this.sanitizeProviderResponse(updated),
+      };
+    } catch (err) {
+      const msg = axios.isAxiosError(err)
+        ? String(err.response?.data?.error?.message || err.message)
+        : err instanceof Error
+          ? err.message
+          : 'Connection test failed.';
+      const updated: PlatformWhatsAppProviderConfig = {
+        ...eff,
+        managedLastTestedAt: nowIso,
+        managedLastTestStatus: 'error',
+        managedLastError: msg,
+      };
+      if (!dto?.phoneNumberId || dto.phoneNumberId.trim() === eff.managedPhoneNumberId) {
+        doc.whatsappProvider = updated;
+        doc.markModified('whatsappProvider');
+        await doc.save();
+      }
+      return {
+        ok: false,
+        verifiedPhoneNumber: '',
+        businessDisplayName: '',
+        qualityRating: '',
+        error: msg,
+        config: this.sanitizeProviderResponse(updated),
+      };
+    }
   }
 }

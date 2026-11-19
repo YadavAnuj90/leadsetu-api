@@ -1,30 +1,20 @@
 import {
-  BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   HttpCode,
   HttpStatus,
-  Injectable,
   Module,
-  NotFoundException,
-  Optional,
   Param,
   Patch,
   Post,
   Query,
-  UnauthorizedException,
 } from '@nestjs/common';
-import {
-  InjectModel,
-  MongooseModule,
-  Prop,
-  Schema,
-  SchemaFactory,
-} from '@nestjs/mongoose';
-import { JwtModule, JwtService } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { JwtModule } from '@nestjs/jwt';
+import { MongooseModule } from '@nestjs/mongoose';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -36,83 +26,66 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { HydratedDocument, Model, Types } from 'mongoose';
-import { randomBytes } from 'crypto';
-import { AuditService } from '../audit/audit.module';
-import { maskPhoneNumber, resolveOwnerScopeFilter } from '../auth/identity.util';
-import { SuperAdminService } from '../super-admin/super-admin.service';
+import { Tenant, TenantSchema } from '../auth/schemas/tenant.schema';
+import { User, UserSchema } from '../auth/schemas/user.schema';
+import { Contact, ContactSchema } from '../contacts/contacts.service';
+import { Deal, DealSchema } from '../deals/schemas/deal.schema';
+import { Lead, LeadSchema } from '../leads/schemas/lead.schema';
+import {
+  PlatformConfig,
+  PlatformConfigSchema,
+} from '../super-admin/schemas/platform-config.schema';
+import { Ticket, TicketSchema } from '../tickets/tickets.service';
+import {
+  DEFAULT_WHATSAPP_TEMPLATES,
+  InboxService,
+  SUPPORTED_WHATSAPP_VARIABLES,
+  extractLast10Digits,
+  extractVariables,
+  renderTemplateBody,
+  slugifyTemplateName,
+} from './inbox.service';
+import { MetaWhatsAppService } from './meta-whatsapp.service';
+import { InboxGateway } from './inbox.gateway';
+import {
+  ChatAttachment,
+  ChatMessage,
+  ConversationDocument,
+  ConversationThread,
+  ConversationThreadSchema,
+  LinkedCrmEntityType,
+} from './schemas/conversation.schema';
+import {
+  WhatsAppTemplate,
+  WhatsAppTemplateCategory,
+  WhatsAppTemplateLanguage,
+  WhatsAppTemplateSchema,
+} from './schemas/whatsapp-template.schema';
+import { WhatsAppWebhookController } from './webhooks/whatsapp.controller';
 
-export type ConversationDocument = HydratedDocument<ConversationThread>;
-
-export interface ChatMessage {
-  id: string;
-  direction: 'inbound' | 'outbound';
-  content: string;
-  senderName: string;
-  status: 'sent' | 'delivered' | 'read';
-  isAiDrafted?: boolean;
-  createdAt: string;
-}
-
-@Schema({ timestamps: true, collection: 'conversations' })
-export class ConversationThread {
-  @Prop({ type: Types.ObjectId, ref: 'Tenant', required: true, index: true })
-  tenantId!: Types.ObjectId;
-
-  @Prop({ type: Types.ObjectId, ref: 'User', index: true })
-  ownerId?: Types.ObjectId;
-
-  @Prop({ required: true, trim: true })
-  contactName!: string;
-
-  @Prop({ trim: true, default: '' })
-  company!: string;
-
-  @Prop({ trim: true, default: '' })
-  phone!: string;
-
-  @Prop({ trim: true, default: 'Delhi-NCR' })
-  city!: string;
-
-  @Prop({
-    default: 'whatsapp',
-    enum: ['whatsapp', 'indiamart', 'email'],
-  })
-  channel!: 'whatsapp' | 'indiamart' | 'email';
-
-  @Prop({
-    default: 'open',
-    enum: ['open', 'resolved'],
-    index: true,
-  })
-  status!: 'open' | 'resolved';
-
-  @Prop({ type: Number, default: 85 })
-  aiScore!: number;
-
-  @Prop({ type: Number, default: 0 })
-  estimatedValue!: number;
-
-  @Prop({ default: '' })
-  aiSummary!: string;
-
-  @Prop({ default: '' })
-  aiSuggestedReply!: string;
-
-  @Prop({ type: Array, default: [] })
-  messages!: ChatMessage[];
-}
-
-export const ConversationThreadSchema =
-  SchemaFactory.createForClass(ConversationThread);
+export {
+  ChatAttachment,
+  ChatMessage,
+  ConversationDocument,
+  ConversationThread,
+  ConversationThreadSchema,
+  DEFAULT_WHATSAPP_TEMPLATES,
+  InboxService,
+  LinkedCrmEntityType,
+  SUPPORTED_WHATSAPP_VARIABLES,
+  extractLast10Digits,
+  extractVariables,
+  renderTemplateBody,
+  slugifyTemplateName,
+};
 
 export class SendInboxMessageSwaggerDto {
-  @ApiProperty({
+  @ApiPropertyOptional({
     description: 'Outbound WhatsApp / IndiaMART message content (English or Hinglish)',
     example:
       'Namaste Rajesh ji! 500 units par 12% bulk discount approve ho gaya hai. Sharing GST proforma invoice right away.',
   })
-  content!: string;
+  content?: string;
 
   @ApiPropertyOptional({
     description: 'Whether this message was drafted using SetuAI Smart Reply',
@@ -120,6 +93,45 @@ export class SendInboxMessageSwaggerDto {
     default: false,
   })
   isAiDrafted?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Optional WhatsApp template ID used to compose this message',
+  })
+  templateId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Delivery medium used by agent',
+    enum: ['inbox', 'wa_me'],
+    default: 'inbox',
+  })
+  via?: 'inbox' | 'wa_me';
+
+  @ApiPropertyOptional({
+    description: 'Whether to auto-log message to linked CRM activity timeline',
+    default: true,
+  })
+  logToTimeline?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Meta delivery mode: free-form text or approved Meta template',
+    enum: ['text', 'meta_template'],
+    default: 'text',
+  })
+  sendMode?: 'text' | 'meta_template';
+
+  @ApiPropertyOptional({
+    description: 'Approved Meta WhatsApp template payload when sendMode=meta_template',
+  })
+  metaTemplate?: {
+    name: string;
+    languageCode?: string;
+    bodyParams?: string[];
+  };
+
+  @ApiPropertyOptional({
+    description: 'Optional PDF/image attachment URL or base64 data URL',
+  })
+  attachment?: ChatAttachment;
 }
 
 export class UpdateInboxStatusSwaggerDto {
@@ -131,181 +143,158 @@ export class UpdateInboxStatusSwaggerDto {
   status!: 'open' | 'resolved';
 }
 
-@Injectable()
-export class InboxService {
-  constructor(
-    @InjectModel(ConversationThread.name)
-    private readonly convModel: Model<ConversationDocument>,
-    private readonly jwtService: JwtService,
-    private readonly configService: ConfigService,
-    @Optional() private readonly auditService?: AuditService,
-    @Optional() private readonly superAdminService?: SuperAdminService,
-  ) {}
+export class CreateWhatsAppTemplateSwaggerDto {
+  @ApiProperty({ example: 'GST Proforma Follow-up' })
+  name!: string;
 
-  async verifyAuth(authHeader?: string) {
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      throw new UnauthorizedException('Authorization token is required.');
-    }
-    const token = authHeader.slice(7).trim();
-    const secret =
-      this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
-    let payload: { sub: string; tenantId: string; email: string };
-    try {
-      payload = await this.jwtService.verifyAsync<{
-        sub: string;
-        tenantId: string;
-        email: string;
-      }>(token, { secret });
-    } catch {
-      throw new UnauthorizedException('Invalid or expired session.');
-    }
-    await this.superAdminService?.assertFeatureEnabled(
-      payload.tenantId,
-      'whatsappCloud',
-    );
-    return {
-      userId: payload.sub,
-      tenantId: payload.tenantId,
-      email: payload.email,
-    };
-  }
+  @ApiPropertyOptional({
+    enum: ['greeting', 'quotation', 'followup', 'payment', 'support', 'custom'],
+    default: 'custom',
+  })
+  category?: WhatsAppTemplateCategory;
 
-  private toDto(doc: ConversationDocument, maskPhones = false) {
-    const raw = doc.toObject() as unknown as Record<string, unknown> & {
-      createdAt?: Date;
-      updatedAt?: Date;
-    };
-    const messages = doc.messages || [];
-    const lastMsg = messages[messages.length - 1];
-    return {
-      id: doc._id.toString(),
-      tenantId: doc.tenantId.toString(),
-      contactName: doc.contactName,
-      company: doc.company || '',
-      phone: maskPhones ? maskPhoneNumber(doc.phone) : doc.phone || '',
-      city: doc.city || 'Delhi-NCR',
-      channel: doc.channel || 'whatsapp',
-      status: doc.status || 'open',
-      aiScore: doc.aiScore || 85,
-      estimatedValue: doc.estimatedValue || 0,
-      aiSummary: doc.aiSummary || '',
-      aiSuggestedReply: doc.aiSuggestedReply || '',
-      lastMessage: lastMsg?.content || '',
-      lastMessageAt:
-        lastMsg?.createdAt ||
-        (raw.updatedAt
-          ? new Date(raw.updatedAt).toISOString()
-          : new Date().toISOString()),
-      messages,
-      createdAt: raw.createdAt
-        ? new Date(raw.createdAt).toISOString()
-        : new Date().toISOString(),
-      updatedAt: raw.updatedAt
-        ? new Date(raw.updatedAt).toISOString()
-        : new Date().toISOString(),
-    };
-  }
+  @ApiPropertyOptional({
+    enum: ['English', 'Hinglish', 'Hindi'],
+    default: 'Hinglish',
+  })
+  language?: WhatsAppTemplateLanguage;
 
-  async findAll(
-    auth: { userId: string; tenantId: string },
-    query: { status?: string; channel?: string; search?: string },
-  ) {
-    const tenantObjectId = new Types.ObjectId(auth.tenantId);
-    const ownerScope = await resolveOwnerScopeFilter(this.convModel.db, auth);
-    const filter: Record<string, unknown> = {
-      tenantId: tenantObjectId,
-      ...ownerScope,
-    };
+  @ApiProperty({
+    example: 'Namaste {{buyer_name}} ji from {{company}}, sharing quote worth {{deal_value}}.',
+  })
+  body!: string;
 
-    if (query.status && query.status !== 'all') filter.status = query.status;
-    if (query.channel && query.channel !== 'all') filter.channel = query.channel;
-    if (query.search?.trim()) {
-      const regex = new RegExp(query.search.trim(), 'i');
-      filter.$or = [
-        { contactName: regex },
-        { company: regex },
-        { phone: regex },
-      ];
-    }
+  @ApiPropertyOptional({ default: true })
+  isActive?: boolean;
+}
 
-    const [docs, maskPhones] = await Promise.all([
-      this.convModel.find(filter).sort({ updatedAt: -1 }).exec(),
-      this.auditService
-        ? this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
-        : Promise.resolve(false),
-    ]);
-    return {
-      data: docs.map((d) => this.toDto(d, maskPhones)),
-    };
-  }
+export class UpdateWhatsAppTemplateSwaggerDto {
+  @ApiPropertyOptional()
+  name?: string;
 
-  async sendMessage(
-    auth: { userId: string; tenantId: string; email: string },
-    id: string,
-    body: { content: string; isAiDrafted?: boolean },
-  ) {
-    if (!Types.ObjectId.isValid(id))
-      throw new NotFoundException('Conversation not found.');
-    if (!body.content?.trim())
-      throw new BadRequestException('Message cannot be empty.');
+  @ApiPropertyOptional({
+    enum: ['greeting', 'quotation', 'followup', 'payment', 'support', 'custom'],
+  })
+  category?: WhatsAppTemplateCategory;
 
-    const ownerScope = await resolveOwnerScopeFilter(this.convModel.db, auth);
-    const doc = await this.convModel
-      .findOne({
-        _id: new Types.ObjectId(id),
-        tenantId: new Types.ObjectId(auth.tenantId),
-        ...ownerScope,
-      })
-      .exec();
-    if (!doc) throw new NotFoundException('Conversation not found.');
+  @ApiPropertyOptional({
+    enum: ['English', 'Hinglish', 'Hindi'],
+  })
+  language?: WhatsAppTemplateLanguage;
 
-    await this.superAdminService?.consumeTenantQuota(auth.tenantId, 'whatsapp', 1);
-    if (body.isAiDrafted) {
-      await this.superAdminService?.consumeTenantQuota(auth.tenantId, 'ai', 1);
-    }
+  @ApiPropertyOptional()
+  body?: string;
 
-    const newMsg: ChatMessage = {
-      id: randomBytes(6).toString('hex'),
-      direction: 'outbound',
-      content: body.content.trim(),
-      senderName: auth.email.split('@')[0],
-      status: 'delivered',
-      isAiDrafted: body.isAiDrafted || false,
-      createdAt: new Date().toISOString(),
-    };
+  @ApiPropertyOptional()
+  isActive?: boolean;
+}
 
-    doc.messages = [...(doc.messages || []), newMsg];
-    await doc.save();
-    const maskPhones = this.auditService
-      ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
-      : false;
-    return this.toDto(doc, maskPhones);
-  }
+export class RenderWhatsAppTemplateSwaggerDto {
+  @ApiPropertyOptional()
+  templateId?: string;
 
-  async updateStatus(
-    auth: { userId: string; tenantId: string },
-    id: string,
-    status: 'open' | 'resolved',
-  ) {
-    if (!Types.ObjectId.isValid(id))
-      throw new NotFoundException('Conversation not found.');
-    const ownerScope = await resolveOwnerScopeFilter(this.convModel.db, auth);
-    const doc = await this.convModel
-      .findOne({
-        _id: new Types.ObjectId(id),
-        tenantId: new Types.ObjectId(auth.tenantId),
-        ...ownerScope,
-      })
-      .exec();
-    if (!doc) throw new NotFoundException('Conversation not found.');
-    doc.status = status;
-    await doc.save();
-    const maskPhones = this.auditService
-      ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
-      : false;
-    return this.toDto(doc, maskPhones);
-  }
+  @ApiPropertyOptional()
+  body?: string;
+
+  @ApiPropertyOptional()
+  conversationId?: string;
+
+  @ApiPropertyOptional({ enum: ['', 'lead', 'contact', 'deal', 'ticket'] })
+  linkedEntityType?: LinkedCrmEntityType;
+
+  @ApiPropertyOptional()
+  linkedEntityId?: string;
+
+  @ApiPropertyOptional()
+  overrides?: Record<string, string>;
+}
+
+export class StartConversationSwaggerDto {
+  @ApiPropertyOptional({ enum: ['', 'lead', 'contact', 'deal', 'ticket'] })
+  linkedEntityType?: LinkedCrmEntityType;
+
+  @ApiPropertyOptional()
+  linkedEntityId?: string;
+
+  @ApiPropertyOptional()
+  contactName?: string;
+
+  @ApiPropertyOptional()
+  company?: string;
+
+  @ApiPropertyOptional()
+  phone?: string;
+
+  @ApiPropertyOptional()
+  city?: string;
+
+  @ApiPropertyOptional()
+  estimatedValue?: number;
+
+  @ApiPropertyOptional({ enum: ['whatsapp', 'indiamart', 'email'], default: 'whatsapp' })
+  channel?: 'whatsapp' | 'indiamart' | 'email';
+
+  @ApiPropertyOptional()
+  initialMessage?: string;
+
+  @ApiPropertyOptional()
+  templateId?: string;
+
+  @ApiPropertyOptional({ enum: ['inbox', 'wa_me'], default: 'inbox' })
+  via?: 'inbox' | 'wa_me';
+
+  @ApiPropertyOptional({ default: false })
+  isAiDrafted?: boolean;
+
+  @ApiPropertyOptional({ default: true })
+  logToTimeline?: boolean;
+
+  @ApiPropertyOptional({ enum: ['text', 'meta_template'], default: 'text' })
+  sendMode?: 'text' | 'meta_template';
+
+  @ApiPropertyOptional()
+  metaTemplate?: {
+    name: string;
+    languageCode?: string;
+    bodyParams?: string[];
+  };
+
+  @ApiPropertyOptional()
+  attachment?: ChatAttachment;
+}
+
+export class LinkConversationEntitySwaggerDto {
+  @ApiProperty({ enum: ['', 'lead', 'contact', 'deal', 'ticket'] })
+  linkedEntityType!: LinkedCrmEntityType;
+
+  @ApiPropertyOptional()
+  linkedEntityId?: string;
+}
+
+export class UpdateWhatsAppConfigSwaggerDto {
+  @ApiPropertyOptional()
+  enabled?: boolean;
+
+  @ApiPropertyOptional({ example: '123456789012345' })
+  phoneNumberId?: string;
+
+  @ApiPropertyOptional({ example: '987654321098765' })
+  wabaId?: string;
+
+  @ApiPropertyOptional()
+  accessToken?: string;
+
+  @ApiPropertyOptional()
+  appSecret?: string;
+
+  @ApiPropertyOptional()
+  verifyToken?: string;
+
+  @ApiPropertyOptional()
+  clearAccessToken?: boolean;
+
+  @ApiPropertyOptional()
+  clearAppSecret?: boolean;
 }
 
 @ApiTags('6. Unified WhatsApp & AI Inbox')
@@ -348,10 +337,201 @@ export class InboxController {
     return this.inboxService.findAll(auth, query);
   }
 
+  @Get('whatsapp-config')
+  @ApiOperation({
+    summary: 'Get per-tenant Official Meta WhatsApp Cloud API credentials & webhook status',
+  })
+  async getWhatsAppConfig(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.getWhatsAppConfig(auth);
+  }
+
+  @Patch('whatsapp-config')
+  @ApiOperation({
+    summary: 'Save or update per-tenant Meta WhatsApp Cloud API credentials (Owner/Admin only)',
+  })
+  @ApiBody({ type: UpdateWhatsAppConfigSwaggerDto })
+  async updateWhatsAppConfig(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: UpdateWhatsAppConfigSwaggerDto,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.updateWhatsAppConfig(auth, body);
+  }
+
+  @Post('whatsapp-config/test')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Test active WhatsApp Cloud API connection for this workspace',
+  })
+  async testWhatsAppConfig(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    body?: { phoneNumberId?: string; wabaId?: string; accessToken?: string },
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.testWhatsAppConfig(auth, body);
+  }
+
+  @Post('whatsapp-config/connect-number')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Connect company WhatsApp Business number using only essential business details (number + display name)',
+  })
+  async connectCompanyWhatsAppNumber(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    body: {
+      phoneNumber: string;
+      businessDisplayName?: string;
+    },
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.connectCompanyWhatsAppNumber(auth, body);
+  }
+
+  @Post('whatsapp-config/embedded-signup')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Complete 1-click Meta Embedded Signup onboarding using Leadsetu Tech Provider app',
+  })
+  async completeEmbeddedSignup(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    body: {
+      code: string;
+      wabaId?: string;
+      phoneNumberId?: string;
+      redirectUri?: string;
+    },
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.completeEmbeddedSignup(auth, body);
+  }
+
+  @Post('whatsapp-config/use-managed')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Activate Leadsetu Managed WhatsApp Cloud Gateway on this workspace',
+  })
+  async activateLeadsetuManaged(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.activateLeadsetuManaged(auth);
+  }
+
+  @Post('whatsapp-config/disconnect')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Disconnect workspace WhatsApp Cloud sender (falls back to CRM + wa.me)',
+  })
+  async disconnectWhatsApp(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.disconnectWhatsApp(auth);
+  }
+
+  @Get('meta-templates')
+  @ApiOperation({
+    summary: 'Fetch approved WhatsApp templates from Meta WABA account',
+  })
+  async listMetaTemplates(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.listMetaApprovedTemplates(auth);
+  }
+
+  @Get('templates')
+  @ApiOperation({ summary: 'List tenant WhatsApp templates & supported variables' })
+  async listTemplates(
+    @Headers('authorization') authorization: string | undefined,
+    @Query() query: { category?: string; search?: string; activeOnly?: string },
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.listTemplates(auth, query);
+  }
+
+  @Post('templates')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Create a custom WhatsApp template with variables' })
+  @ApiBody({ type: CreateWhatsAppTemplateSwaggerDto })
+  async createTemplate(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: CreateWhatsAppTemplateSwaggerDto,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.createTemplate(auth, body);
+  }
+
+  @Post('templates/render')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Render a WhatsApp template using CRM entity/conversation data' })
+  @ApiBody({ type: RenderWhatsAppTemplateSwaggerDto })
+  async renderTemplate(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: RenderWhatsAppTemplateSwaggerDto,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.renderTemplate(auth, body);
+  }
+
+  @Patch('templates/:templateId')
+  @ApiOperation({ summary: 'Update a WhatsApp template' })
+  @ApiBody({ type: UpdateWhatsAppTemplateSwaggerDto })
+  async updateTemplate(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('templateId') templateId: string,
+    @Body() body: UpdateWhatsAppTemplateSwaggerDto,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.updateTemplate(auth, templateId, body);
+  }
+
+  @Delete('templates/:templateId')
+  @ApiOperation({ summary: 'Delete a WhatsApp template' })
+  async deleteTemplate(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('templateId') templateId: string,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.deleteTemplate(auth, templateId);
+  }
+
+  @Get('crm-entities')
+  @ApiOperation({ summary: 'List Leads, Contacts, Deals & Tickets linkable to Inbox threads' })
+  async listCrmEntities(
+    @Headers('authorization') authorization: string | undefined,
+    @Query('search') search?: string,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.listLinkableCrmEntities(auth, search);
+  }
+
+  @Post('conversations')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Start or retrieve an Inbox conversation (optionally linked to CRM + sending initial message)',
+  })
+  @ApiBody({ type: StartConversationSwaggerDto })
+  async startOrGetConversation(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: StartConversationSwaggerDto,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.startOrGetConversation(auth, body);
+  }
+
   @Post(':id/messages')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
-    summary: 'Send an outbound message (or SetuAI Smart Reply) in a conversation thread',
+    summary: 'Send an outbound message (Meta Cloud / CRM Inbox / template / attachment)',
   })
   @ApiParam({
     name: 'id',
@@ -367,6 +547,29 @@ export class InboxController {
   ) {
     const auth = await this.inboxService.verifyAuth(authorization);
     return this.inboxService.sendMessage(auth, id, body);
+  }
+
+  @Post(':id/read')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Mark conversation unread count as zero' })
+  async markRead(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.markConversationRead(auth, id);
+  }
+
+  @Patch(':id/link')
+  @ApiOperation({ summary: 'Link or unlink a conversation thread to a CRM Lead, Contact, Deal, or Ticket' })
+  @ApiBody({ type: LinkConversationEntitySwaggerDto })
+  async linkEntity(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() body: LinkConversationEntitySwaggerDto,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.linkEntity(auth, id, body);
   }
 
   @Patch(':id')
@@ -395,6 +598,14 @@ export class InboxController {
     ConfigModule,
     MongooseModule.forFeature([
       { name: ConversationThread.name, schema: ConversationThreadSchema },
+      { name: WhatsAppTemplate.name, schema: WhatsAppTemplateSchema },
+      { name: Tenant.name, schema: TenantSchema },
+      { name: PlatformConfig.name, schema: PlatformConfigSchema },
+      { name: User.name, schema: UserSchema },
+      { name: Lead.name, schema: LeadSchema },
+      { name: Deal.name, schema: DealSchema },
+      { name: Contact.name, schema: ContactSchema },
+      { name: Ticket.name, schema: TicketSchema },
     ]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -406,8 +617,8 @@ export class InboxController {
       }),
     }),
   ],
-  controllers: [InboxController],
-  providers: [InboxService],
-  exports: [InboxService],
+  controllers: [InboxController, WhatsAppWebhookController],
+  providers: [InboxService, MetaWhatsAppService, InboxGateway],
+  exports: [InboxService, MetaWhatsAppService, InboxGateway],
 })
 export class InboxModule {}

@@ -129,6 +129,21 @@ export class CampaignsController {
     return this.campaignsService.launchCampaign(auth, id);
   }
 
+  @Post(':id/opt-out')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Toggle WhatsApp DND / opt-out status for a campaign recipient phone number',
+  })
+  async toggleOptOut(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() body: { phone: string; optOut: boolean },
+  ) {
+    const auth = await this.campaignsService.verifyAuth(authorization);
+    return this.campaignsService.toggleRecipientOptOut(auth, id, body);
+  }
+
   @Patch(':id')
   @ApiOperation({
     summary: 'Update a WhatsApp Broadcast Campaign',

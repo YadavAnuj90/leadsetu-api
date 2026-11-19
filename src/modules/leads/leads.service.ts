@@ -24,6 +24,7 @@ import {
   resolveOwnerScopeFilter,
 } from '../auth/identity.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
+import { WorkflowsService } from '../workflows/workflows.service';
 
 export interface CreateLeadDto {
   name: string;
@@ -66,6 +67,7 @@ export class LeadsService {
     private readonly configService: ConfigService,
     @Optional() private readonly auditService?: AuditService,
     @Optional() private readonly superAdminService?: SuperAdminService,
+    @Optional() private readonly workflowsService?: WorkflowsService,
   ) {}
 
   async verifyAuth(authHeader?: string): Promise<AuthContext> {
@@ -193,6 +195,9 @@ export class LeadsService {
   }
 
   async findAll(auth: AuthContext, query: LeadsQuery) {
+    // Non-blocking check for stale New / Proposal leads needing automated WhatsApp follow-up
+    this.workflowsService?.runStaleLeadFollowUps(auth).catch(() => {});
+
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
     const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
     const baseScope: Record<string, unknown> = {
@@ -339,38 +344,42 @@ export class LeadsService {
       activities: [initialActivity],
     });
 
-    // Auto-trigger active CRM Workflows (`lead.created` & `lead.hot_scored`)
+    // Auto-trigger active CRM Workflows (`lead.created` & `lead.hot_scored`) with real WhatsApp dispatch
     try {
-      const wfTriggers =
-        ai.aiScore >= 80
-          ? ['lead.created', 'lead.hot_scored']
-          : ['lead.created'];
-      const wfCol = this.leadModel.db.collection('workflows');
-      await wfCol.updateMany(
-        {
-          tenantId: new Types.ObjectId(auth.tenantId),
-          active: true,
-          triggerType: { $in: wfTriggers },
-        },
-        {
-          $inc: { runsCount: 1 },
-          $set: { lastRunAt: nowIso },
-          $push: {
-            executionLogs: {
-              $each: [
-                {
-                  id: `log-${Date.now()}`,
-                  summary: `Auto-triggered for new lead "${doc.name}" (${doc.company || doc.city}) — AI Score ${ai.aiScore}/100`,
-                  status: 'success',
-                  executedAt: nowIso,
-                },
-              ],
-              $position: 0,
-              $slice: 8,
-            },
+      if (this.workflowsService) {
+        await this.workflowsService.handleLeadCreatedEvent(auth, doc);
+      } else {
+        const wfTriggers =
+          ai.aiScore >= 80
+            ? ['lead.created', 'lead.hot_scored']
+            : ['lead.created'];
+        const wfCol = this.leadModel.db.collection('workflows');
+        await wfCol.updateMany(
+          {
+            tenantId: new Types.ObjectId(auth.tenantId),
+            active: true,
+            triggerType: { $in: wfTriggers },
           },
-        } as any,
-      );
+          {
+            $inc: { runsCount: 1 },
+            $set: { lastRunAt: nowIso },
+            $push: {
+              executionLogs: {
+                $each: [
+                  {
+                    id: `log-${Date.now()}`,
+                    summary: `Auto-triggered for new lead "${doc.name}" (${doc.company || doc.city}) — AI Score ${ai.aiScore}/100`,
+                    status: 'success',
+                    executedAt: nowIso,
+                  },
+                ],
+                $position: 0,
+                $slice: 8,
+              },
+            },
+          } as any,
+        );
+      }
     } catch {
       // Non-blocking workflow hook
     }

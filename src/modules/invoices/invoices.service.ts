@@ -17,9 +17,14 @@ import { ConfigService } from '@nestjs/config';
 import { HydratedDocument, Model, Types } from 'mongoose';
 import { randomBytes } from 'crypto';
 import { AuditService } from '../audit/audit.service';
-import { maskPhoneNumber, resolveOwnerScopeFilter } from '../auth/identity.util';
+import {
+  maskPhoneNumber,
+  normalizeIndianPhone,
+  resolveOwnerScopeFilter,
+} from '../auth/identity.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
+import { InboxService, extractLast10Digits } from '../inbox/inbox.service';
 import {
   ApplyBankMatchDto,
   BankStatementReconcileDto,
@@ -295,6 +300,7 @@ export class InvoicesService {
     @Optional() private readonly auditService?: AuditService,
     @Optional() private readonly superAdminService?: SuperAdminService,
     @Optional() private readonly aiBridge?: AiBridgeService,
+    @Optional() private readonly inboxService?: InboxService,
   ) {}
 
   async verifyAuth(authHeader?: string) {
@@ -2581,6 +2587,463 @@ export class InvoicesService {
     return {
       settledCount: updatedInvoices.length,
       invoices: updatedInvoices,
+    };
+  }
+
+  private sanitizePdfText(text: string): string {
+    return String(text || '')
+      .replace(/₹/g, 'Rs. ')
+      .replace(/[–—]/g, '-')
+      .replace(/[·•]/g, '|')
+      .replace(/[^\x20-\x7E]/g, ' ')
+      .replace(/\\/g, '\\\\')
+      .replace(/\(/g, '\\(')
+      .replace(/\)/g, '\\)')
+      .trim();
+  }
+
+  buildDocumentPdfBuffer(
+    doc: InvoiceDocument,
+    sellerCompany = 'Leadsetu Technologies',
+    publicUrl = '',
+  ): Buffer {
+    const isQuote = doc.docType === 'proforma_quote';
+    const cmds: string[] = [];
+
+    const drawRect = (
+      x: number,
+      y: number,
+      w: number,
+      h: number,
+      r: number,
+      g: number,
+      b: number,
+    ) => {
+      cmds.push(`${r} ${g} ${b} rg ${x} ${y} ${w} ${h} re f`);
+    };
+
+    const drawText = (
+      x: number,
+      y: number,
+      size: number,
+      text: string,
+      bold = false,
+      r = 0.09,
+      g = 0.14,
+      b = 0.23,
+    ) => {
+      const font = bold ? 'F2' : 'F1';
+      cmds.push(
+        `BT /${font} ${size} Tf ${r} ${g} ${b} rg ${x} ${y} Td (${this.sanitizePdfText(
+          text,
+        )}) Tj ET`,
+      );
+    };
+
+    // A4 Header Banner
+    drawRect(0, 745, 595, 97, 0.09, 0.14, 0.23);
+    drawText(40, 804, 18, sellerCompany.toUpperCase(), true, 1, 1, 1);
+    drawText(
+      40,
+      784,
+      10,
+      isQuote
+        ? 'COMMERCIAL B2B PROFORMA QUOTATION & PDF PROPOSAL'
+        : 'OFFICIAL B2B GST TAX INVOICE',
+      true,
+      0.58,
+      0.85,
+      0.72,
+    );
+    drawText(
+      40,
+      764,
+      9,
+      `Document No: ${doc.invoiceNumber}   |   Place of Supply: ${
+        doc.placeOfSupply || 'Delhi-NCR'
+      }   |   Due / Valid Till: ${doc.dueDate || '15 Days'}`,
+      false,
+      0.82,
+      0.88,
+      0.96,
+    );
+
+    // Buyer Box
+    drawRect(40, 650, 515, 76, 0.96, 0.97, 0.99);
+    drawText(52, 706, 10, `BILL TO: ${doc.clientName}`, true);
+    drawText(
+      52,
+      688,
+      9,
+      `Contact: ${doc.contactPerson || doc.clientName}   |   Phone: ${
+        doc.phone || 'N/A'
+      }   |   Email: ${doc.email || 'N/A'}`,
+    );
+    drawText(
+      52,
+      670,
+      9,
+      `Buyer GSTIN: ${doc.gstin || 'Unregistered / B2C'}   |   Tax Mode: ${(
+        doc.taxType || 'cgst_sgst'
+      ).toUpperCase()} @ ${doc.gstRate || 18}%`,
+    );
+
+    // Table Header
+    drawRect(40, 616, 515, 22, 0.12, 0.21, 0.36);
+    drawText(48, 623, 8.5, 'HSN/SAC', true, 1, 1, 1);
+    drawText(115, 623, 8.5, 'ITEM / DESCRIPTION', true, 1, 1, 1);
+    drawText(365, 623, 8.5, 'QTY', true, 1, 1, 1);
+    drawText(415, 623, 8.5, 'UNIT RATE', true, 1, 1, 1);
+    drawText(485, 623, 8.5, 'AMOUNT', true, 1, 1, 1);
+
+    let y = 596;
+    const items = Array.isArray(doc.items) ? doc.items.slice(0, 10) : [];
+    for (const item of items) {
+      drawText(48, y, 8.5, item.hsnSac || '998314');
+      drawText(115, y, 8.5, String(item.description || '').slice(0, 44));
+      drawText(365, y, 8.5, String(item.quantity || 1));
+      drawText(
+        415,
+        y,
+        8.5,
+        `Rs. ${Number(item.unitPrice || 0).toLocaleString('en-IN')}`,
+      );
+      drawText(
+        485,
+        y,
+        8.5,
+        `Rs. ${Number(item.amount || 0).toLocaleString('en-IN')}`,
+        true,
+      );
+      y -= 20;
+    }
+
+    // Totals & Payment Link Summary Box
+    const summaryY = Math.min(y - 16, 370);
+    drawRect(40, summaryY - 125, 515, 130, 0.95, 0.97, 0.96);
+    drawText(
+      52,
+      summaryY - 18,
+      9,
+      `Sub-Total: Rs. ${Number(doc.subTotal || 0).toLocaleString('en-IN')}   |   Discount: Rs. ${Number(
+        doc.discount || 0,
+      ).toLocaleString('en-IN')}   |   Taxable Value: Rs. ${Number(
+        doc.taxableAmount || 0,
+      ).toLocaleString('en-IN')}`,
+    );
+    drawText(
+      52,
+      summaryY - 38,
+      9,
+      `GST (${doc.gstRate || 18}%): Rs. ${Number(doc.gstAmount || 0).toLocaleString(
+        'en-IN',
+      )} (CGST: Rs. ${Number(doc.cgstAmount || 0).toLocaleString(
+        'en-IN',
+      )} / SGST: Rs. ${Number(doc.sgstAmount || 0).toLocaleString(
+        'en-IN',
+      )} / IGST: Rs. ${Number(doc.igstAmount || 0).toLocaleString('en-IN')})`,
+    );
+    drawText(
+      52,
+      summaryY - 62,
+      12,
+      `GRAND TOTAL: Rs. ${Number(doc.grandTotal || 0).toLocaleString('en-IN')}`,
+      true,
+      0.04,
+      0.45,
+      0.3,
+    );
+    drawText(
+      52,
+      summaryY - 84,
+      9,
+      `Razorpay Instant Payment Link: ${
+        doc.paymentLink || 'https://rzp.io/i/leadsetu'
+      }`,
+      true,
+    );
+    if (publicUrl) {
+      drawText(
+        52,
+        summaryY - 102,
+        8.5,
+        `Online Buyer Portal: ${publicUrl}`,
+      );
+    }
+
+    drawText(
+      40,
+      96,
+      8,
+      `Authorized Signatory - ${sellerCompany} | Generated via Leadsetu GST & WhatsApp Cloud Engine`,
+      true,
+    );
+
+    const streamContent = cmds.join('\n');
+    const objects = [
+      '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+      '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
+      '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>\nendobj\n',
+      '4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n',
+      '5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\nendobj\n',
+      `6 0 obj\n<< /Length ${streamContent.length} >>\nstream\n${streamContent}\nendstream\nendobj\n`,
+    ];
+
+    let pdf = '%PDF-1.4\n';
+    const offsets: number[] = [];
+    for (const obj of objects) {
+      offsets.push(pdf.length);
+      pdf += obj;
+    }
+    const xrefPos = pdf.length;
+    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    for (const offset of offsets) {
+      pdf += `${String(offset).padStart(10, '0')} 00000 n \n`;
+    }
+    pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF`;
+
+    return Buffer.from(pdf, 'utf8');
+  }
+
+  /**
+   * 1-Click Send Quotation or GST Tax Invoice PDF + Razorpay Payment Link on WhatsApp
+   * via connected WhatsApp Cloud line, logging to buyer's /inbox thread AND Deal/Lead timelines.
+   */
+  async sendOnWhatsApp(
+    auth: { userId: string; tenantId: string; email: string },
+    id: string,
+    dto?: {
+      phone?: string;
+      customMessage?: string;
+      publicBaseUrl?: string;
+    },
+  ) {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new NotFoundException('Document not found.');
+    }
+    if (!this.inboxService) {
+      throw new BadRequestException('WhatsApp Inbox service is unavailable.');
+    }
+
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
+    const doc = await this.invoiceModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        tenantId: tenantOid,
+        ...ownerScope,
+      })
+      .exec();
+    if (!doc) {
+      throw new NotFoundException('Quotation or GST Invoice not found.');
+    }
+
+    let docChanged = false;
+    if (!doc.publicToken) {
+      doc.publicToken = `lsq_${randomBytes(10).toString('hex')}`;
+      docChanged = true;
+    }
+    if (!doc.paymentLink) {
+      const slugCode = doc.invoiceNumber
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-');
+      doc.paymentLink = `https://rzp.io/i/leadsetu-${slugCode}`;
+      docChanged = true;
+    }
+
+    const db = this.invoiceModel.db;
+    const [tenantDoc, userDoc] = await Promise.all([
+      db.collection('tenants').findOne({ _id: tenantOid }),
+      Types.ObjectId.isValid(auth.userId)
+        ? db
+            .collection('users')
+            .findOne({ _id: new Types.ObjectId(auth.userId) })
+        : Promise.resolve(null),
+    ]);
+
+    const sellerCompany = String(
+      tenantDoc?.companyName || tenantDoc?.name || 'Leadsetu Technologies',
+    ).trim();
+    const actorName = String(
+      userDoc?.name || auth.email.split('@')[0] || 'Sales & Accounts',
+    ).trim();
+
+    // Resolve phone number from dto, document, or linked Deal/Lead
+    let rawPhone = String(dto?.phone || doc.phone || '').trim();
+    if (extractLast10Digits(rawPhone).length < 10) {
+      if (doc.linkedDealId && Types.ObjectId.isValid(doc.linkedDealId)) {
+        const deal = await db
+          .collection('deals')
+          .findOne({ _id: new Types.ObjectId(doc.linkedDealId), tenantId: tenantOid });
+        if (deal?.contactPhone) rawPhone = String(deal.contactPhone).trim();
+      }
+      if (
+        extractLast10Digits(rawPhone).length < 10 &&
+        doc.linkedLeadId &&
+        Types.ObjectId.isValid(doc.linkedLeadId)
+      ) {
+        const lead = await db
+          .collection('leads')
+          .findOne({ _id: new Types.ObjectId(doc.linkedLeadId), tenantId: tenantOid });
+        if (lead?.phone) rawPhone = String(lead.phone).trim();
+      }
+    }
+
+    if (extractLast10Digits(rawPhone).length < 10) {
+      throw new BadRequestException(
+        'A valid 10-digit buyer WhatsApp phone number is required to send this PDF.',
+      );
+    }
+
+    const formattedPhone = normalizeIndianPhone(rawPhone) || rawPhone;
+    if (doc.phone !== formattedPhone) {
+      doc.phone = formattedPhone;
+      docChanged = true;
+    }
+
+    // Auto-discover linked Deal / Lead by phone or clientName if not already linked
+    const last10 = extractLast10Digits(formattedPhone);
+    if (!doc.linkedDealId || !Types.ObjectId.isValid(doc.linkedDealId)) {
+      const deals = await db
+        .collection('deals')
+        .find({ tenantId: tenantOid })
+        .sort({ updatedAt: -1 })
+        .limit(40)
+        .toArray();
+      const matchedDeal = deals.find(
+        (d) =>
+          (last10 && extractLast10Digits(String(d.contactPhone || '')) === last10) ||
+          (doc.clientName &&
+            String(d.company || '').toLowerCase() ===
+              doc.clientName.toLowerCase()),
+      );
+      if (matchedDeal) {
+        doc.linkedDealId = String(matchedDeal._id);
+        docChanged = true;
+      }
+    }
+
+    if (!doc.linkedLeadId || !Types.ObjectId.isValid(doc.linkedLeadId)) {
+      const leads = await db
+        .collection('leads')
+        .find({ tenantId: tenantOid })
+        .sort({ updatedAt: -1 })
+        .limit(50)
+        .toArray();
+      const matchedLead = leads.find(
+        (l) =>
+          (last10 && extractLast10Digits(String(l.phone || '')) === last10) ||
+          (doc.clientName &&
+            String(l.company || '').toLowerCase() ===
+              doc.clientName.toLowerCase()),
+      );
+      if (matchedLead) {
+        doc.linkedLeadId = String(matchedLead._id);
+        docChanged = true;
+      }
+    }
+
+    if (docChanged) {
+      await doc.save();
+    }
+
+    const baseOrigin = String(
+      dto?.publicBaseUrl ||
+        this.configService.get<string>('FRONTEND_URL') ||
+        'http://localhost:3000',
+    ).replace(/\/+$/, '');
+    const publicUrl = `${baseOrigin}/quote/${doc.publicToken}`;
+
+    const pdfBuffer = this.buildDocumentPdfBuffer(doc, sellerCompany, publicUrl);
+    const filename = `${doc.invoiceNumber}.pdf`;
+    const pdfDataUrl = `data:application/pdf;base64,${pdfBuffer.toString('base64')}`;
+
+    const isQuote = doc.docType === 'proforma_quote';
+    const docLabel = isQuote ? 'Proforma Quotation' : 'GST Tax Invoice';
+    const defaultMessage =
+      dto?.customMessage?.trim() ||
+      `Namaste ${doc.contactPerson || doc.clientName} ji 👋,\n\nPlease find attached your ${docLabel} PDF *${doc.invoiceNumber}* from *${sellerCompany}*.\n\n• Taxable Value: ₹${Number(doc.taxableAmount || 0).toLocaleString('en-IN')}\n• GST (${doc.gstRate || 18}%): ₹${Number(doc.gstAmount || 0).toLocaleString('en-IN')}\n• *Grand Total: ₹${Number(doc.grandTotal || 0).toLocaleString('en-IN')}*\n• ${isQuote ? 'Valid Till' : 'Due Date'}: ${doc.dueDate || '15 Days'}\n\n💳 Pay securely via Razorpay / UPI:\n${doc.paymentLink}\n\n📄 View & Approve Online:\n${publicUrl}`;
+
+    const hasDeal = Boolean(
+      doc.linkedDealId && Types.ObjectId.isValid(doc.linkedDealId),
+    );
+    const hasLead = Boolean(
+      doc.linkedLeadId && Types.ObjectId.isValid(doc.linkedLeadId),
+    );
+    const primaryEntityType: 'deal' | 'lead' = hasDeal ? 'deal' : 'lead';
+    const primaryEntityId = hasDeal
+      ? doc.linkedDealId
+      : hasLead
+        ? doc.linkedLeadId
+        : doc._id.toString();
+
+    const dispatch = await this.inboxService.dispatchAutomatedWhatsApp({
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      actorName,
+      linkedEntityType: primaryEntityType,
+      linkedEntityId: primaryEntityId,
+      contactName: doc.contactPerson || doc.clientName,
+      company: doc.clientName,
+      phone: formattedPhone,
+      city: doc.placeOfSupply || 'Delhi-NCR',
+      estimatedValue: doc.grandTotal || 0,
+      messageBody: defaultMessage,
+      attachment: {
+        type: 'document',
+        url: pdfDataUrl,
+        filename,
+        mimeType: 'application/pdf',
+      },
+      workflowName: `${docLabel} PDF (${doc.invoiceNumber})`,
+    });
+
+    // If BOTH Deal and Lead are linked, also log the WhatsApp PDF dispatch on the Lead timeline!
+    if (hasDeal && hasLead) {
+      await this.inboxService.logWhatsAppTimelineActivity(
+        auth.tenantId,
+        'lead',
+        doc.linkedLeadId,
+        actorName,
+        `Sent ${docLabel} PDF ${filename} (₹${Number(doc.grandTotal || 0).toLocaleString('en-IN')}) + Razorpay Link (${doc.paymentLink}) via ${
+          dispatch.deliveryProvider === 'meta_cloud'
+            ? 'WhatsApp Cloud'
+            : 'CRM Inbox'
+        }`,
+      );
+    }
+
+    await this.auditService?.record({
+      tenantId: auth.tenantId,
+      actorId: auth.userId,
+      action: isQuote ? 'quote.whatsapp_pdf_sent' : 'invoice.whatsapp_pdf_sent',
+      entityType: 'invoice',
+      entityId: doc._id.toString(),
+      entityLabel: `${doc.invoiceNumber} · ${doc.clientName}`,
+      summary: `Sent ${docLabel} PDF (${filename}) + Razorpay link (${doc.paymentLink}) on WhatsApp to ${formattedPhone}`,
+    });
+
+    const maskPhones = this.auditService
+      ? await this.auditService.shouldMaskViewerPhones(
+          auth.tenantId,
+          auth.userId,
+        )
+      : false;
+
+    return {
+      invoice: this.toDto(doc, maskPhones),
+      sent: !dispatch.skippedDnd && dispatch.status !== 'failed',
+      deliveryProvider: dispatch.deliveryProvider || 'crm_local',
+      status: dispatch.status || 'delivered',
+      externalMessageId: dispatch.externalMessageId || '',
+      conversationId: dispatch.conversationId || '',
+      filename,
+      paymentLink: doc.paymentLink,
+      publicUrl,
+      linkedDealId: doc.linkedDealId || '',
+      linkedLeadId: doc.linkedLeadId || '',
+      message: dispatch.renderedMessage || defaultMessage,
+      error: dispatch.deliveryError || dispatch.reason || '',
     };
   }
 }

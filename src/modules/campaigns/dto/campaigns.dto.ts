@@ -17,6 +17,13 @@ export class CreateCampaignDto {
   name!: string;
 
   @ApiPropertyOptional({
+    description: 'Delivery mode: free-form personalized text or official Meta template',
+    enum: ['text', 'meta_template'],
+    default: 'text',
+  })
+  sendMode?: 'text' | 'meta_template';
+
+  @ApiPropertyOptional({
     description: 'Meta WhatsApp Cloud API approved template name',
     example: 'b2b_catalogue_hinglish_v2',
     default: 'b2b_catalogue_hinglish_v2',

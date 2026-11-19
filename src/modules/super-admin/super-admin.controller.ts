@@ -503,4 +503,56 @@ export class SuperAdminController {
     await this.superAdminService.verifySuperAdmin(authorization);
     return this.superAdminService.getTerritoryAnalytics();
   }
+
+  @Get('whatsapp-provider')
+  @ApiOperation({
+    summary: 'Get central Leadsetu Meta Tech Provider & Managed WhatsApp Gateway configuration',
+  })
+  async getWhatsAppProvider(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.getWhatsAppProvider();
+  }
+
+  @Patch('whatsapp-provider')
+  @ApiOperation({
+    summary: 'Update central Leadsetu Meta Tech Provider App & Managed WhatsApp Gateway credentials',
+  })
+  async updateWhatsAppProvider(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    body: {
+      metaAppId?: string;
+      metaAppSecret?: string;
+      embeddedSignupConfigId?: string;
+      webhookVerifyToken?: string;
+      clearMetaAppSecret?: boolean;
+      managedSenderEnabled?: boolean;
+      managedPhoneNumberId?: string;
+      managedWabaId?: string;
+      managedAccessToken?: string;
+      clearManagedAccessToken?: boolean;
+    },
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.updateWhatsAppProvider(
+      actor,
+      body,
+      clientIp(req),
+    );
+  }
+
+  @Post('whatsapp-provider/test')
+  @ApiOperation({
+    summary: 'Test Leadsetu Managed WhatsApp Cloud Phone Number ID & Access Token via graph.facebook.com',
+  })
+  async testWhatsAppProvider(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body?: { phoneNumberId?: string; accessToken?: string },
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.testWhatsAppProvider(body);
+  }
 }

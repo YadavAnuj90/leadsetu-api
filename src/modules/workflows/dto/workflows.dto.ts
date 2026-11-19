@@ -3,6 +3,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 export type WorkflowTriggerType =
   | 'lead.created'
   | 'lead.hot_scored'
+  | 'lead.stale_followup'
   | 'deal.stage_changed'
   | 'invoice.overdue'
   | 'whatsapp.inbound';
@@ -76,4 +77,31 @@ export class CreateWorkflowDto {
     example: 142,
   })
   runsCount?: number;
+
+  @ApiPropertyOptional({
+    description: 'Lead source filter for lead.created/hot_scored triggers',
+    example: 'indiamart',
+    default: 'all',
+  })
+  sourceFilter?: string;
+
+  @ApiPropertyOptional({
+    description: 'Target stage for lead.stale_followup trigger (new, proposal, contacted, qualified, or any)',
+    example: 'proposal',
+    default: 'new',
+  })
+  staleStage?: string;
+
+  @ApiPropertyOptional({
+    description: 'Hours a lead remains in staleStage before auto WhatsApp follow-up fires',
+    example: 24,
+    default: 24,
+  })
+  staleHours?: number;
+
+  @ApiPropertyOptional({
+    description: 'Custom WhatsApp template message sent when this workflow fires',
+    example: 'Namaste {{buyer_name}} ji 👋, thank you for your inquiry for {{company}}!',
+  })
+  whatsappTemplateBody?: string;
 }

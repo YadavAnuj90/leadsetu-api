@@ -236,6 +236,64 @@ export class TopupRequestRecord {
 
 export const TopupRequestRecordSchema = SchemaFactory.createForClass(TopupRequestRecord);
 
+/** Per-tenant Official Meta WhatsApp Cloud API credentials & connection state. */
+@Schema({ _id: false })
+export class WhatsAppCloudConfig {
+  @Prop({ type: Boolean, default: false })
+  enabled!: boolean;
+
+  @Prop({
+    default: 'not_connected',
+    enum: ['not_connected', 'own_embedded', 'leadsetu_managed', 'manual'],
+  })
+  connectionMode?: 'not_connected' | 'own_embedded' | 'leadsetu_managed' | 'manual';
+
+  @Prop({ trim: true, default: '' })
+  phoneNumberId!: string;
+
+  @Prop({ trim: true, default: '' })
+  wabaId!: string;
+
+  @Prop({ trim: true, default: '' })
+  businessDisplayName!: string;
+
+  @Prop({ trim: true, default: '' })
+  verifiedPhoneNumber!: string;
+
+  @Prop({ trim: true, default: '' })
+  accessTokenEncrypted!: string;
+
+  @Prop({ trim: true, default: '' })
+  accessTokenMask!: string;
+
+  @Prop({ trim: true, default: '' })
+  appSecretEncrypted!: string;
+
+  @Prop({ trim: true, default: '' })
+  appSecretMask!: string;
+
+  @Prop({ trim: true, default: '' })
+  verifyToken!: string;
+
+  @Prop({ trim: true, default: '' })
+  lastTestedAt!: string;
+
+  @Prop({
+    default: 'untested',
+    enum: ['untested', 'connected', 'error'],
+  })
+  lastTestStatus!: 'untested' | 'connected' | 'error';
+
+  @Prop({ trim: true, default: '' })
+  lastError!: string;
+
+  @Prop({ trim: true, default: '' })
+  updatedAt!: string;
+}
+
+export const WhatsAppCloudConfigSchema =
+  SchemaFactory.createForClass(WhatsAppCloudConfig);
+
 @Schema({ timestamps: true, collection: 'tenants' })
 export class Tenant {
   @Prop({ required: true, trim: true })
@@ -307,6 +365,10 @@ export class Tenant {
   /** Per-tenant Super Admin module feature overrides (true=force ON, false=force OFF). */
   @Prop({ type: Object, default: {} })
   featureOverrides?: Record<string, boolean>;
+
+  /** Per-tenant Official Meta WhatsApp Cloud API credentials & webhook config. */
+  @Prop({ type: WhatsAppCloudConfigSchema, default: () => ({}) })
+  whatsappCloud?: WhatsAppCloudConfig;
 
   /** Custom seat cap override set by Super Admin (null = use plan default). */
   @Prop({ type: Number, default: null })

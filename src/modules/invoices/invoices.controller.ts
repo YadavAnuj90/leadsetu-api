@@ -337,6 +337,26 @@ export class InvoicesController {
     return this.invoicesService.sendRecoveryChaser(auth, id, dto);
   }
 
+  @Post(':id/send-whatsapp')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      '1-Click Send Quotation or GST Tax Invoice PDF + Razorpay payment link via connected WhatsApp Cloud & log to Deal/Lead timeline',
+  })
+  async sendOnWhatsApp(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body()
+    dto?: {
+      phone?: string;
+      customMessage?: string;
+      publicBaseUrl?: string;
+    },
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.sendOnWhatsApp(auth, id, dto);
+  }
+
   @Delete(':id')
   @ApiOperation({
     summary: 'Delete a GST Invoice or Proforma Quotation',

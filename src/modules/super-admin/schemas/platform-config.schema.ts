@@ -278,6 +278,44 @@ export const DEFAULT_DUNNING_POLICY: DunningPolicy = {
   lastRunSummary: '',
 };
 
+export interface PlatformWhatsAppProviderConfig {
+  metaAppId: string;
+  metaAppSecretEncrypted: string;
+  metaAppSecretMask: string;
+  embeddedSignupConfigId: string;
+  webhookVerifyToken: string;
+  managedSenderEnabled: boolean;
+  managedPhoneNumberId: string;
+  managedWabaId: string;
+  managedAccessTokenEncrypted: string;
+  managedAccessTokenMask: string;
+  managedDisplayNumber: string;
+  managedDisplayName: string;
+  managedLastTestedAt: string;
+  managedLastTestStatus: 'untested' | 'connected' | 'error';
+  managedLastError: string;
+  updatedAt: string;
+}
+
+export const DEFAULT_PLATFORM_WHATSAPP_PROVIDER: PlatformWhatsAppProviderConfig = {
+  metaAppId: '',
+  metaAppSecretEncrypted: '',
+  metaAppSecretMask: '',
+  embeddedSignupConfigId: '',
+  webhookVerifyToken: '',
+  managedSenderEnabled: false,
+  managedPhoneNumberId: '',
+  managedWabaId: '',
+  managedAccessTokenEncrypted: '',
+  managedAccessTokenMask: '',
+  managedDisplayNumber: '',
+  managedDisplayName: '',
+  managedLastTestedAt: '',
+  managedLastTestStatus: 'untested',
+  managedLastError: '',
+  updatedAt: '',
+};
+
 @Schema({ timestamps: true, collection: 'platform_configs' })
 export class PlatformConfig {
   @Prop({ required: true, unique: true, default: 'global' })
@@ -309,6 +347,9 @@ export class PlatformConfig {
 
   @Prop({ type: Object, default: () => DEFAULT_DUNNING_POLICY })
   dunningPolicy!: DunningPolicy;
+
+  @Prop({ type: Object, default: () => DEFAULT_PLATFORM_WHATSAPP_PROVIDER })
+  whatsappProvider?: PlatformWhatsAppProviderConfig;
 
   @Prop({ trim: true, default: '' })
   updatedByEmail?: string;

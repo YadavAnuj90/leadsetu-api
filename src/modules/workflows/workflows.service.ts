@@ -21,6 +21,8 @@ import {
 } from './dto/workflows.dto';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import { resolveOwnerScopeFilter } from '../auth/identity.util';
+import { InboxService } from '../inbox/inbox.service';
+import { Lead, LeadDocument } from '../leads/schemas/lead.schema';
 
 export type WorkflowDocument = HydratedDocument<Workflow>;
 
@@ -61,12 +63,25 @@ export class Workflow {
     enum: [
       'lead.created',
       'lead.hot_scored',
+      'lead.stale_followup',
       'deal.stage_changed',
       'invoice.overdue',
       'whatsapp.inbound',
     ],
   })
   triggerType!: WorkflowTriggerType;
+
+  @Prop({ trim: true, default: 'all' })
+  sourceFilter?: string;
+
+  @Prop({ trim: true, default: 'new' })
+  staleStage?: string;
+
+  @Prop({ type: Number, default: 24 })
+  staleHours?: number;
+
+  @Prop({ trim: true, default: '' })
+  whatsappTemplateBody?: string;
 
   @Prop({ required: true, trim: true })
   conditionSummary!: string;
@@ -108,8 +123,11 @@ export class WorkflowsService {
   constructor(
     @InjectModel(Workflow.name)
     private readonly workflowModel: Model<WorkflowDocument>,
+    @InjectModel(Lead.name)
+    private readonly leadModel: Model<LeadDocument>,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly inboxService: InboxService,
     @Optional() private readonly superAdminService?: SuperAdminService,
   ) {}
 
@@ -135,10 +153,22 @@ export class WorkflowsService {
       payload.tenantId,
       'aiWorkflows',
     );
+    const userDoc = Types.ObjectId.isValid(payload.sub)
+      ? await this.workflowModel.db
+          .collection('users')
+          .findOne(
+            { _id: new Types.ObjectId(payload.sub) },
+            { projection: { name: 1 } },
+          )
+      : null;
+
     return {
       userId: payload.sub,
       tenantId: payload.tenantId,
       email: payload.email,
+      name:
+        (userDoc?.name ? String(userDoc.name).trim() : '') ||
+        payload.email.split('@')[0],
     };
   }
 
@@ -153,6 +183,10 @@ export class WorkflowsService {
       name: doc.name,
       description: doc.description || '',
       triggerType: doc.triggerType || 'lead.created',
+      sourceFilter: doc.sourceFilter || 'all',
+      staleStage: doc.staleStage || 'new',
+      staleHours: doc.staleHours ?? 24,
+      whatsappTemplateBody: doc.whatsappTemplateBody || '',
       conditionSummary: doc.conditionSummary,
       actionType: doc.actionType || 'send_whatsapp_create_task',
       actionSummary: doc.actionSummary,
@@ -227,8 +261,8 @@ export class WorkflowsService {
       throw new BadRequestException('Workflow name is required.');
     }
     const runs =
-      dto.runsCount !== undefined ? Math.max(0, Number(dto.runsCount)) : 1;
-    const hoursSaved = Math.max(1, Math.round(runs * 0.15));
+      dto.runsCount !== undefined ? Math.max(0, Number(dto.runsCount)) : 0;
+    const hoursSaved = Math.max(0, Math.round(runs * 0.15));
     const nowIso = new Date().toISOString();
 
     const doc = await this.workflowModel.create({
@@ -237,6 +271,13 @@ export class WorkflowsService {
       name: dto.name.trim(),
       description: dto.description?.trim() || '',
       triggerType: dto.triggerType || 'lead.created',
+      sourceFilter: dto.sourceFilter?.trim() || 'all',
+      staleStage: dto.staleStage?.trim() || 'new',
+      staleHours:
+        dto.staleHours !== undefined
+          ? Math.max(0, Number(dto.staleHours))
+          : 24,
+      whatsappTemplateBody: dto.whatsappTemplateBody?.trim() || '',
       conditionSummary:
         dto.conditionSummary?.trim() || 'When trigger condition is met',
       actionType: dto.actionType || 'send_whatsapp_create_task',
@@ -250,7 +291,7 @@ export class WorkflowsService {
       executionLogs: [
         {
           id: `log-${Date.now()}`,
-          summary: `Workflow initialized and verified on Noida Cloud Engine (${dto.actionSummary || 'Ready'})`,
+          summary: `Workflow initialized and listening (${dto.actionSummary || 'Ready'})`,
           status: 'success',
           executedAt: nowIso,
         },
@@ -279,7 +320,315 @@ export class WorkflowsService {
     return this.toDto(doc);
   }
 
-  async executeNow(auth: { userId: string; tenantId: string }, id: string) {
+  private async createWorkflowFollowUpTask(params: {
+    tenantObjectId: Types.ObjectId;
+    ownerId: Types.ObjectId;
+    workflowName: string;
+    triggerType: string;
+    actionSummary: string;
+    leadName: string;
+    leadCompany?: string;
+    leadPhone?: string;
+  }) {
+    try {
+      const tasksCol = this.workflowModel.db.collection('tasks');
+      await tasksCol.insertOne({
+        tenantId: params.tenantObjectId,
+        ownerId: params.ownerId,
+        title: `[Auto-Workflow] ${params.workflowName}: ${params.leadName}`,
+        description: `Automatically triggered (${params.triggerType}): ${params.actionSummary}`,
+        priority: 'high',
+        status: 'pending',
+        category: 'whatsapp',
+        dueDate: 'Today, 5:00 PM IST',
+        relatedName: params.leadName,
+        relatedCompany: params.leadCompany || '',
+        relatedPhone: params.leadPhone || '',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    } catch {
+      // Non-blocking task write
+    }
+  }
+
+  private buildWelcomeMessage(wf: WorkflowDocument, lead: LeadDocument): string {
+    if (wf.whatsappTemplateBody?.trim()) {
+      return wf.whatsappTemplateBody.trim();
+    }
+    const srcLabel = (lead.source || 'website').toUpperCase();
+    return lead.company
+      ? `Namaste {{buyer_name}} ji 👋, thank you for your inquiry for {{company}} via ${srcLabel}. Sharing our product brochure & GST quotation details right away!`
+      : `Namaste {{buyer_name}} ji 👋, thank you for reaching out via ${srcLabel}. Our specialist is reviewing your requirement and sharing our catalogue right away!`;
+  }
+
+  private buildStaleFollowUpMessage(
+    wf: WorkflowDocument,
+    lead: LeadDocument,
+  ): string {
+    if (wf.whatsappTemplateBody?.trim()) {
+      return wf.whatsappTemplateBody.trim();
+    }
+    if (lead.status === 'proposal') {
+      return 'Namaste {{buyer_name}} ji 👋, following up on the GST proposal sent for {{company}}. Please let us know if you need any price/spec clarification or priority dispatch.';
+    }
+    return 'Namaste {{buyer_name}} ji 👋, checking in on your recent inquiry for {{company}}. Reply YES if you would like a quick 5-minute call or updated price list.';
+  }
+
+  /**
+   * Automatically runs active `lead.created` & `lead.hot_scored` workflows when a lead arrives
+   * via manual creation, webhook (IndiaMART / Website / Meta Ads), or bulk import.
+   */
+  async handleLeadCreatedEvent(
+    auth: { userId: string; tenantId: string; email: string; name?: string },
+    lead: LeadDocument,
+  ): Promise<void> {
+    const tenantObjectId = new Types.ObjectId(auth.tenantId);
+    const triggers: WorkflowTriggerType[] =
+      (lead.aiScore || 0) >= 80
+        ? ['lead.created', 'lead.hot_scored']
+        : ['lead.created'];
+
+    const workflows = await this.workflowModel
+      .find({
+        tenantId: tenantObjectId,
+        active: true,
+        triggerType: { $in: triggers },
+      })
+      .exec();
+
+    if (workflows.length === 0) return;
+
+    const nowIso = new Date().toISOString();
+    const actorName = auth.name || auth.email.split('@')[0];
+
+    for (const wf of workflows) {
+      const sourceRule = (wf.sourceFilter || 'all').trim().toLowerCase();
+      if (sourceRule && sourceRule !== 'all' && lead.source !== sourceRule) {
+        continue;
+      }
+
+      let logStatus: 'success' | 'skipped' = 'success';
+      let logSummary = `Triggered for lead "${lead.name}" (${lead.company || lead.city})`;
+
+      if (lead.phone?.trim()) {
+        const messageBody = this.buildWelcomeMessage(wf, lead);
+        const dispatch = await this.inboxService.dispatchAutomatedWhatsApp({
+          tenantId: auth.tenantId,
+          userId: auth.userId,
+          actorName,
+          linkedEntityType: 'lead',
+          linkedEntityId: lead._id.toString(),
+          contactName: lead.name,
+          company: lead.company || '',
+          phone: lead.phone,
+          city: lead.city || 'Delhi-NCR',
+          estimatedValue: lead.estimatedValue || 0,
+          messageBody,
+          workflowId: wf._id.toString(),
+          workflowName: wf.name,
+          timelineMarker: `[Workflow:${wf._id.toString()}]`,
+        });
+
+        if (dispatch.skippedDnd) {
+          logStatus = 'skipped';
+          logSummary = `Skipped WhatsApp for "${lead.name}" (${lead.phone}) — Buyer opted out (DND)`;
+        } else {
+          const providerLabel =
+            dispatch.deliveryProvider === 'meta_cloud'
+              ? 'Meta Cloud'
+              : 'CRM Inbox';
+          logSummary = `Sent auto WhatsApp welcome (${providerLabel}) to ${lead.name} (${lead.phone})`;
+        }
+      } else {
+        logStatus = 'skipped';
+        logSummary = `Created follow-up task for "${lead.name}" (no phone number for WhatsApp)`;
+      }
+
+      await this.createWorkflowFollowUpTask({
+        tenantObjectId,
+        ownerId: Types.ObjectId.isValid(auth.userId)
+          ? new Types.ObjectId(auth.userId)
+          : lead.ownerId,
+        workflowName: wf.name,
+        triggerType: wf.triggerType,
+        actionSummary: wf.actionSummary,
+        leadName: lead.name,
+        leadCompany: lead.company,
+        leadPhone: lead.phone,
+      });
+
+      wf.runsCount = (wf.runsCount || 0) + 1;
+      wf.hoursSaved = Math.max(1, Math.round(wf.runsCount * 0.15));
+      wf.lastRunAt = nowIso;
+      wf.executionLogs.unshift({
+        id: `log-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+        summary: logSummary,
+        status: logStatus,
+        executedAt: nowIso,
+      });
+      if (wf.executionLogs.length > 10) {
+        wf.executionLogs = wf.executionLogs.slice(0, 10);
+      }
+      wf.markModified('executionLogs');
+      await wf.save();
+    }
+  }
+
+  /**
+   * Sweep leads resting in target stage (`new`, `proposal`, etc.) past `staleHours`
+   * and dispatch automated WhatsApp follow-up nudges once per workflow rule.
+   */
+  async runStaleLeadFollowUps(
+    auth: { userId: string; tenantId: string; email?: string; name?: string },
+    options?: { workflowId?: string; forceImmediate?: boolean },
+  ): Promise<{
+    workflowsProcessed: number;
+    followUpsSent: number;
+    details: Array<{ workflowId: string; name: string; sentCount: number }>;
+  }> {
+    const tenantObjectId = new Types.ObjectId(auth.tenantId);
+    const filter: Record<string, unknown> = {
+      tenantId: tenantObjectId,
+      triggerType: 'lead.stale_followup',
+    };
+    if (options?.workflowId && Types.ObjectId.isValid(options.workflowId)) {
+      filter._id = new Types.ObjectId(options.workflowId);
+    } else {
+      filter.active = true;
+    }
+
+    const workflows = await this.workflowModel.find(filter).exec();
+    if (workflows.length === 0) {
+      return { workflowsProcessed: 0, followUpsSent: 0, details: [] };
+    }
+
+    const actorName =
+      auth.name || (auth.email ? auth.email.split('@')[0] : 'Workflow Bot');
+    let followUpsSent = 0;
+    const details: Array<{ workflowId: string; name: string; sentCount: number }> =
+      [];
+
+    for (const wf of workflows) {
+      const targetStage = (wf.staleStage || 'any').trim();
+      const stageList =
+        targetStage === 'any' || !targetStage
+          ? ['new', 'proposal']
+          : [targetStage];
+      const delayHours = Math.max(0, Number(wf.staleHours ?? 24));
+      const cutoffMs = options?.forceImmediate
+        ? Date.now()
+        : Date.now() - delayHours * 3600 * 1000;
+
+      const candidates = await this.leadModel
+        .find({
+          tenantId: tenantObjectId,
+          status: { $in: stageList },
+          phone: { $exists: true, $ne: '' },
+        })
+        .sort({ updatedAt: 1 })
+        .limit(50)
+        .exec();
+
+      const wfMarker = `[Workflow:${wf._id.toString()}]`;
+      const nowIso = new Date().toISOString();
+      let sentForWf = 0;
+
+      for (const lead of candidates) {
+        if (sentForWf >= 25) break;
+
+        const alreadyFollowed = (lead.activities || []).some((a) =>
+          String(a.description || '').includes(wfMarker),
+        );
+        if (alreadyFollowed) continue;
+
+        const rawDoc = lead.toObject() as unknown as {
+          updatedAt?: Date;
+          createdAt?: Date;
+        };
+        const touchedAt = new Date(
+          rawDoc.updatedAt || rawDoc.createdAt || Date.now(),
+        ).getTime();
+
+        if (!options?.forceImmediate && delayHours > 0 && touchedAt > cutoffMs) {
+          continue;
+        }
+
+        const messageBody = this.buildStaleFollowUpMessage(wf, lead);
+        const dispatch = await this.inboxService.dispatchAutomatedWhatsApp({
+          tenantId: auth.tenantId,
+          userId: auth.userId,
+          actorName,
+          linkedEntityType: 'lead',
+          linkedEntityId: lead._id.toString(),
+          contactName: lead.name,
+          company: lead.company || '',
+          phone: lead.phone,
+          city: lead.city || 'Delhi-NCR',
+          estimatedValue: lead.estimatedValue || 0,
+          messageBody,
+          workflowId: wf._id.toString(),
+          workflowName: wf.name,
+          timelineMarker: wfMarker,
+        });
+
+        if (dispatch.skippedDnd || dispatch.status === 'failed') {
+          continue;
+        }
+
+        await this.createWorkflowFollowUpTask({
+          tenantObjectId,
+          ownerId: Types.ObjectId.isValid(auth.userId)
+            ? new Types.ObjectId(auth.userId)
+            : lead.ownerId,
+          workflowName: wf.name,
+          triggerType: wf.triggerType,
+          actionSummary: wf.actionSummary,
+          leadName: lead.name,
+          leadCompany: lead.company,
+          leadPhone: lead.phone,
+        });
+
+        sentForWf++;
+        followUpsSent++;
+
+        wf.runsCount = (wf.runsCount || 0) + 1;
+        wf.hoursSaved = Math.max(1, Math.round(wf.runsCount * 0.15));
+        wf.lastRunAt = nowIso;
+        wf.executionLogs.unshift({
+          id: `log-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+          summary: `Stale "${lead.status.toUpperCase()}" follow-up sent to ${lead.name} (${lead.phone})`,
+          status: 'success',
+          executedAt: nowIso,
+        });
+      }
+
+      if (sentForWf > 0) {
+        if (wf.executionLogs.length > 10) {
+          wf.executionLogs = wf.executionLogs.slice(0, 10);
+        }
+        wf.markModified('executionLogs');
+        await wf.save();
+      }
+
+      details.push({
+        workflowId: wf._id.toString(),
+        name: wf.name,
+        sentCount: sentForWf,
+      });
+    }
+
+    return {
+      workflowsProcessed: workflows.length,
+      followUpsSent,
+      details,
+    };
+  }
+
+  async executeNow(
+    auth: { userId: string; tenantId: string; email?: string; name?: string },
+    id: string,
+  ) {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Workflow not found.');
     }
@@ -294,44 +643,107 @@ export class WorkflowsService {
       .exec();
     if (!doc) throw new NotFoundException('Workflow not found.');
 
+    if (doc.triggerType === 'lead.stale_followup') {
+      const sweep = await this.runStaleLeadFollowUps(auth, {
+        workflowId: id,
+        forceImmediate: true,
+      });
+      const refreshed = await this.workflowModel.findById(doc._id).exec();
+      if (sweep.followUpsSent === 0 && refreshed) {
+        const nowIso = new Date().toISOString();
+        refreshed.lastRunAt = nowIso;
+        refreshed.executionLogs.unshift({
+          id: `log-${Date.now()}`,
+          summary: `Sweep complete — no uncontacted stale leads in "${refreshed.staleStage || 'new/proposal'}"`,
+          status: 'skipped',
+          executedAt: nowIso,
+        });
+        if (refreshed.executionLogs.length > 10) {
+          refreshed.executionLogs = refreshed.executionLogs.slice(0, 10);
+        }
+        refreshed.markModified('executionLogs');
+        await refreshed.save();
+        return this.toDto(refreshed);
+      }
+      return this.toDto(refreshed || doc);
+    }
+
     const nowIso = new Date().toISOString();
     doc.runsCount = (doc.runsCount || 0) + 1;
     doc.hoursSaved = Math.max(1, Math.round(doc.runsCount * 0.15));
     doc.lastRunAt = nowIso;
 
-    // Also create a real follow-up Task in the `tasks` collection so the user sees cross-module automation in action!
-    let logMessage = `Executed "${doc.actionSummary}" — WhatsApp Cloud API & CRM state updated.`;
-    try {
-      const tasksCol = this.workflowModel.db.collection('tasks');
-      await tasksCol.insertOne({
+    const latestLead = await this.leadModel
+      .findOne({
         tenantId: tenantObjectId,
-        ownerId: new Types.ObjectId(auth.userId),
-        title: `[Auto-Workflow] ${doc.name}`,
-        description: `Automatically created by workflow trigger (${doc.triggerType}): ${doc.actionSummary}`,
-        priority: 'high',
-        status: 'pending',
-        category: 'whatsapp',
-        dueDate: 'Today, 5:00 PM IST',
-        relatedName: 'Noida / Delhi-NCR Priority Buyer',
-        relatedCompany: 'Auto-Routed via Leadsetu AI',
-        relatedPhone: '+91 88515 20832',
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        phone: { $exists: true, $ne: '' },
+      })
+      .sort({ createdAt: -1 })
+      .exec();
+
+    let logMessage = `Executed "${doc.actionSummary}" — Follow-up task created in /tasks.`;
+    let logStatus: 'success' | 'skipped' = 'success';
+
+    if (latestLead) {
+      const actorName =
+        auth.name || (auth.email ? auth.email.split('@')[0] : 'Workflow Bot');
+      const messageBody = this.buildWelcomeMessage(doc, latestLead);
+      const dispatch = await this.inboxService.dispatchAutomatedWhatsApp({
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        actorName,
+        linkedEntityType: 'lead',
+        linkedEntityId: latestLead._id.toString(),
+        contactName: latestLead.name,
+        company: latestLead.company || '',
+        phone: latestLead.phone,
+        city: latestLead.city || 'Delhi-NCR',
+        estimatedValue: latestLead.estimatedValue || 0,
+        messageBody,
+        workflowId: doc._id.toString(),
+        workflowName: doc.name,
       });
-      logMessage = `Dispatched WhatsApp template & auto-created High-Priority Task in /tasks.`;
-    } catch {
-      // Fallback if tasks collection write is skipped
+
+      await this.createWorkflowFollowUpTask({
+        tenantObjectId,
+        ownerId: new Types.ObjectId(auth.userId),
+        workflowName: doc.name,
+        triggerType: doc.triggerType,
+        actionSummary: doc.actionSummary,
+        leadName: latestLead.name,
+        leadCompany: latestLead.company,
+        leadPhone: latestLead.phone,
+      });
+
+      if (dispatch.skippedDnd) {
+        logStatus = 'skipped';
+        logMessage = `Skipped WhatsApp for ${latestLead.name} (${latestLead.phone}) — Buyer opted out (DND).`;
+      } else {
+        logMessage = `Sent WhatsApp (${dispatch.deliveryProvider === 'meta_cloud' ? 'Meta Cloud' : 'CRM Inbox'}) to ${latestLead.name} (${latestLead.phone}) & created Task.`;
+      }
+    } else {
+      await this.createWorkflowFollowUpTask({
+        tenantObjectId,
+        ownerId: new Types.ObjectId(auth.userId),
+        workflowName: doc.name,
+        triggerType: doc.triggerType,
+        actionSummary: doc.actionSummary,
+        leadName: 'Sample CRM Buyer',
+        leadCompany: 'Demo Prospect',
+        leadPhone: '',
+      });
     }
 
     doc.executionLogs.unshift({
       id: `log-${Date.now()}`,
       summary: logMessage,
-      status: 'success',
+      status: logStatus,
       executedAt: nowIso,
     });
-    if (doc.executionLogs.length > 8) {
-      doc.executionLogs = doc.executionLogs.slice(0, 8);
+    if (doc.executionLogs.length > 10) {
+      doc.executionLogs = doc.executionLogs.slice(0, 10);
     }
+    doc.markModified('executionLogs');
 
     await doc.save();
     return this.toDto(doc);

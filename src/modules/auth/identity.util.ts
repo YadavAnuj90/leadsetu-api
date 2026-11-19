@@ -1,5 +1,13 @@
 import { BadRequestException, ServiceUnavailableException } from '@nestjs/common';
-import { createHash, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'crypto';
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  randomBytes,
+  randomInt,
+  scryptSync,
+  timingSafeEqual,
+} from 'crypto';
 import { Types, type Connection } from 'mongoose';
 
 /** Minimal structural type for a Mongoose model that supports `.exists(...)`. */
@@ -277,4 +285,50 @@ export function sanitizeOrganizationLogoUrl(raw?: string | null): string {
     );
   }
   return val;
+}
+
+function resolveSecretEncryptionKey(seed?: string): Buffer {
+  const secretSeed =
+    seed ||
+    process.env.WHATSAPP_SECRET_KEY ||
+    process.env.JWT_SECRET ||
+    'leadsetu_super_secret_access_key_2026_delhi_ncr';
+  return createHash('sha256').update(secretSeed).digest();
+}
+
+export function encryptSecret(plain?: string, seed?: string): string {
+  const val = String(plain || '').trim();
+  if (!val) return '';
+  const key = resolveSecretEncryptionKey(seed);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(val, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `enc:v1:${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`;
+}
+
+export function decryptSecret(stored?: string, seed?: string): string {
+  const val = String(stored || '').trim();
+  if (!val) return '';
+  if (!val.startsWith('enc:v1:')) return val;
+  const parts = val.split(':');
+  if (parts.length !== 5) return '';
+  try {
+    const iv = Buffer.from(parts[2], 'hex');
+    const tag = Buffer.from(parts[3], 'hex');
+    const encrypted = Buffer.from(parts[4], 'hex');
+    const key = resolveSecretEncryptionKey(seed);
+    const decipher = createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+export function maskSecret(plain?: string): string {
+  const val = String(plain || '').trim();
+  if (!val) return '';
+  if (val.length <= 8) return '*'.repeat(val.length);
+  return `${val.slice(0, 4)}...${val.slice(-4)}`;
 }

@@ -21,8 +21,29 @@ import {
 } from './dto/campaigns.dto';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import { resolveOwnerScopeFilter } from '../auth/identity.util';
+import { InboxService, extractLast10Digits } from '../inbox/inbox.service';
 
 export type CampaignDocument = HydratedDocument<Campaign>;
+
+export interface CampaignRecipientEntry {
+  recipientId: string;
+  entityType: 'lead' | 'contact';
+  contactName: string;
+  company: string;
+  phone: string;
+  status: 'sent' | 'delivered' | 'read' | 'replied' | 'failed' | 'opted_out';
+  deliveryProvider: 'meta_cloud' | 'crm_local' | 'skipped_dnd';
+  externalMessageId: string;
+  conversationId: string;
+  messageId: string;
+  renderedMessage: string;
+  error: string;
+  replyPreview: string;
+  sentAt: string;
+  deliveredAt: string;
+  readAt: string;
+  repliedAt: string;
+}
 
 @Schema({ timestamps: true, collection: 'campaigns' })
 export class Campaign {
@@ -37,6 +58,12 @@ export class Campaign {
 
   @Prop({ trim: true, default: 'b2b_catalogue_hinglish_v1' })
   templateName!: string;
+
+  @Prop({
+    default: 'text',
+    enum: ['text', 'meta_template'],
+  })
+  sendMode?: 'text' | 'meta_template';
 
   @Prop({
     default: 'hinglish',
@@ -84,6 +111,15 @@ export class Campaign {
   repliedCount!: number;
 
   @Prop({ type: Number, default: 0 })
+  failedCount?: number;
+
+  @Prop({ type: Number, default: 0 })
+  skippedDndCount?: number;
+
+  @Prop({ type: Array, default: [] })
+  recipients?: CampaignRecipientEntry[];
+
+  @Prop({ type: Number, default: 0 })
   attributedRevenue!: number;
 
   @Prop({
@@ -105,6 +141,7 @@ export class CampaignsService {
     private readonly campaignModel: Model<CampaignDocument>,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly inboxService: InboxService,
     @Optional() private readonly superAdminService?: SuperAdminService,
   ) {}
 
@@ -130,10 +167,22 @@ export class CampaignsService {
       payload.tenantId,
       'whatsappBroadcasts',
     );
+    const userDoc = Types.ObjectId.isValid(payload.sub)
+      ? await this.campaignModel.db
+          .collection('users')
+          .findOne(
+            { _id: new Types.ObjectId(payload.sub) },
+            { projection: { name: 1 } },
+          )
+      : null;
+
     return {
       userId: payload.sub,
       tenantId: payload.tenantId,
       email: payload.email,
+      name:
+        (userDoc?.name ? String(userDoc.name).trim() : '') ||
+        payload.email.split('@')[0],
     };
   }
 
@@ -208,38 +257,264 @@ export class CampaignsService {
     }
   }
 
-  private computeFunnelMetrics(
-    audienceCount: number,
-    status: CampaignStatus,
-    customRevenue?: number,
-  ) {
-    if (status === 'draft' || status === 'scheduled') {
-      return {
-        audienceCount,
-        sentCount: 0,
-        deliveredCount: 0,
-        readCount: 0,
-        repliedCount: 0,
-        attributedRevenue: 0,
+  private async resolveSegmentRecipients(
+    tenantObjectId: Types.ObjectId,
+    segment: CampaignSegment,
+    ownerScope: Record<string, unknown> = {},
+  ): Promise<
+    Array<{
+      recipientId: string;
+      entityType: 'lead' | 'contact';
+      contactName: string;
+      company: string;
+      phone: string;
+      city: string;
+      estimatedValue: number;
+      optedOut: boolean;
+    }>
+  > {
+    const db = this.campaignModel.db;
+    const leadsCol = db.collection('leads');
+    const contactsCol = db.collection('contacts');
+    const convsCol = db.collection('conversations');
+
+    let rows: Array<Record<string, unknown>> = [];
+    let entityType: 'lead' | 'contact' = 'lead';
+
+    if (segment === 'gst_customers') {
+      entityType = 'contact';
+      rows = await contactsCol
+        .find({
+          tenantId: tenantObjectId,
+          ...ownerScope,
+          gstin: { $exists: true, $ne: '' },
+          phone: { $exists: true, $ne: '' },
+        })
+        .sort({ updatedAt: -1 })
+        .limit(200)
+        .toArray();
+    } else {
+      const leadFilter: Record<string, unknown> = {
+        tenantId: tenantObjectId,
+        ...ownerScope,
+        phone: { $exists: true, $ne: '' },
       };
+      if (segment === 'hot_leads') {
+        leadFilter.$or = [{ aiScore: { $gte: 75 } }, { aiLabel: 'Hot' }];
+      } else if (segment === 'noida_delhi_ncr') {
+        leadFilter.city = {
+          $regex: /noida|delhi|gurugram|gurgaon|ghaziabad|faridabad/i,
+        };
+      } else if (segment === 'indiamart_buyers') {
+        leadFilter.source = 'indiamart';
+      }
+
+      rows = await leadsCol
+        .find(leadFilter)
+        .sort({ updatedAt: -1 })
+        .limit(200)
+        .toArray();
     }
-    const sentCount = audienceCount;
-    const deliveredCount = Math.round(sentCount * 0.96);
-    const readCount = Math.round(deliveredCount * 0.78);
-    const repliedCount = Math.max(1, Math.round(readCount * 0.22));
-    const attributedRevenue =
-      customRevenue !== undefined
-        ? Number(customRevenue)
-        : repliedCount * 18500;
+
+    const optOutConvs = await convsCol
+      .find(
+        { tenantId: tenantObjectId, whatsappOptOut: true },
+        { projection: { phone: 1 } },
+      )
+      .toArray();
+    const optOutPhones = new Set(
+      optOutConvs
+        .map((c) => extractLast10Digits(String(c.phone || '')))
+        .filter((d) => d.length >= 10),
+    );
+
+    const seenPhones = new Set<string>();
+    const results: Array<{
+      recipientId: string;
+      entityType: 'lead' | 'contact';
+      contactName: string;
+      company: string;
+      phone: string;
+      city: string;
+      estimatedValue: number;
+      optedOut: boolean;
+    }> = [];
+
+    for (const r of rows) {
+      const phone = String(r.phone || '').trim();
+      const last10 = extractLast10Digits(phone);
+      if (last10.length < 10 || seenPhones.has(last10)) continue;
+      seenPhones.add(last10);
+
+      const tags = Array.isArray(r.tags) ? r.tags : [];
+      const hasDndTag = tags.some((t) =>
+        /^(dnd|opt_out|opted_out|unsubscribed)$/i.test(String(t).trim()),
+      );
+      const optedOut = hasDndTag || optOutPhones.has(last10);
+
+      results.push({
+        recipientId: String(r._id),
+        entityType,
+        contactName: String(r.name || 'Buyer').trim(),
+        company: String(r.company || '').trim(),
+        phone,
+        city: String(r.city || 'Delhi-NCR').trim(),
+        estimatedValue: Number(r.estimatedValue ?? r.lifetimeValue ?? 0) || 0,
+        optedOut,
+      });
+    }
+
+    return results;
+  }
+
+  private recomputeMetricsFromRecipients(recipients: CampaignRecipientEntry[]) {
+    const sentCount = recipients.filter((r) =>
+      ['sent', 'delivered', 'read', 'replied'].includes(r.status),
+    ).length;
+    const deliveredCount = recipients.filter((r) =>
+      ['delivered', 'read', 'replied'].includes(r.status),
+    ).length;
+    const readCount = recipients.filter((r) =>
+      ['read', 'replied'].includes(r.status),
+    ).length;
+    const repliedCount = recipients.filter((r) => r.status === 'replied').length;
+    const failedCount = recipients.filter((r) => r.status === 'failed').length;
+    const skippedDndCount = recipients.filter(
+      (r) => r.status === 'opted_out',
+    ).length;
 
     return {
-      audienceCount,
+      audienceCount: recipients.length,
       sentCount,
       deliveredCount,
       readCount,
       repliedCount,
-      attributedRevenue,
+      failedCount,
+      skippedDndCount,
     };
+  }
+
+  private async dispatchCampaignToRecipients(
+    auth: { userId: string; tenantId: string; email: string; name?: string },
+    doc: CampaignDocument,
+    ownerScope: Record<string, unknown>,
+  ) {
+    const tenantObjectId = new Types.ObjectId(auth.tenantId);
+    const audience = await this.resolveSegmentRecipients(
+      tenantObjectId,
+      doc.targetSegment,
+      ownerScope,
+    );
+
+    const recipients: CampaignRecipientEntry[] = [];
+    const nowIso = new Date().toISOString();
+    const languageCode = doc.language === 'english' ? 'en' : 'hi';
+
+    for (const r of audience) {
+      if (r.optedOut) {
+        recipients.push({
+          recipientId: r.recipientId,
+          entityType: r.entityType,
+          contactName: r.contactName,
+          company: r.company,
+          phone: r.phone,
+          status: 'opted_out',
+          deliveryProvider: 'skipped_dnd',
+          externalMessageId: '',
+          conversationId: '',
+          messageId: '',
+          renderedMessage: '',
+          error: 'Buyer opted out (STOP / DND)',
+          replyPreview: '',
+          sentAt: nowIso,
+          deliveredAt: '',
+          readAt: '',
+          repliedAt: '',
+        });
+        continue;
+      }
+
+      const dispatch = await this.inboxService.dispatchAutomatedWhatsApp({
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        actorName: auth.name || auth.email.split('@')[0],
+        linkedEntityType: r.entityType,
+        linkedEntityId: r.recipientId,
+        contactName: r.contactName,
+        company: r.company,
+        phone: r.phone,
+        city: r.city,
+        estimatedValue: r.estimatedValue,
+        messageBody: doc.messageBody,
+        sendMode: doc.sendMode || 'text',
+        metaTemplateName: doc.templateName,
+        languageCode,
+        campaignId: doc._id.toString(),
+        campaignName: doc.name,
+      });
+
+      if (dispatch.skippedDnd) {
+        recipients.push({
+          recipientId: r.recipientId,
+          entityType: r.entityType,
+          contactName: r.contactName,
+          company: r.company,
+          phone: r.phone,
+          status: 'opted_out',
+          deliveryProvider: 'skipped_dnd',
+          externalMessageId: '',
+          conversationId: dispatch.conversationId || '',
+          messageId: '',
+          renderedMessage: '',
+          error: dispatch.reason || 'Opted out (DND)',
+          replyPreview: '',
+          sentAt: nowIso,
+          deliveredAt: '',
+          readAt: '',
+          repliedAt: '',
+        });
+        continue;
+      }
+
+      const status =
+        dispatch.status === 'failed'
+          ? 'failed'
+          : dispatch.status === 'delivered'
+            ? 'delivered'
+            : 'sent';
+
+      recipients.push({
+        recipientId: r.recipientId,
+        entityType: r.entityType,
+        contactName: r.contactName,
+        company: r.company,
+        phone: r.phone,
+        status,
+        deliveryProvider: dispatch.deliveryProvider || 'crm_local',
+        externalMessageId: dispatch.externalMessageId || '',
+        conversationId: dispatch.conversationId || '',
+        messageId: dispatch.messageId || '',
+        renderedMessage: dispatch.renderedMessage || doc.messageBody,
+        error: dispatch.deliveryError || '',
+        replyPreview: '',
+        sentAt: nowIso,
+        deliveredAt: status === 'delivered' ? nowIso : '',
+        readAt: '',
+        repliedAt: '',
+      });
+    }
+
+    const metrics = this.recomputeMetricsFromRecipients(recipients);
+    doc.recipients = recipients;
+    doc.audienceCount = metrics.audienceCount;
+    doc.sentCount = metrics.sentCount;
+    doc.deliveredCount = metrics.deliveredCount;
+    doc.readCount = metrics.readCount;
+    doc.repliedCount = metrics.repliedCount;
+    doc.failedCount = metrics.failedCount;
+    doc.skippedDndCount = metrics.skippedDndCount;
+    doc.status = 'completed';
+    doc.markModified('recipients');
   }
 
   private toDto(doc: CampaignDocument) {
@@ -257,6 +532,7 @@ export class CampaignsService {
       tenantId: doc.tenantId.toString(),
       name: doc.name,
       templateName: doc.templateName || 'b2b_catalogue_hinglish_v2',
+      sendMode: doc.sendMode || 'text',
       language: doc.language || 'hinglish',
       channel: doc.channel || 'whatsapp_cloud',
       targetSegment: doc.targetSegment || 'all_leads',
@@ -267,6 +543,9 @@ export class CampaignsService {
       deliveredCount: delivered,
       readCount: read,
       repliedCount: replied,
+      failedCount: doc.failedCount || 0,
+      skippedDndCount: doc.skippedDndCount || 0,
+      recipients: doc.recipients || [],
       deliveryRate: sent > 0 ? Math.round((delivered / sent) * 100) : 0,
       readRate: delivered > 0 ? Math.round((read / delivered) * 100) : 0,
       replyRate: read > 0 ? Math.round((replied / read) * 100) : 0,
@@ -361,7 +640,7 @@ export class CampaignsService {
   }
 
   async create(
-    auth: { userId: string; tenantId: string },
+    auth: { userId: string; tenantId: string; email: string; name?: string },
     dto: CreateCampaignDto,
   ) {
     if (!dto.name?.trim()) {
@@ -372,28 +651,18 @@ export class CampaignsService {
     }
 
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
+    const ownerScope = await resolveOwnerScopeFilter(this.campaignModel.db, auth);
     const segment: CampaignSegment = dto.targetSegment || 'all_leads';
-    const segmentCounts = await this.getLiveSegmentCounts(tenantObjectId);
-
-    const baseAudience =
-      dto.audienceCount && Number(dto.audienceCount) > 0
-        ? Number(dto.audienceCount)
-        : segmentCounts[segment] || 120;
-
-    const status: CampaignStatus = dto.status || 'completed';
-    const metrics = this.computeFunnelMetrics(
-      baseAudience,
-      status,
-      dto.attributedRevenue,
+    const segmentCounts = await this.getLiveSegmentCounts(
+      tenantObjectId,
+      ownerScope,
     );
 
-    if (status === 'completed' && metrics.sentCount > 0) {
-      await this.superAdminService?.consumeTenantQuota(
-        auth.tenantId,
-        'whatsapp',
-        metrics.sentCount,
-      );
-    }
+    const status: CampaignStatus = dto.status || 'completed';
+    const previewAudience =
+      dto.audienceCount && Number(dto.audienceCount) > 0
+        ? Number(dto.audienceCount)
+        : segmentCounts[segment] || 0;
 
     const doc = await this.campaignModel.create({
       tenantId: tenantObjectId,
@@ -401,25 +670,37 @@ export class CampaignsService {
       name: dto.name.trim(),
       templateName:
         dto.templateName?.trim() || 'b2b_catalogue_hinglish_v2',
+      sendMode: dto.sendMode || 'text',
       language: dto.language || 'hinglish',
       channel: dto.channel || 'whatsapp_cloud',
       targetSegment: segment,
       messageBody: dto.messageBody.trim(),
       ctaLabel: dto.ctaLabel?.trim() || 'Get Instant Quote',
-      audienceCount: metrics.audienceCount,
-      sentCount: metrics.sentCount,
-      deliveredCount: metrics.deliveredCount,
-      readCount: metrics.readCount,
-      repliedCount: metrics.repliedCount,
-      attributedRevenue: metrics.attributedRevenue,
+      audienceCount: previewAudience,
+      sentCount: 0,
+      deliveredCount: 0,
+      readCount: 0,
+      repliedCount: 0,
+      failedCount: 0,
+      skippedDndCount: 0,
+      recipients: [],
+      attributedRevenue: Number(dto.attributedRevenue || 0),
       status,
       scheduledFor: dto.scheduledFor?.trim() || '',
     });
 
+    if (status === 'completed' || status === 'running') {
+      await this.dispatchCampaignToRecipients(auth, doc, ownerScope);
+      await doc.save();
+    }
+
     return this.toDto(doc);
   }
 
-  async launchCampaign(auth: { userId: string; tenantId: string }, id: string) {
+  async launchCampaign(
+    auth: { userId: string; tenantId: string; email: string; name?: string },
+    id: string,
+  ) {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Campaign not found.');
     }
@@ -433,25 +714,75 @@ export class CampaignsService {
       .exec();
     if (!doc) throw new NotFoundException('Campaign not found.');
 
-    const metrics = this.computeFunnelMetrics(
-      doc.audienceCount || 120,
-      'completed',
-    );
-    if (metrics.sentCount > 0) {
-      await this.superAdminService?.consumeTenantQuota(
-        auth.tenantId,
-        'whatsapp',
-        metrics.sentCount,
-      );
+    await this.dispatchCampaignToRecipients(auth, doc, ownerScope);
+    await doc.save();
+    return this.toDto(doc);
+  }
+
+  async toggleRecipientOptOut(
+    auth: { userId: string; tenantId: string },
+    id: string,
+    body: { phone: string; optOut: boolean },
+  ) {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new NotFoundException('Campaign not found.');
     }
-    doc.status = 'completed';
+    if (!body?.phone?.trim()) {
+      throw new BadRequestException('Recipient phone number is required.');
+    }
+    const ownerScope = await resolveOwnerScopeFilter(this.campaignModel.db, auth);
+    const doc = await this.campaignModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
+      })
+      .exec();
+    if (!doc) throw new NotFoundException('Campaign not found.');
+
+    const optOut = Boolean(body.optOut);
+    await this.inboxService.setPhoneOptOut(auth.tenantId, body.phone, optOut);
+
+    const target10 = extractLast10Digits(body.phone);
+    const nextRecipients = (doc.recipients || []).map((r) => {
+      if (extractLast10Digits(r.phone) !== target10) return r;
+      if (optOut) {
+        return {
+          ...r,
+          status: 'opted_out' as const,
+          deliveryProvider: 'skipped_dnd' as const,
+          error: 'Marked Opt-Out / DND',
+        };
+      }
+      const restoredStatus = r.repliedAt
+        ? ('replied' as const)
+        : r.readAt
+          ? ('read' as const)
+          : r.deliveredAt
+            ? ('delivered' as const)
+            : ('sent' as const);
+      return {
+        ...r,
+        status: restoredStatus,
+        deliveryProvider:
+          r.deliveryProvider === 'skipped_dnd'
+            ? ('crm_local' as const)
+            : r.deliveryProvider,
+        error: '',
+      };
+    });
+
+    const metrics = this.recomputeMetricsFromRecipients(nextRecipients);
+    doc.recipients = nextRecipients;
+    doc.skippedDndCount = metrics.skippedDndCount;
     doc.sentCount = metrics.sentCount;
     doc.deliveredCount = metrics.deliveredCount;
     doc.readCount = metrics.readCount;
     doc.repliedCount = metrics.repliedCount;
-    doc.attributedRevenue = metrics.attributedRevenue;
-
+    doc.failedCount = metrics.failedCount;
+    doc.markModified('recipients');
     await doc.save();
+
     return this.toDto(doc);
   }
 
@@ -476,6 +807,7 @@ export class CampaignsService {
     if (dto.name !== undefined) doc.name = dto.name.trim();
     if (dto.templateName !== undefined)
       doc.templateName = dto.templateName.trim();
+    if (dto.sendMode !== undefined) doc.sendMode = dto.sendMode;
     if (dto.language !== undefined) doc.language = dto.language;
     if (dto.channel !== undefined) doc.channel = dto.channel;
     if (dto.targetSegment !== undefined) doc.targetSegment = dto.targetSegment;
