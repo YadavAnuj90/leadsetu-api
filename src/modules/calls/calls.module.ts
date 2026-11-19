@@ -5,6 +5,11 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { AuditModule } from '../audit/audit.module';
 import { Tenant, TenantSchema } from '../auth/schemas/tenant.schema';
 import { User, UserSchema } from '../auth/schemas/user.schema';
+import { Contact, ContactSchema } from '../contacts/contacts.service';
+import { Deal, DealSchema } from '../deals/schemas/deal.schema';
+import { Lead, LeadSchema } from '../leads/schemas/lead.schema';
+import { TaskItem, TaskItemSchema } from '../tasks/tasks.service';
+import { Ticket, TicketSchema } from '../tickets/tickets.service';
 import { CallsController } from './calls.controller';
 import { CallsGateway } from './calls.gateway';
 import { CallsService } from './calls.service';
@@ -23,6 +28,11 @@ import {
       { name: CallTelemetrySample.name, schema: CallTelemetrySampleSchema },
       { name: User.name, schema: UserSchema },
       { name: Tenant.name, schema: TenantSchema },
+      { name: Lead.name, schema: LeadSchema },
+      { name: Deal.name, schema: DealSchema },
+      { name: Ticket.name, schema: TicketSchema },
+      { name: Contact.name, schema: ContactSchema },
+      { name: TaskItem.name, schema: TaskItemSchema },
     ]),
     JwtModule.registerAsync({
       imports: [ConfigModule],

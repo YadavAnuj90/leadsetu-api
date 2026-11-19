@@ -8,6 +8,7 @@ import {
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
+import { Types } from 'mongoose';
 import type { Server, Socket } from 'socket.io';
 import {
   CALL_RING_TIMEOUT_MS,
@@ -60,6 +61,18 @@ export class CallsGateway
     return '';
   }
 
+  private extractHandshakeCallToken(client: Socket): string {
+    const callToken = client.handshake?.auth?.callToken;
+    if (typeof callToken === 'string' && callToken.trim()) {
+      return callToken.trim();
+    }
+    const queryCallToken = client.handshake?.query?.callToken;
+    if (typeof queryCallToken === 'string' && queryCallToken.trim()) {
+      return queryCallToken.trim();
+    }
+    return '';
+  }
+
   private getSocketAuth(client: Socket): CallAuthContext | null {
     return (client.data as { auth?: CallAuthContext })?.auth || null;
   }
@@ -89,22 +102,62 @@ export class CallsGateway
   async handleConnection(client: Socket) {
     try {
       const token = this.extractHandshakeToken(client);
-      const auth = await this.callsService.verifyRawToken(token);
-      (client.data as { auth: CallAuthContext }).auth = auth;
+      if (token) {
+        const auth = await this.callsService.verifyRawToken(token);
+        (client.data as { auth: CallAuthContext }).auth = auth;
 
-      await client.join(tenantRoom(auth.tenantId));
-      await client.join(userRoom(auth.tenantId, auth.userId));
+        await client.join(tenantRoom(auth.tenantId));
+        await client.join(userRoom(auth.tenantId, auth.userId));
 
-      this.callsService.registerSocket(auth.tenantId, auth.userId, client.id);
+        this.callsService.registerSocket(auth.tenantId, auth.userId, client.id);
 
-      const snapshot = await this.callsService.getTenantPresenceSnapshot(
-        auth.tenantId,
+        const snapshot = await this.callsService.getTenantPresenceSnapshot(
+          auth.tenantId,
+        );
+        client.emit(
+          'presence:snapshot',
+          this.callsService.filterPresenceForViewer(snapshot, auth),
+        );
+        await this.broadcastTenantPresence(auth.tenantId);
+        return;
+      }
+
+      const callToken = this.extractHandshakeCallToken(client);
+      if (!callToken) {
+        throw new Error('Authentication token is required.');
+      }
+
+      const info = await this.callsService.verifyPublicCallLinkToken(callToken);
+      const guestUserId = new Types.ObjectId().toString();
+      const guestAuth: CallAuthContext = {
+        userId: guestUserId,
+        tenantId: info.tenantId,
+        email: '',
+        role: 'customer',
+        name: info.customerName || 'Customer',
+        userCode: '',
+        isGuestCustomer: true,
+        targetAgentId: info.agent.userId,
+        linkedEntityType: info.entityType,
+        linkedEntityId: info.entityId,
+        linkedEntityLabel: info.entityLabel,
+        customerPhone: info.customerPhone,
+      };
+      (client.data as { auth: CallAuthContext }).auth = guestAuth;
+
+      await client.join(userRoom(guestAuth.tenantId, guestAuth.userId));
+      this.callsService.registerSocket(
+        guestAuth.tenantId,
+        guestAuth.userId,
+        client.id,
       );
-      client.emit(
-        'presence:snapshot',
-        this.callsService.filterPresenceForViewer(snapshot, auth),
-      );
-      await this.broadcastTenantPresence(auth.tenantId);
+
+      client.emit('agent:presence', {
+        status: this.callsService.getEffectivePresence(
+          info.tenantId,
+          info.agent.userId,
+        ),
+      });
     } catch (err) {
       const message =
         err instanceof Error ? err.message : 'Unauthorized WebSocket session.';
@@ -136,7 +189,11 @@ export class CallsGateway
           callId: ended._id.toString(),
           status: ended.status,
           durationSeconds: ended.durationSeconds,
-          reason: ended.endReason || 'Agent disconnected',
+          reason:
+            ended.endReason ||
+            (auth.isGuestCustomer
+              ? 'Customer disconnected'
+              : 'Agent disconnected'),
           endedAt: ended.endedAt ? ended.endedAt.toISOString() : null,
         };
         this.server
@@ -146,9 +203,13 @@ export class CallsGateway
           .to(userRoom(auth.tenantId, ended.calleeId.toString()))
           .emit('call:ended', payload);
       }
+      await this.broadcastTenantPresence(auth.tenantId);
+      return;
     }
 
-    await this.broadcastTenantPresence(auth.tenantId);
+    if (!auth.isGuestCustomer) {
+      await this.broadcastTenantPresence(auth.tenantId);
+    }
   }
 
   @SubscribeMessage('presence:set')
@@ -157,7 +218,9 @@ export class CallsGateway
     @MessageBody() body: { status?: AgentPresenceStatus },
   ) {
     const auth = this.getSocketAuth(client);
-    if (!auth) return { ok: false, error: 'Unauthorized' };
+    if (!auth || auth.isGuestCustomer) {
+      return { ok: false, error: 'Unauthorized' };
+    }
 
     const requested = body?.status;
     if (
@@ -180,7 +243,16 @@ export class CallsGateway
   @SubscribeMessage('call:initiate')
   async handleCallInitiate(
     @ConnectedSocket() client: Socket,
-    @MessageBody() body: { calleeId?: string; calleeUserCode?: string },
+    @MessageBody()
+    body: {
+      calleeId?: string;
+      calleeUserCode?: string;
+      customerName?: string;
+      customerPhone?: string;
+      linkedEntityType?: '' | 'lead' | 'deal' | 'ticket';
+      linkedEntityId?: string;
+      linkedEntityLabel?: string;
+    },
   ) {
     const auth = this.getSocketAuth(client);
     if (!auth) return { ok: false, error: 'Unauthorized' };
@@ -189,6 +261,11 @@ export class CallsGateway
       const res = await this.callsService.initiateCall(auth, {
         calleeId: body?.calleeId,
         calleeUserCode: body?.calleeUserCode,
+        customerName: body?.customerName,
+        customerPhone: body?.customerPhone,
+        linkedEntityType: body?.linkedEntityType,
+        linkedEntityId: body?.linkedEntityId,
+        linkedEntityLabel: body?.linkedEntityLabel,
       });
       const callId = res.call.id;
 
@@ -519,6 +596,100 @@ export class CallsGateway
       return { ok: true };
     } catch {
       return { ok: false };
+    }
+  }
+
+  @SubscribeMessage('call:hold_state')
+  async handleHoldState(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { callId?: string; isOnHold?: boolean },
+  ) {
+    const auth = this.getSocketAuth(client);
+    if (!auth) return { ok: false, error: 'Unauthorized' };
+
+    try {
+      const doc = await this.callsService.assertParticipant(
+        auth,
+        String(body?.callId || ''),
+      );
+      const peerId =
+        doc.callerId.toString() === auth.userId
+          ? doc.calleeId.toString()
+          : doc.callerId.toString();
+
+      this.server.to(userRoom(auth.tenantId, peerId)).emit('call:hold_state', {
+        callId: doc._id.toString(),
+        fromUserId: auth.userId,
+        isOnHold: Boolean(body?.isOnHold),
+      });
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
+  }
+
+  @SubscribeMessage('call:transfer')
+  async handleCallTransfer(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    body: { callId?: string; targetUserCode?: string; targetUserId?: string },
+  ) {
+    const auth = this.getSocketAuth(client);
+    if (!auth) return { ok: false, error: 'Unauthorized' };
+
+    try {
+      const res = await this.callsService.transferCall(auth, {
+        callId: String(body?.callId || ''),
+        targetUserCode: body?.targetUserCode,
+        targetUserId: body?.targetUserId,
+      });
+
+      const newCallId = res.newCall.id;
+      this.callsService.setRingTimer(newCallId, () => {
+        void (async () => {
+          const timedOut = await this.callsService.markRingTimeout(newCallId);
+          if (!timedOut) return;
+          const timeoutPayload = {
+            callId: newCallId,
+            status: 'timeout',
+            reason: 'No answer within 30 seconds',
+          };
+          this.server
+            .to(userRoom(auth.tenantId, timedOut.callerId.toString()))
+            .emit('call:timeout', timeoutPayload);
+          this.server
+            .to(userRoom(auth.tenantId, timedOut.calleeId.toString()))
+            .emit('call:timeout', timeoutPayload);
+          await this.broadcastTenantPresence(auth.tenantId);
+        })();
+      });
+
+      this.server
+        .to(userRoom(auth.tenantId, res.peerUserId))
+        .emit('call:transferred_outgoing', {
+          oldCallId: res.oldCall._id.toString(),
+          newCallId,
+          startedAt: res.newCall.startedAt,
+          callee: res.callee,
+          transferredFromName: auth.name,
+          timeoutSec: Math.round(CALL_RING_TIMEOUT_MS / 1000),
+        });
+
+      this.server
+        .to(userRoom(auth.tenantId, res.callee.userId))
+        .emit('call:incoming', {
+          callId: newCallId,
+          caller: res.caller,
+          startedAt: res.newCall.startedAt,
+          timeoutSec: Math.round(CALL_RING_TIMEOUT_MS / 1000),
+        });
+
+      await this.broadcastTenantPresence(auth.tenantId);
+      return { ok: true, newCallId, callee: res.callee };
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Unable to transfer call.';
+      return { ok: false, error: message };
     }
   }
 

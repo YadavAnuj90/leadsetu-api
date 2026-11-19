@@ -16,6 +16,14 @@ import { CreateContactDto } from './dto/contacts.dto';
 
 export type ContactDocument = HydratedDocument<Contact>;
 
+export interface ContactActivity {
+  id: string;
+  type: 'created' | 'note' | 'call' | 'whatsapp';
+  description: string;
+  authorName: string;
+  createdAt: string;
+}
+
 const GST_STATE_CODES: Record<string, string> = {
   '01': '01 - Jammu & Kashmir',
   '02': '02 - Himachal Pradesh',
@@ -206,6 +214,9 @@ export class Contact {
 
   @Prop({ default: '' })
   notes!: string;
+
+  @Prop({ type: Array, default: [] })
+  activities!: ContactActivity[];
 }
 
 export const ContactSchema = SchemaFactory.createForClass(Contact);
@@ -355,6 +366,7 @@ export class ContactsService {
       creditUtilizationPct,
       tags: doc.tags || [],
       notes: doc.notes || '',
+      activities: doc.activities || [],
       createdAt: raw.createdAt
         ? new Date(raw.createdAt).toISOString()
         : new Date().toISOString(),

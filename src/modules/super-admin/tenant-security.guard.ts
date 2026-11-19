@@ -69,7 +69,6 @@ export function isIpAllowed(clientIp: string, allowlist?: string[]): boolean {
       if (normalized.startsWith(prefix)) return true;
     }
 
-    // IPv4 CIDR e.g. 103.21.44.0/24
     if (entry.includes('/')) {
       const [baseIp, bitsStr] = entry.split('/');
       const bits = Number(bitsStr);
@@ -107,7 +106,6 @@ export class TenantSecurityGuard implements CanActivate {
     const req = context.switchToHttp().getRequest<Request>();
     const path = (req.originalUrl || req.url || '').split('?')[0];
 
-    // Skip auth public endpoints, super-admin vault routes, webhooks, and Swagger
     if (
       path.includes('/super-admin') ||
       path.includes('/auth/login') ||
@@ -129,7 +127,7 @@ export class TenantSecurityGuard implements CanActivate {
     const token = authHeader.slice(7).trim();
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key';
 
     let payload: {
       sub?: string;

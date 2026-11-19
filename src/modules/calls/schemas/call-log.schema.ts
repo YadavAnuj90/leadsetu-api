@@ -120,6 +120,80 @@ export class CallLog {
   @Prop({ trim: true, default: '' })
   endReason!: string;
 
+  @Prop({ default: 'webrtc', enum: ['webrtc', 'sim_mobile'], index: true })
+  callChannel!: 'webrtc' | 'sim_mobile';
+
+  @Prop({ default: 'agent', enum: ['agent', 'customer'] })
+  callerType!: 'agent' | 'customer';
+
+  @Prop({ trim: true, default: '' })
+  customerPhone!: string;
+
+  @Prop({ trim: true, default: '' })
+  customerEmail!: string;
+
+  @Prop({
+    trim: true,
+    default: '',
+    enum: ['', 'lead', 'deal', 'ticket', 'contact'],
+    index: true,
+  })
+  linkedEntityType!: '' | 'lead' | 'deal' | 'ticket' | 'contact';
+
+  @Prop({ trim: true, default: '', index: true })
+  linkedEntityId!: string;
+
+  @Prop({ trim: true, default: '' })
+  linkedEntityLabel!: string;
+
+  @Prop({ trim: true, default: '' })
+  notes!: string;
+
+  @Prop({ trim: true, default: '' })
+  outcomeTag!: string;
+
+  @Prop({ trim: true, default: '' })
+  dispositionByUserId!: string;
+
+  @Prop({ type: Date, default: null })
+  dispositionAt?: Date | null;
+
+  @Prop({ trim: true, default: '' })
+  followUpTaskId!: string;
+
+  @Prop({ type: Boolean, default: false, index: true })
+  callbackResolved!: boolean;
+
+  @Prop({ type: Date, default: null })
+  callbackResolvedAt?: Date | null;
+
+  @Prop({ trim: true, default: '' })
+  callbackResolvedByUserId!: string;
+
+  @Prop({ trim: true, default: '' })
+  recordingUrl!: string;
+
+  @Prop({ type: Number, default: 0 })
+  recordingDurationSeconds!: number;
+
+  @Prop({ trim: true, default: '' })
+  recordedByUserId!: string;
+
+  @Prop({ type: Date, default: null })
+  recordedAt?: Date | null;
+
+  @Prop({ trim: true, default: '' })
+  transferredFromUserId!: string;
+
+  @Prop({ trim: true, default: '' })
+  transferredFromName!: string;
+
+  @Prop({ trim: true, default: '' })
+  transferredToUserId!: string;
+
+  @Prop({ trim: true, default: '' })
+  transferredToName!: string;
+
   @Prop({ type: CallConnectionSummarySchema, default: () => ({}) })
   connection!: CallConnectionSummary;
 }

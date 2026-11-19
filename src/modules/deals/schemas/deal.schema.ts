@@ -13,7 +13,7 @@ export type DealStage =
 
 export interface DealActivity {
   id: string;
-  type: 'created' | 'stage_change' | 'note' | 'quote';
+  type: 'created' | 'stage_change' | 'note' | 'quote' | 'call';
   description: string;
   authorName: string;
   createdAt: string;

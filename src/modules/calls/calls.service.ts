@@ -10,12 +10,18 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { createHmac } from 'crypto';
+import { createHmac, randomBytes } from 'crypto';
 import axios from 'axios';
 import { Model, Types } from 'mongoose';
 import { User, UserDocument } from '../auth/schemas/user.schema';
 import { Tenant, TenantDocument } from '../auth/schemas/tenant.schema';
+import { uploadToCloudinary } from '../auth/cloudinary.util';
 import { AuditService } from '../audit/audit.service';
+import { Contact, ContactDocument } from '../contacts/contacts.service';
+import { Deal, DealDocument } from '../deals/schemas/deal.schema';
+import { Lead, LeadDocument } from '../leads/schemas/lead.schema';
+import { TaskDocument, TaskItem } from '../tasks/tasks.service';
+import { Ticket, TicketDocument } from '../tickets/tickets.service';
 import {
   CallLog,
   CallLogDocument,
@@ -30,6 +36,11 @@ import {
   AgentPresenceStatus,
   CallAuthContext,
   CallTelemetrySnapshotDto,
+  CreateCallShareLinkDto,
+  LogSimCallDto,
+  PublicCallCallbackDto,
+  SaveCallDispositionDto,
+  UploadCallRecordingDto,
 } from './dto/calls.dto';
 
 export const CALL_RING_TIMEOUT_MS = 30_000;
@@ -81,6 +92,16 @@ export class CallsService {
     private readonly userModel: Model<UserDocument>,
     @InjectModel(Tenant.name)
     private readonly tenantModel: Model<TenantDocument>,
+    @InjectModel(Lead.name)
+    private readonly leadModel: Model<LeadDocument>,
+    @InjectModel(Deal.name)
+    private readonly dealModel: Model<DealDocument>,
+    @InjectModel(Ticket.name)
+    private readonly ticketModel: Model<TicketDocument>,
+    @InjectModel(Contact.name)
+    private readonly contactModel: Model<ContactDocument>,
+    @InjectModel(TaskItem.name)
+    private readonly taskModel: Model<TaskDocument>,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     @Optional() private readonly auditService?: AuditService,
@@ -358,14 +379,29 @@ export class CallsService {
 
   async initiateCall(
     auth: CallAuthContext,
-    target: string | { calleeId?: string; calleeUserCode?: string },
+    target:
+      | string
+      | {
+          calleeId?: string;
+          calleeUserCode?: string;
+          customerName?: string;
+          customerPhone?: string;
+          linkedEntityType?: '' | 'lead' | 'deal' | 'ticket';
+          linkedEntityId?: string;
+          linkedEntityLabel?: string;
+        },
   ) {
-    const rawCalleeId =
-      typeof target === 'string' ? target.trim() : String(target?.calleeId || '').trim();
-    const rawUserCode =
-      typeof target === 'string'
+    const targetObj = typeof target === 'object' && target ? target : {};
+    const rawCalleeId = auth.isGuestCustomer
+      ? String(auth.targetAgentId || '').trim()
+      : typeof target === 'string'
+        ? target.trim()
+        : String(targetObj.calleeId || '').trim();
+    const rawUserCode = auth.isGuestCustomer
+      ? ''
+      : typeof target === 'string'
         ? ''
-        : String(target?.calleeUserCode || '').replace(/^#/, '').trim();
+        : String(targetObj.calleeUserCode || '').replace(/^#/, '').trim();
 
     let callee: UserDocument | null = null;
     if (rawCalleeId && Types.ObjectId.isValid(rawCalleeId)) {
@@ -391,11 +427,15 @@ export class CallsService {
     }
 
     if (!callee) {
-      throw new NotFoundException('Target teammate not found in your workspace.');
+      throw new NotFoundException(
+        auth.isGuestCustomer
+          ? 'Assigned agent is no longer available.'
+          : 'Target teammate not found in your workspace.',
+      );
     }
 
     const calleeId = callee._id.toString();
-    if (calleeId === auth.userId) {
+    if (!auth.isGuestCustomer && calleeId === auth.userId) {
       throw new BadRequestException('You cannot place a call to yourself.');
     }
 
@@ -408,6 +448,30 @@ export class CallsService {
         `${callee.name} is currently busy or on another call.`,
       );
     }
+
+    const callerType: 'agent' | 'customer' = auth.isGuestCustomer
+      ? 'customer'
+      : 'agent';
+    const resolvedCallerName = auth.isGuestCustomer
+      ? String(targetObj.customerName || '').trim() || auth.name || 'Customer'
+      : auth.name;
+    const resolvedCallerRole = auth.isGuestCustomer ? 'Customer' : auth.role;
+    const resolvedCallerUserCode = auth.isGuestCustomer ? '' : auth.userCode;
+    const resolvedCustomerPhone = auth.isGuestCustomer
+      ? String(targetObj.customerPhone || '').trim() || auth.customerPhone || ''
+      : '';
+
+    const linkedEntityType: '' | 'lead' | 'deal' | 'ticket' | 'contact' =
+      (auth.isGuestCustomer
+        ? auth.linkedEntityType
+        : targetObj.linkedEntityType) || '';
+    const linkedEntityId =
+      (auth.isGuestCustomer ? auth.linkedEntityId : targetObj.linkedEntityId) ||
+      '';
+    const linkedEntityLabel =
+      (auth.isGuestCustomer
+        ? auth.linkedEntityLabel
+        : targetObj.linkedEntityLabel) || '';
 
     const callObjectId = new Types.ObjectId();
     const callId = callObjectId.toString();
@@ -432,12 +496,17 @@ export class CallsService {
         tenantId: new Types.ObjectId(auth.tenantId),
         callerId: new Types.ObjectId(auth.userId),
         calleeId: new Types.ObjectId(calleeId),
-        callerName: auth.name,
-        callerRole: auth.role,
-        callerUserCode: auth.userCode,
+        callerType,
+        callerName: resolvedCallerName,
+        callerRole: resolvedCallerRole,
+        callerUserCode: resolvedCallerUserCode,
+        customerPhone: resolvedCustomerPhone,
         calleeName: callee.name,
         calleeRole: callee.role,
         calleeUserCode: callee.userCode || '',
+        linkedEntityType,
+        linkedEntityId,
+        linkedEntityLabel,
         status: 'ringing',
         startedAt: now,
         setupTimeMs: 0,
@@ -455,9 +524,14 @@ export class CallsService {
         },
         caller: {
           userId: auth.userId,
-          name: auth.name,
-          role: auth.role,
-          userCode: auth.userCode,
+          callerType,
+          name: resolvedCallerName,
+          role: resolvedCallerRole,
+          userCode: resolvedCallerUserCode,
+          customerPhone: resolvedCustomerPhone,
+          linkedEntityType,
+          linkedEntityId,
+          linkedEntityLabel,
         },
       };
     } catch (err) {
@@ -701,18 +775,29 @@ export class CallsService {
     userId: string,
     callId: string,
   ) {
-    const user = await this.userModel.findById(userId).exec();
-    if (!user) return null;
-    const auth: CallAuthContext = {
-      userId,
-      tenantId,
-      email: user.email,
-      role: user.role,
-      name: user.name,
-      userCode: user.userCode || '',
-    };
+    const user = Types.ObjectId.isValid(userId)
+      ? await this.userModel.findById(userId).exec()
+      : null;
+    const auth: CallAuthContext = user
+      ? {
+          userId,
+          tenantId,
+          email: user.email,
+          role: user.role,
+          name: user.name,
+          userCode: user.userCode || '',
+        }
+      : {
+          userId,
+          tenantId,
+          email: '',
+          role: 'customer',
+          name: 'Customer',
+          userCode: '',
+          isGuestCustomer: true,
+        };
     return this.endCall(auth, callId, {
-      reason: 'Agent disconnected',
+      reason: user ? 'Agent disconnected' : 'Customer disconnected',
     }).catch(() => null);
   }
 
@@ -869,6 +954,14 @@ export class CallsService {
 
     if (query.filter === 'missed') {
       baseFilter.status = { $in: ['missed', 'rejected', 'timeout'] };
+    } else if (query.filter === 'callbacks') {
+      baseFilter.status = { $in: ['missed', 'rejected', 'timeout'] };
+      baseFilter.callChannel = { $ne: 'sim_mobile' };
+      baseFilter.callbackResolved = { $ne: true };
+      if (!canViewWorkspace) {
+        delete baseFilter.$or;
+        baseFilter.calleeId = userOid;
+      }
     }
 
     const participantScope: Record<string, unknown> = canViewWorkspace
@@ -892,6 +985,12 @@ export class CallsService {
     const missed = allUserCalls.filter((c) =>
       ['missed', 'rejected', 'timeout'].includes(c.status),
     );
+    const pendingCallbacks = missed.filter(
+      (c) =>
+        c.callChannel !== 'sim_mobile' &&
+        (canViewWorkspace || c.calleeId.toString() === auth.userId) &&
+        !c.callbackResolved,
+    ).length;
     const totalDuration = answered.reduce(
       (s, c) => s + (Number(c.durationSeconds) || 0),
       0,
@@ -906,8 +1005,1193 @@ export class CallsService {
         answered: answered.length,
         missed: missed.length,
         avgDurationSec,
+        pendingCallbacks,
       },
     };
+  }
+
+  async toggleCallbackResolved(
+    auth: CallAuthContext,
+    callId: string,
+    resolved?: boolean,
+  ) {
+    if (!Types.ObjectId.isValid(callId)) {
+      throw new BadRequestException('Invalid call ID.');
+    }
+    const doc = await this.callLogModel
+      .findOne({
+        _id: new Types.ObjectId(callId),
+        tenantId: new Types.ObjectId(auth.tenantId),
+      })
+      .exec();
+
+    if (!doc) {
+      throw new NotFoundException('Call record not found.');
+    }
+
+    const isAdmin = ['owner', 'admin', 'super_admin'].includes(auth.role);
+    const isParticipant =
+      doc.callerId.toString() === auth.userId ||
+      doc.calleeId.toString() === auth.userId;
+    if (!isParticipant && !isAdmin) {
+      throw new ForbiddenException('You are not authorized to update this call.');
+    }
+
+    const nextResolved =
+      typeof resolved === 'boolean' ? resolved : !doc.callbackResolved;
+    doc.callbackResolved = nextResolved;
+    doc.callbackResolvedAt = nextResolved ? new Date() : null;
+    doc.callbackResolvedByUserId = nextResolved ? auth.userId : '';
+    await doc.save();
+
+    if (doc.followUpTaskId && Types.ObjectId.isValid(doc.followUpTaskId)) {
+      await this.taskModel
+        .findOneAndUpdate(
+          {
+            _id: new Types.ObjectId(doc.followUpTaskId),
+            tenantId: doc.tenantId,
+          },
+          { $set: { status: nextResolved ? 'done' : 'pending' } },
+        )
+        .exec();
+    }
+
+    return {
+      call: this.toDto(doc, auth.userId),
+    };
+  }
+
+  // ─── Phase 1: CRM Linking, In-Call Notes, Disposition & Follow-up Tasks ──
+
+  private formatOutcomeLabel(tag?: string): string {
+    const map: Record<string, string> = {
+      interested: 'Interested',
+      quote_discussed: 'Quote Discussed',
+      followup_requested: 'Follow-up Requested',
+      support_resolved: 'Support Resolved',
+      escalated: 'Escalated',
+      no_answer_callback: 'No Answer / Callback',
+      general: 'General Discussion',
+    };
+    const key = String(tag || '').trim();
+    if (!key) return '';
+    return map[key] || key.replace(/_/g, ' ');
+  }
+
+  private async resolveEntitySnapshot(
+    tenantId: string,
+    entityType: '' | 'lead' | 'deal' | 'ticket' | 'contact',
+    entityId: string,
+  ): Promise<{
+    entityLabel: string;
+    customerName: string;
+    customerPhone: string;
+    company: string;
+    ownerId: string;
+  } | null> {
+    if (!entityType || !entityId || !Types.ObjectId.isValid(entityId)) {
+      return null;
+    }
+    const tenantOid = new Types.ObjectId(tenantId);
+    const entityOid = new Types.ObjectId(entityId);
+
+    if (entityType === 'lead') {
+      const lead = await this.leadModel
+        .findOne({ _id: entityOid, tenantId: tenantOid })
+        .exec();
+      if (!lead) return null;
+      return {
+        entityLabel: lead.company ? `${lead.name} (${lead.company})` : lead.name,
+        customerName: lead.name,
+        customerPhone: lead.phone || '',
+        company: lead.company || '',
+        ownerId: lead.ownerId?.toString() || '',
+      };
+    }
+
+    if (entityType === 'deal') {
+      const deal = await this.dealModel
+        .findOne({ _id: entityOid, tenantId: tenantOid })
+        .exec();
+      if (!deal) return null;
+      return {
+        entityLabel: deal.company ? `${deal.title} (${deal.company})` : deal.title,
+        customerName: deal.contactName || deal.title,
+        customerPhone: deal.contactPhone || '',
+        company: deal.company || '',
+        ownerId: deal.ownerId?.toString() || '',
+      };
+    }
+
+    if (entityType === 'ticket') {
+      const ticket = await this.ticketModel
+        .findOne({ _id: entityOid, tenantId: tenantOid })
+        .exec();
+      if (!ticket) return null;
+      return {
+        entityLabel: `${ticket.ticketNumber} · ${ticket.subject}`,
+        customerName: ticket.customerName || ticket.subject,
+        customerPhone: ticket.phone || '',
+        company: ticket.company || '',
+        ownerId: ticket.ownerId?.toString() || '',
+      };
+    }
+
+    if (entityType === 'contact') {
+      const contact = await this.contactModel
+        .findOne({ _id: entityOid, tenantId: tenantOid })
+        .exec();
+      if (!contact) return null;
+      return {
+        entityLabel: contact.company
+          ? `${contact.name} (${contact.company})`
+          : contact.name,
+        customerName: contact.name,
+        customerPhone: contact.phone || '',
+        company: contact.company || '',
+        ownerId: contact.ownerId?.toString() || '',
+      };
+    }
+
+    return null;
+  }
+
+  private async appendCallTimelineToEntity(
+    tenantId: string,
+    entityType: '' | 'lead' | 'deal' | 'ticket' | 'contact',
+    entityId: string,
+    authorName: string,
+    summary: string,
+  ) {
+    if (!entityType || !entityId || !Types.ObjectId.isValid(entityId)) {
+      return null;
+    }
+    const tenantOid = new Types.ObjectId(tenantId);
+    const entityOid = new Types.ObjectId(entityId);
+    const nowIso = new Date().toISOString();
+    const activityId = randomBytes(6).toString('hex');
+
+    if (entityType === 'lead') {
+      const lead = await this.leadModel
+        .findOne({ _id: entityOid, tenantId: tenantOid })
+        .exec();
+      if (!lead) return null;
+      lead.activities = [
+        ...(lead.activities || []),
+        {
+          id: activityId,
+          type: 'call',
+          description: summary,
+          authorName,
+          createdAt: nowIso,
+        },
+      ];
+      await lead.save();
+      return {
+        entityLabel: lead.company ? `${lead.name} (${lead.company})` : lead.name,
+        customerName: lead.name,
+        company: lead.company || '',
+        phone: lead.phone || '',
+      };
+    }
+
+    if (entityType === 'deal') {
+      const deal = await this.dealModel
+        .findOne({ _id: entityOid, tenantId: tenantOid })
+        .exec();
+      if (!deal) return null;
+      deal.activities = [
+        ...(deal.activities || []),
+        {
+          id: activityId,
+          type: 'call',
+          description: summary,
+          authorName,
+          createdAt: nowIso,
+        },
+      ];
+      await deal.save();
+      return {
+        entityLabel: deal.company ? `${deal.title} (${deal.company})` : deal.title,
+        customerName: deal.contactName || deal.title,
+        company: deal.company || '',
+        phone: deal.contactPhone || '',
+      };
+    }
+
+    if (entityType === 'ticket') {
+      const ticket = await this.ticketModel
+        .findOne({ _id: entityOid, tenantId: tenantOid })
+        .exec();
+      if (!ticket) return null;
+      ticket.comments = [
+        ...(ticket.comments || []),
+        {
+          id: activityId,
+          authorName,
+          authorRole: 'agent',
+          message: summary,
+          isInternal: false,
+          createdAt: nowIso,
+        },
+      ];
+      await ticket.save();
+      return {
+        entityLabel: `${ticket.ticketNumber} · ${ticket.subject}`,
+        customerName: ticket.customerName || ticket.subject,
+        company: ticket.company || '',
+        phone: ticket.phone || '',
+      };
+    }
+
+    if (entityType === 'contact') {
+      const contact = await this.contactModel
+        .findOne({ _id: entityOid, tenantId: tenantOid })
+        .exec();
+      if (!contact) return null;
+      contact.activities = [
+        ...(contact.activities || []),
+        {
+          id: activityId,
+          type: 'call',
+          description: summary,
+          authorName,
+          createdAt: nowIso,
+        },
+      ];
+      await contact.save();
+      return {
+        entityLabel: contact.company
+          ? `${contact.name} (${contact.company})`
+          : contact.name,
+        customerName: contact.name,
+        company: contact.company || '',
+        phone: contact.phone || '',
+      };
+    }
+
+    return null;
+  }
+
+  async listLinkableCrmEntities(auth: CallAuthContext, search?: string) {
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+    const userOid = new Types.ObjectId(auth.userId);
+    const isAdmin = ['owner', 'admin', 'super_admin'].includes(auth.role);
+    const q = String(search || '').trim();
+    const regex = q
+      ? new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+      : null;
+
+    const leadFilter: Record<string, unknown> = {
+      tenantId: tenantOid,
+      ...(isAdmin ? {} : { ownerId: userOid }),
+      ...(regex
+        ? { $or: [{ name: regex }, { company: regex }, { phone: regex }] }
+        : {}),
+    };
+    const dealFilter: Record<string, unknown> = {
+      tenantId: tenantOid,
+      ...(isAdmin ? {} : { ownerId: userOid }),
+      ...(regex
+        ? {
+            $or: [
+              { title: regex },
+              { company: regex },
+              { contactName: regex },
+              { contactPhone: regex },
+            ],
+          }
+        : {}),
+    };
+    const ticketFilter: Record<string, unknown> = {
+      tenantId: tenantOid,
+      ...(isAdmin ? {} : { ownerId: userOid }),
+      ...(regex
+        ? {
+            $or: [
+              { ticketNumber: regex },
+              { subject: regex },
+              { customerName: regex },
+              { company: regex },
+              { phone: regex },
+            ],
+          }
+        : {}),
+    };
+    const contactFilter: Record<string, unknown> = {
+      tenantId: tenantOid,
+      ...(isAdmin ? {} : { ownerId: userOid }),
+      ...(regex
+        ? { $or: [{ name: regex }, { company: regex }, { phone: regex }] }
+        : {}),
+    };
+
+    let [leads, deals, tickets, contacts] = await Promise.all([
+      this.leadModel.find(leadFilter).sort({ updatedAt: -1 }).limit(25).exec(),
+      this.dealModel.find(dealFilter).sort({ updatedAt: -1 }).limit(25).exec(),
+      this.ticketModel.find(ticketFilter).sort({ updatedAt: -1 }).limit(25).exec(),
+      this.contactModel
+        .find(contactFilter)
+        .sort({ updatedAt: -1 })
+        .limit(25)
+        .exec(),
+    ]);
+
+    if (!isAdmin) {
+      if (leads.length === 0) {
+        leads = await this.leadModel
+          .find({
+            tenantId: tenantOid,
+            ...(regex
+              ? { $or: [{ name: regex }, { company: regex }, { phone: regex }] }
+              : {}),
+          })
+          .sort({ updatedAt: -1 })
+          .limit(25)
+          .exec();
+      }
+      if (deals.length === 0) {
+        deals = await this.dealModel
+          .find({
+            tenantId: tenantOid,
+            ...(regex
+              ? {
+                  $or: [
+                    { title: regex },
+                    { company: regex },
+                    { contactName: regex },
+                    { contactPhone: regex },
+                  ],
+                }
+              : {}),
+          })
+          .sort({ updatedAt: -1 })
+          .limit(25)
+          .exec();
+      }
+      if (tickets.length === 0) {
+        tickets = await this.ticketModel
+          .find({
+            tenantId: tenantOid,
+            ...(regex
+              ? {
+                  $or: [
+                    { ticketNumber: regex },
+                    { subject: regex },
+                    { customerName: regex },
+                    { company: regex },
+                    { phone: regex },
+                  ],
+                }
+              : {}),
+          })
+          .sort({ updatedAt: -1 })
+          .limit(25)
+          .exec();
+      }
+      if (contacts.length === 0) {
+        contacts = await this.contactModel
+          .find({
+            tenantId: tenantOid,
+            ...(regex
+              ? { $or: [{ name: regex }, { company: regex }, { phone: regex }] }
+              : {}),
+          })
+          .sort({ updatedAt: -1 })
+          .limit(25)
+          .exec();
+      }
+    }
+
+    return {
+      leads: leads.map((l) => ({
+        id: l._id.toString(),
+        type: 'lead' as const,
+        label: l.name,
+        sublabel: l.company || l.status || 'Lead',
+        phone: l.phone || '',
+        company: l.company || '',
+        ownerId: l.ownerId?.toString() || '',
+      })),
+      deals: deals.map((d) => ({
+        id: d._id.toString(),
+        type: 'deal' as const,
+        label: d.title,
+        sublabel: d.company || d.stage || 'Deal',
+        phone: d.contactPhone || '',
+        company: d.company || '',
+        ownerId: d.ownerId?.toString() || '',
+      })),
+      tickets: tickets.map((t) => ({
+        id: t._id.toString(),
+        type: 'ticket' as const,
+        label: `${t.ticketNumber} · ${t.subject}`,
+        sublabel: t.customerName || t.company || t.status || 'Ticket',
+        phone: t.phone || '',
+        company: t.company || '',
+        ownerId: t.ownerId?.toString() || '',
+      })),
+      contacts: contacts.map((c) => ({
+        id: c._id.toString(),
+        type: 'contact' as const,
+        label: c.name,
+        sublabel: c.company || c.type || 'Contact',
+        phone: c.phone || '',
+        company: c.company || '',
+        ownerId: c.ownerId?.toString() || '',
+      })),
+    };
+  }
+
+  private async createDispositionFollowUpTask(params: {
+    tenantId: Types.ObjectId;
+    userId: string;
+    dto: SaveCallDispositionDto;
+    cleanNotes: string;
+    relatedName: string;
+    relatedCompany: string;
+    relatedPhone: string;
+  }): Promise<string> {
+    if (!params.dto.createFollowUpTask || !params.dto.taskTitle?.trim()) {
+      return '';
+    }
+    const task = await this.taskModel.create({
+      tenantId: params.tenantId,
+      ownerId: new Types.ObjectId(params.userId),
+      title: params.dto.taskTitle.trim(),
+      description:
+        params.cleanNotes ||
+        `Follow-up from voice call with ${params.relatedName || 'contact'}`,
+      priority: params.dto.taskPriority || 'high',
+      status: 'pending',
+      category: params.dto.taskCategory || 'call',
+      dueDate:
+        params.dto.taskDueDate?.trim() ||
+        new Date(Date.now() + 86400000).toISOString().slice(0, 10),
+      relatedName: params.relatedName,
+      relatedCompany: params.relatedCompany,
+      relatedPhone: params.relatedPhone,
+    });
+    return task._id.toString();
+  }
+
+  async saveCallDisposition(
+    auth: CallAuthContext,
+    callId: string,
+    dto: SaveCallDispositionDto,
+  ) {
+    if (!Types.ObjectId.isValid(callId)) {
+      throw new BadRequestException('Invalid call ID.');
+    }
+    const doc = await this.callLogModel
+      .findOne({
+        _id: new Types.ObjectId(callId),
+        tenantId: new Types.ObjectId(auth.tenantId),
+      })
+      .exec();
+
+    if (!doc) {
+      throw new NotFoundException('Call record not found.');
+    }
+
+    const isAdmin = ['owner', 'admin', 'super_admin'].includes(auth.role);
+    const isParticipant =
+      doc.callerId.toString() === auth.userId ||
+      doc.calleeId.toString() === auth.userId;
+    if (!isParticipant && !isAdmin) {
+      throw new ForbiddenException('You are not authorized to update this call.');
+    }
+
+    const cleanNotes = String(dto.notes ?? doc.notes ?? '').trim();
+    const cleanOutcome = String(dto.outcomeTag ?? doc.outcomeTag ?? '').trim();
+    doc.notes = cleanNotes;
+    doc.outcomeTag = cleanOutcome;
+    doc.dispositionByUserId = auth.userId;
+    doc.dispositionAt = new Date();
+
+    const outcomeLabel = this.formatOutcomeLabel(cleanOutcome);
+    const summary = `Voice Call (${doc.durationSeconds || 0}s${
+      outcomeLabel ? ` · ${outcomeLabel}` : ''
+    })${cleanNotes ? `: ${cleanNotes}` : ''}`;
+
+    let relatedName =
+      doc.callerId.toString() === auth.userId ? doc.calleeName : doc.callerName;
+    let relatedCompany = '';
+    let relatedPhone = doc.customerPhone || '';
+
+    if (
+      dto.linkedEntityType &&
+      dto.linkedEntityId &&
+      Types.ObjectId.isValid(dto.linkedEntityId)
+    ) {
+      const entityMeta = await this.appendCallTimelineToEntity(
+        auth.tenantId,
+        dto.linkedEntityType,
+        dto.linkedEntityId,
+        auth.name,
+        summary,
+      );
+      if (entityMeta) {
+        doc.linkedEntityType = dto.linkedEntityType;
+        doc.linkedEntityId = dto.linkedEntityId;
+        doc.linkedEntityLabel = entityMeta.entityLabel;
+        relatedName = entityMeta.customerName || relatedName;
+        relatedCompany = entityMeta.company || '';
+        relatedPhone = entityMeta.phone || relatedPhone;
+      }
+    } else if (dto.linkedEntityType === '') {
+      doc.linkedEntityType = '';
+      doc.linkedEntityId = '';
+      doc.linkedEntityLabel = '';
+    }
+
+    const taskId = await this.createDispositionFollowUpTask({
+      tenantId: doc.tenantId,
+      userId: auth.userId,
+      dto,
+      cleanNotes,
+      relatedName,
+      relatedCompany,
+      relatedPhone,
+    });
+    if (taskId) {
+      doc.followUpTaskId = taskId;
+    }
+
+    await doc.save();
+    return {
+      call: this.toDto(doc, auth.userId),
+      followUpTaskId: doc.followUpTaskId || '',
+    };
+  }
+
+  // ─── Module A: Mobile SIM (tel:) Call Logging ────────────────────────────
+
+  async logSimCall(auth: CallAuthContext, dto: LogSimCallDto) {
+    const status: 'completed' | 'missed' | 'rejected' =
+      dto.status === 'missed' || dto.status === 'rejected'
+        ? dto.status
+        : 'completed';
+    const durationSeconds =
+      status === 'completed'
+        ? Math.max(0, Math.round(Number(dto.durationSeconds) || 0))
+        : 0;
+    const cleanNotes = String(dto.notes || '').trim();
+    const cleanOutcome = String(dto.outcomeTag || '').trim();
+    const outcomeLabel = this.formatOutcomeLabel(cleanOutcome);
+
+    const customerPhone = String(dto.customerPhone || '').trim();
+    let relatedName =
+      String(dto.contactName || '').trim() || customerPhone || 'Mobile Contact';
+    let relatedCompany = '';
+    let relatedPhone = customerPhone;
+    let linkedEntityType: '' | 'lead' | 'deal' | 'ticket' | 'contact' = '';
+    let linkedEntityId = '';
+    let linkedEntityLabel = '';
+
+    const summaryStatus =
+      status === 'completed'
+        ? `Connected ${durationSeconds}s`
+        : status === 'missed'
+          ? 'No Answer'
+          : 'Busy / Declined';
+    const summary = `SIM Mobile Call (${summaryStatus}${
+      outcomeLabel ? ` · ${outcomeLabel}` : ''
+    })${cleanNotes ? `: ${cleanNotes}` : ''}`;
+
+    if (
+      dto.linkedEntityType &&
+      dto.linkedEntityId &&
+      Types.ObjectId.isValid(dto.linkedEntityId)
+    ) {
+      const entityMeta = await this.appendCallTimelineToEntity(
+        auth.tenantId,
+        dto.linkedEntityType,
+        dto.linkedEntityId,
+        auth.name,
+        summary,
+      );
+      if (entityMeta) {
+        linkedEntityType = dto.linkedEntityType;
+        linkedEntityId = dto.linkedEntityId;
+        linkedEntityLabel = entityMeta.entityLabel;
+        relatedName = entityMeta.customerName || relatedName;
+        relatedCompany = entityMeta.company || '';
+        relatedPhone = relatedPhone || entityMeta.phone || '';
+      }
+    }
+
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+    const taskId = await this.createDispositionFollowUpTask({
+      tenantId: tenantOid,
+      userId: auth.userId,
+      dto,
+      cleanNotes,
+      relatedName,
+      relatedCompany,
+      relatedPhone,
+    });
+
+    const endedAt = new Date();
+    const startedAt = new Date(
+      endedAt.getTime() - Math.max(1, durationSeconds) * 1000,
+    );
+    const userOid = new Types.ObjectId(auth.userId);
+
+    const doc = await this.callLogModel.create({
+      tenantId: tenantOid,
+      callerId: userOid,
+      calleeId: userOid,
+      callChannel: 'sim_mobile',
+      callerType: 'agent',
+      callerName: auth.name,
+      callerRole: auth.role,
+      callerUserCode: auth.userCode,
+      customerPhone: relatedPhone,
+      calleeName: relatedName,
+      calleeRole: 'External Mobile (SIM)',
+      calleeUserCode: '',
+      status,
+      startedAt,
+      answeredAt: status === 'completed' ? startedAt : null,
+      connectedAt: status === 'completed' ? startedAt : null,
+      endedAt,
+      setupTimeMs: 0,
+      durationSeconds,
+      endedByUserId: auth.userId,
+      endReason:
+        status === 'completed'
+          ? 'Mobile SIM Call'
+          : status === 'missed'
+            ? 'Mobile SIM Call - No Answer'
+            : 'Mobile SIM Call - Busy / Declined',
+      linkedEntityType,
+      linkedEntityId,
+      linkedEntityLabel,
+      notes: cleanNotes,
+      outcomeTag: cleanOutcome,
+      dispositionByUserId: auth.userId,
+      dispositionAt: endedAt,
+      followUpTaskId: taskId,
+    });
+
+    return {
+      call: this.toDto(doc, auth.userId),
+      followUpTaskId: taskId,
+    };
+  }
+
+  // ─── Phase 2: Customer Click-to-Call Shareable Links ──────────────────────
+
+  private getJwtSecret(): string {
+    return (
+      this.configService.get<string>('JWT_SECRET') ||
+      'leadsetu_super_secret_access_key_2026_delhi_ncr'
+    );
+  }
+
+  async createShareLink(auth: CallAuthContext, dto: CreateCallShareLinkDto) {
+    const entityType = dto.entityType || '';
+    const entityId = String(dto.entityId || '').trim();
+    const snapshot = await this.resolveEntitySnapshot(
+      auth.tenantId,
+      entityType,
+      entityId,
+    );
+
+    let agentId = auth.userId;
+    if (snapshot?.ownerId && Types.ObjectId.isValid(snapshot.ownerId)) {
+      const candidate = await this.userModel
+        .findOne({
+          _id: new Types.ObjectId(snapshot.ownerId),
+          tenantId: new Types.ObjectId(auth.tenantId),
+          isActive: true,
+        })
+        .select({ name: 1, role: 1, userCode: 1 })
+        .exec();
+      if (candidate) {
+        agentId = candidate._id.toString();
+      }
+    }
+
+    const [agent, tenant] = await Promise.all([
+      this.userModel
+        .findOne({
+          _id: new Types.ObjectId(agentId),
+          tenantId: new Types.ObjectId(auth.tenantId),
+          isActive: true,
+        })
+        .select({ name: 1, role: 1, userCode: 1 })
+        .exec(),
+      this.tenantModel.findById(auth.tenantId).exec(),
+    ]);
+
+    if (!agent || !tenant) {
+      throw new NotFoundException('Assigned agent or workspace not found.');
+    }
+
+    const days = Math.max(1, Math.min(30, Number(dto.expiresInDays) || 7));
+    const token = await this.jwtService.signAsync(
+      {
+        purpose: 'customer_click_to_call',
+        tenantId: auth.tenantId,
+        agentId: agent._id.toString(),
+        entityType: snapshot ? entityType : '',
+        entityId: snapshot ? entityId : '',
+        entityLabel: snapshot?.entityLabel || '',
+        customerName: snapshot?.customerName || '',
+        customerPhone: snapshot?.customerPhone || '',
+      },
+      {
+        secret: this.getJwtSecret(),
+        expiresIn: `${days}d`,
+      },
+    );
+
+    return {
+      token,
+      urlPath: `/call/${token}`,
+      agent: {
+        userId: agent._id.toString(),
+        name: agent.name,
+        role: agent.role,
+        userCode: agent.userCode || '',
+      },
+      companyName: tenant.companyName || tenant.name,
+      entityType: snapshot ? entityType : '',
+      entityId: snapshot ? entityId : '',
+      entityLabel: snapshot?.entityLabel || '',
+      customerName: snapshot?.customerName || '',
+      customerPhone: snapshot?.customerPhone || '',
+      expiresInDays: days,
+    };
+  }
+
+  async verifyPublicCallLinkToken(token?: string) {
+    const cleanToken = String(token || '').trim();
+    if (!cleanToken) {
+      throw new UnauthorizedException('Call link token is required.');
+    }
+
+    let payload: {
+      purpose?: string;
+      tenantId?: string;
+      agentId?: string;
+      entityType?: '' | 'lead' | 'deal' | 'ticket';
+      entityId?: string;
+      entityLabel?: string;
+      customerName?: string;
+      customerPhone?: string;
+    };
+    try {
+      payload = await this.jwtService.verifyAsync(cleanToken, {
+        secret: this.getJwtSecret(),
+      });
+    } catch {
+      throw new UnauthorizedException('This call link is invalid or expired.');
+    }
+
+    if (
+      payload.purpose !== 'customer_click_to_call' ||
+      !payload.tenantId ||
+      !payload.agentId ||
+      !Types.ObjectId.isValid(payload.tenantId) ||
+      !Types.ObjectId.isValid(payload.agentId)
+    ) {
+      throw new UnauthorizedException('Invalid call link payload.');
+    }
+
+    const [agent, tenant] = await Promise.all([
+      this.userModel
+        .findOne({
+          _id: new Types.ObjectId(payload.agentId),
+          tenantId: new Types.ObjectId(payload.tenantId),
+          isActive: true,
+        })
+        .select({ name: 1, role: 1, territory: 1, userCode: 1 })
+        .exec(),
+      this.tenantModel.findById(payload.tenantId).exec(),
+    ]);
+
+    if (!agent || !tenant || tenant.status === 'suspended') {
+      throw new NotFoundException('This voice support link is no longer active.');
+    }
+
+    const entityType: '' | 'lead' | 'deal' | 'ticket' =
+      payload.entityType === 'lead' ||
+      payload.entityType === 'deal' ||
+      payload.entityType === 'ticket'
+        ? payload.entityType
+        : '';
+
+    return {
+      tenantId: tenant._id.toString(),
+      companyName: tenant.companyName || tenant.name,
+      companyLogoUrl: tenant.logoUrl || '',
+      agent: {
+        userId: agent._id.toString(),
+        name: agent.name,
+        role: agent.role,
+        territory: agent.territory || '',
+        userCode: agent.userCode || '',
+      },
+      entityType,
+      entityId: payload.entityId || '',
+      entityLabel: payload.entityLabel || '',
+      customerName: payload.customerName || '',
+      customerPhone: payload.customerPhone || '',
+    };
+  }
+
+  async getPublicCallLinkInfo(token: string) {
+    const info = await this.verifyPublicCallLinkToken(token);
+    const status = this.getEffectivePresence(info.tenantId, info.agent.userId);
+    const ice = await this.getIceServers({
+      userId: info.agent.userId,
+      tenantId: info.tenantId,
+      email: '',
+      role: 'agent',
+      name: info.agent.name,
+      userCode: info.agent.userCode,
+    });
+
+    return {
+      valid: true,
+      companyName: info.companyName,
+      companyLogoUrl: info.companyLogoUrl,
+      agent: {
+        name: info.agent.name,
+        role: info.agent.role,
+        territory: info.agent.territory,
+        status,
+      },
+      context: {
+        entityType: info.entityType,
+        entityLabel: info.entityLabel,
+        customerName: info.customerName,
+        customerPhone: info.customerPhone,
+      },
+      iceServers: ice.iceServers,
+      iceTransportPolicy: ice.iceTransportPolicy,
+    };
+  }
+
+  async submitPublicCallbackRequest(token: string, dto: PublicCallCallbackDto) {
+    const info = await this.verifyPublicCallLinkToken(token);
+    const customerName =
+      String(dto.customerName || '').trim() || info.customerName || 'Customer';
+    const customerPhone =
+      String(dto.customerPhone || '').trim() || info.customerPhone || '';
+    const preferredTime = String(dto.preferredTime || '').trim();
+    const message = String(dto.message || '').trim();
+
+    if (!customerPhone) {
+      throw new BadRequestException('Please provide your phone number.');
+    }
+
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const descParts = [
+      preferredTime ? `Preferred time: ${preferredTime}` : '',
+      message ? `Customer note: ${message}` : '',
+      info.entityLabel ? `Ref: ${info.entityLabel}` : '',
+    ].filter(Boolean);
+
+    const task = await this.taskModel.create({
+      tenantId: new Types.ObjectId(info.tenantId),
+      ownerId: new Types.ObjectId(info.agent.userId),
+      title: `Customer Callback Request: ${customerName}`,
+      description: descParts.join(' · ') || 'Requested via Click-to-Call link',
+      priority: 'high',
+      status: 'pending',
+      category: 'call',
+      dueDate: todayIso,
+      relatedName: customerName,
+      relatedCompany: '',
+      relatedPhone: customerPhone,
+    });
+
+    const now = new Date();
+    await this.callLogModel.create({
+      tenantId: new Types.ObjectId(info.tenantId),
+      callerId: new Types.ObjectId(),
+      calleeId: new Types.ObjectId(info.agent.userId),
+      callerType: 'customer',
+      callerName: customerName,
+      callerRole: 'Customer',
+      callerUserCode: '',
+      customerPhone,
+      calleeName: info.agent.name,
+      calleeRole: info.agent.role,
+      calleeUserCode: info.agent.userCode,
+      status: 'missed',
+      startedAt: now,
+      endedAt: now,
+      setupTimeMs: 0,
+      durationSeconds: 0,
+      endReason: 'Customer callback requested (Agent busy/offline)',
+      notes: descParts.join(' · '),
+      outcomeTag: 'followup_requested',
+      linkedEntityType: info.entityType,
+      linkedEntityId: info.entityId,
+      linkedEntityLabel: info.entityLabel,
+      followUpTaskId: task._id.toString(),
+    });
+
+    if (info.entityType && info.entityId) {
+      const timelineMsg = `Callback Requested by ${customerName} (${customerPhone})${
+        preferredTime ? ` · Best time: ${preferredTime}` : ''
+      }${message ? `: ${message}` : ''}`;
+      await this.appendCallTimelineToEntity(
+        info.tenantId,
+        info.entityType,
+        info.entityId,
+        customerName,
+        timelineMsg,
+      );
+    }
+
+    return {
+      ok: true,
+      message: 'Callback request logged and assigned to your account manager.',
+      followUpTaskId: task._id.toString(),
+    };
+  }
+
+  // ─── Phase 4: Native Browser Call Recording Storage ──────────────────────
+
+  async saveCallRecording(
+    auth: CallAuthContext,
+    callId: string,
+    dto: UploadCallRecordingDto,
+  ) {
+    if (!Types.ObjectId.isValid(callId)) {
+      throw new BadRequestException('Invalid call ID.');
+    }
+    const doc = await this.callLogModel
+      .findOne({
+        _id: new Types.ObjectId(callId),
+        tenantId: new Types.ObjectId(auth.tenantId),
+      })
+      .exec();
+
+    if (!doc) {
+      throw new NotFoundException('Call record not found.');
+    }
+
+    const isAdmin = ['owner', 'admin', 'super_admin'].includes(auth.role);
+    const isParticipant =
+      doc.callerId.toString() === auth.userId ||
+      doc.calleeId.toString() === auth.userId;
+    if (!isParticipant && !isAdmin) {
+      throw new ForbiddenException('You are not authorized to save this recording.');
+    }
+
+    const rawDataUrl = String(dto.audioDataUrl || '').trim();
+    if (!/^(data:(audio|video)\/|https?:\/\/)/i.test(rawDataUrl)) {
+      throw new BadRequestException(
+        'audioDataUrl must be a valid audio data URL or HTTPS URL.',
+      );
+    }
+
+    let storedUrl = rawDataUrl;
+    try {
+      storedUrl = await uploadToCloudinary(rawDataUrl, {
+        folder: `leadsetu/tenants/${auth.tenantId}/call-recordings`,
+        publicId: `call_${callId}_${Date.now()}`,
+        resourceType: 'auto',
+      });
+    } catch {
+      storedUrl = rawDataUrl;
+    }
+
+    doc.recordingUrl = storedUrl;
+    doc.recordingDurationSeconds = Math.max(
+      0,
+      Math.round(Number(dto.durationSeconds) || doc.durationSeconds || 0),
+    );
+    doc.recordedByUserId = auth.userId;
+    doc.recordedAt = new Date();
+    await doc.save();
+
+    return {
+      call: this.toDto(doc, auth.userId),
+      recordingUrl: doc.recordingUrl,
+    };
+  }
+
+  // ─── Phase 5: Live Call Transfer to Another Teammate UID ──────────────────
+
+  async transferCall(
+    auth: CallAuthContext,
+    params: { callId: string; targetUserCode?: string; targetUserId?: string },
+  ) {
+    const doc = await this.assertParticipant(auth, params.callId);
+    const terminalStatuses: CallLogStatus[] = [
+      'completed',
+      'rejected',
+      'missed',
+      'cancelled',
+      'timeout',
+      'failed',
+    ];
+    if (terminalStatuses.includes(doc.status)) {
+      throw new ConflictException('Call is no longer active.');
+    }
+
+    const peerIsCaller = doc.callerId.toString() !== auth.userId;
+    const peerUserId = peerIsCaller
+      ? doc.callerId.toString()
+      : doc.calleeId.toString();
+    const peerName = peerIsCaller ? doc.callerName : doc.calleeName;
+    const peerRole = peerIsCaller ? doc.callerRole : doc.calleeRole;
+    const peerUserCode = peerIsCaller ? doc.callerUserCode : doc.calleeUserCode;
+
+    const cleanTargetId = String(params.targetUserId || '').trim();
+    const cleanTargetCode = String(params.targetUserCode || '')
+      .replace(/^#/, '')
+      .trim();
+
+    let targetAgent: UserDocument | null = null;
+    if (cleanTargetId && Types.ObjectId.isValid(cleanTargetId)) {
+      targetAgent = await this.userModel
+        .findOne({
+          _id: new Types.ObjectId(cleanTargetId),
+          tenantId: new Types.ObjectId(auth.tenantId),
+          isActive: true,
+        })
+        .select({ name: 1, role: 1, userCode: 1, territory: 1 })
+        .exec();
+    } else if (cleanTargetCode) {
+      targetAgent = await this.userModel
+        .findOne({
+          userCode: cleanTargetCode,
+          tenantId: new Types.ObjectId(auth.tenantId),
+          isActive: true,
+        })
+        .select({ name: 1, role: 1, userCode: 1, territory: 1 })
+        .exec();
+    } else {
+      throw new BadRequestException(
+        'Target agent 10-digit UID # or ID is required for transfer.',
+      );
+    }
+
+    if (!targetAgent) {
+      throw new NotFoundException('Transfer target agent not found in workspace.');
+    }
+
+    const targetAgentId = targetAgent._id.toString();
+    if (targetAgentId === auth.userId || targetAgentId === peerUserId) {
+      throw new BadRequestException(
+        'Cannot transfer call to yourself or the current caller.',
+      );
+    }
+
+    const targetPresence = this.getEffectivePresence(
+      auth.tenantId,
+      targetAgentId,
+    );
+    if (targetPresence !== 'online') {
+      throw new ConflictException(
+        `${targetAgent.name} is currently ${targetPresence} and cannot receive a transfer.`,
+      );
+    }
+
+    const now = new Date();
+    const mediaStart = doc.connectedAt || doc.answeredAt;
+    if (mediaStart) {
+      doc.durationSeconds = Math.max(
+        doc.durationSeconds || 0,
+        Math.round((now.getTime() - new Date(mediaStart).getTime()) / 1000),
+      );
+    }
+    doc.status = 'completed';
+    doc.endedAt = now;
+    doc.endedByUserId = auth.userId;
+    doc.endReason = `Transferred to ${targetAgent.name}`;
+    doc.transferredToUserId = targetAgentId;
+    doc.transferredToName = targetAgent.name;
+    await doc.save();
+
+    this.releaseCallLocks(
+      doc.tenantId.toString(),
+      doc.callerId.toString(),
+      doc.calleeId.toString(),
+      params.callId,
+    );
+
+    const newCallObjectId = new Types.ObjectId();
+    const newCallId = newCallObjectId.toString();
+    const lock = this.tryAcquirePairLock(
+      auth.tenantId,
+      peerUserId,
+      targetAgentId,
+      newCallId,
+    );
+    if (!lock.ok) {
+      throw new ConflictException(
+        `${targetAgent.name} just joined another call.`,
+      );
+    }
+
+    try {
+      const callerType: 'agent' | 'customer' = peerIsCaller
+        ? doc.callerType || 'agent'
+        : 'agent';
+      const newDoc = await this.callLogModel.create({
+        _id: newCallObjectId,
+        tenantId: doc.tenantId,
+        callerId: new Types.ObjectId(peerUserId),
+        calleeId: targetAgent._id,
+        callerType,
+        callerName: peerName,
+        callerRole: peerRole,
+        callerUserCode: peerUserCode,
+        customerPhone: doc.customerPhone || '',
+        calleeName: targetAgent.name,
+        calleeRole: targetAgent.role,
+        calleeUserCode: targetAgent.userCode || '',
+        linkedEntityType: doc.linkedEntityType || '',
+        linkedEntityId: doc.linkedEntityId || '',
+        linkedEntityLabel: doc.linkedEntityLabel || '',
+        notes: doc.notes || '',
+        outcomeTag: doc.outcomeTag || '',
+        transferredFromUserId: auth.userId,
+        transferredFromName: auth.name,
+        status: 'ringing',
+        startedAt: now,
+        setupTimeMs: 0,
+        durationSeconds: 0,
+      });
+
+      return {
+        oldCall: doc,
+        newCall: this.toDto(newDoc, peerUserId),
+        peerUserId,
+        callee: {
+          userId: targetAgentId,
+          name: targetAgent.name,
+          role: targetAgent.role,
+          userCode: targetAgent.userCode || '',
+          territory: targetAgent.territory || '',
+        },
+        caller: {
+          userId: peerUserId,
+          name: peerName,
+          role: peerRole,
+          userCode: peerUserCode,
+          callerType,
+          customerPhone: doc.customerPhone || '',
+          linkedEntityType: doc.linkedEntityType || '',
+          linkedEntityId: doc.linkedEntityId || '',
+          linkedEntityLabel: doc.linkedEntityLabel || '',
+          transferredFromName: auth.name,
+        },
+      };
+    } catch (err) {
+      this.releaseCallLocks(auth.tenantId, peerUserId, targetAgentId, newCallId);
+      throw err;
+    }
   }
 
   async getUserAnalytics(auth: CallAuthContext) {
@@ -1050,17 +2334,18 @@ export class CallsService {
       .exec();
 
     const totalCalls = calls.length;
-    const connectedCalls = calls.filter(
+    const webrtcCalls = calls.filter((c) => c.callChannel !== 'sim_mobile');
+    const connectedCalls = webrtcCalls.filter(
       (c) => c.status === 'completed' || c.status === 'connected',
     );
-    const failedCalls = calls.filter((c) => c.status === 'failed');
+    const failedCalls = webrtcCalls.filter((c) => c.status === 'failed');
     const attemptedMediaCount = connectedCalls.length + failedCalls.length;
     const successRatePct =
       attemptedMediaCount > 0
         ? Math.round((connectedCalls.length / attemptedMediaCount) * 100)
         : 0;
 
-    const withSetup = calls.filter((c) => (Number(c.setupTimeMs) || 0) > 0);
+    const withSetup = webrtcCalls.filter((c) => (Number(c.setupTimeMs) || 0) > 0);
     const avgSetupTimeMs =
       withSetup.length > 0
         ? Math.round(
@@ -1356,6 +2641,27 @@ export class CallsService {
       setupTimeMs: doc.setupTimeMs || 0,
       durationSeconds: doc.durationSeconds || 0,
       endReason: doc.endReason || '',
+      callChannel: doc.callChannel || 'webrtc',
+      callerType: doc.callerType || 'agent',
+      customerPhone: doc.customerPhone || '',
+      linkedEntityType: doc.linkedEntityType || '',
+      linkedEntityId: doc.linkedEntityId || '',
+      linkedEntityLabel: doc.linkedEntityLabel || '',
+      notes: doc.notes || '',
+      outcomeTag: doc.outcomeTag || '',
+      followUpTaskId: doc.followUpTaskId || '',
+      dispositionAt: doc.dispositionAt
+        ? new Date(doc.dispositionAt).toISOString()
+        : null,
+      callbackResolved: Boolean(doc.callbackResolved),
+      callbackResolvedAt: doc.callbackResolvedAt
+        ? new Date(doc.callbackResolvedAt).toISOString()
+        : null,
+      recordingUrl: doc.recordingUrl || '',
+      recordingDurationSeconds: doc.recordingDurationSeconds || 0,
+      recordedAt: doc.recordedAt ? new Date(doc.recordedAt).toISOString() : null,
+      transferredFromName: doc.transferredFromName || '',
+      transferredToName: doc.transferredToName || '',
       connection: doc.connection || {
         icePath: 'direct',
         turnUsed: false,

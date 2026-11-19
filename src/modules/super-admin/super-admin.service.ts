@@ -171,11 +171,11 @@ export class SuperAdminService implements OnModuleInit {
         plan: 'enterprise',
         status: 'active',
         isPlatformHq: true,
-        city: 'Noida & New Delhi',
-        state: 'Delhi (07)',
+        city: 'Noida & Azamgrah',
+        state: 'Uttar Pradesh',
         gstin: '07AABCL4821K1Z5',
         email: 'hq@leadsetu.in',
-        address: 'Tower B, 7th Floor, Sector 62, Noida & Connaught Place, New Delhi – 110001',
+        address: 'Pinacle Tower, 4th Floor, Noida Electronic city & Azamgrah , Uttar Pradesh – 201306',
       });
     }
     return hq;

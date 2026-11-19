@@ -19,7 +19,14 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { CallsService } from './calls.service';
-import { CallTelemetrySnapshotDto } from './dto/calls.dto';
+import {
+  CallTelemetrySnapshotDto,
+  CreateCallShareLinkDto,
+  LogSimCallDto,
+  PublicCallCallbackDto,
+  SaveCallDispositionDto,
+  UploadCallRecordingDto,
+} from './dto/calls.dto';
 
 @ApiTags('16. Native CRM Voice Calling')
 @ApiBearerAuth('access-token')
@@ -65,7 +72,7 @@ export class CallsController {
   @ApiQuery({
     name: 'filter',
     required: false,
-    enum: ['all', 'outgoing', 'incoming', 'missed'],
+    enum: ['all', 'outgoing', 'incoming', 'missed', 'callbacks'],
   })
   @ApiQuery({ name: 'limit', required: false, example: 40 })
   @ApiQuery({ name: 'scope', required: false, enum: ['self', 'workspace'] })
@@ -103,6 +110,73 @@ export class CallsController {
     return this.callsService.getAnalytics(auth, scope);
   }
 
+  @Get('crm-entities')
+  @ApiOperation({
+    summary:
+      'Search linkable Leads, Deals, and Tickets for call disposition or Click-to-Call links',
+  })
+  @ApiQuery({ name: 'q', required: false })
+  async getCrmEntities(
+    @Headers('authorization') authorization: string | undefined,
+    @Query('q') q?: string,
+  ) {
+    const auth = await this.callsService.verifyAuthHeader(authorization);
+    return this.callsService.listLinkableCrmEntities(auth, q);
+  }
+
+  @Post('share-link')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Generate a signed Customer Click-to-Call share link optionally linked to a Lead, Deal, or Ticket',
+  })
+  @ApiBody({ type: CreateCallShareLinkDto })
+  async createShareLink(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: CreateCallShareLinkDto,
+  ) {
+    const auth = await this.callsService.verifyAuthHeader(authorization);
+    return this.callsService.createShareLink(auth, dto);
+  }
+
+  @Post('sim-log')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Log an outbound Mobile SIM (tel:) call with disposition, CRM timeline activity, and optional follow-up task',
+  })
+  @ApiBody({ type: LogSimCallDto })
+  async logSimCall(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: LogSimCallDto,
+  ) {
+    const auth = await this.callsService.verifyAuthHeader(authorization);
+    return this.callsService.logSimCall(auth, dto);
+  }
+
+  @Get('public/link/:token')
+  @ApiOperation({
+    summary:
+      'Public endpoint: verify Customer Click-to-Call token and inspect assigned agent availability',
+  })
+  async getPublicCallLink(@Param('token') token: string) {
+    return this.callsService.getPublicCallLinkInfo(token);
+  }
+
+  @Post('public/link/:token/callback')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Public endpoint: log a customer callback request & high-priority task when agent is offline/busy',
+  })
+  @ApiBody({ type: PublicCallCallbackDto })
+  async submitPublicCallback(
+    @Param('token') token: string,
+    @Body() dto: PublicCallCallbackDto,
+  ) {
+    return this.callsService.submitPublicCallbackRequest(token, dto);
+  }
+
   @Get(':id/telemetry')
   @ApiOperation({
     summary:
@@ -115,6 +189,56 @@ export class CallsController {
   ) {
     const auth = await this.callsService.verifyAuthHeader(authorization);
     return this.callsService.getCallTelemetry(auth, id);
+  }
+
+  @Post(':id/disposition')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Save call notes, outcome tag, CRM record link + timeline activity, and optional follow-up task',
+  })
+  @ApiParam({ name: 'id', description: 'Call log record ID' })
+  @ApiBody({ type: SaveCallDispositionDto })
+  async saveDisposition(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() dto: SaveCallDispositionDto,
+  ) {
+    const auth = await this.callsService.verifyAuthHeader(authorization);
+    return this.callsService.saveCallDisposition(auth, id, dto);
+  }
+
+  @Post(':id/resolve-callback')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Mark a missed call or customer callback request as Called Back / Resolved (or reopen it)',
+  })
+  @ApiParam({ name: 'id', description: 'Call log record ID' })
+  async resolveCallback(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() body: { resolved?: boolean },
+  ) {
+    const auth = await this.callsService.verifyAuthHeader(authorization);
+    return this.callsService.toggleCallbackResolved(auth, id, body?.resolved);
+  }
+
+  @Post(':id/recording')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Upload or attach a Web Audio / MediaRecorder call recording (Cloudinary + history playback)',
+  })
+  @ApiParam({ name: 'id', description: 'Call log record ID' })
+  @ApiBody({ type: UploadCallRecordingDto })
+  async uploadRecording(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() dto: UploadCallRecordingDto,
+  ) {
+    const auth = await this.callsService.verifyAuthHeader(authorization);
+    return this.callsService.saveCallRecording(auth, id, dto);
   }
 
   @Post(':id/telemetry')
