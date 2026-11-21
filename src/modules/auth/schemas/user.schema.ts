@@ -112,6 +112,16 @@ export class User {
 
   @Prop({ type: Date, default: null })
   lastLoginAt?: Date | null;
+
+  /** Password recovery one-time SHA-256 token & expiry metadata. */
+  @Prop({ type: String, default: null })
+  resetPasswordTokenHash?: string | null;
+
+  @Prop({ type: Date, default: null })
+  resetPasswordExpiresAt?: Date | null;
+
+  @Prop({ type: Date, default: null })
+  resetPasswordRequestedAt?: Date | null;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

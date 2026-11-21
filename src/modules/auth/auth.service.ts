@@ -27,6 +27,7 @@ import {
   verifySecret,
 } from './identity.util';
 import { uploadToCloudinary } from './cloudinary.util';
+import { dispatchPasswordResetEmail } from './email.util';
 
 export interface RegisterInput {
   name: string;
@@ -783,5 +784,198 @@ export class AuthService {
     user.passwordHash = this.hashSecret(input.newPassword);
     await user.save();
     return { success: true };
+  }
+
+  private maskEmailAddress(email: string): string {
+    const [local = '', domain = ''] = email.split('@');
+    if (!local || !domain) return email;
+    const prefix = local.slice(0, Math.min(2, local.length));
+    return `${prefix}***@${domain}`;
+  }
+
+  private resolveFrontendResetBaseUrl(originHint?: string): string {
+    const allowedOrigin = (originHint || '').trim().replace(/\/+$/, '');
+    if (
+      allowedOrigin &&
+      /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(allowedOrigin)
+    ) {
+      return allowedOrigin;
+    }
+    const configured =
+      this.configService.get<string>('FRONTEND_URL') ||
+      process.env.FRONTEND_URL ||
+      'http://localhost:3000';
+    return configured.trim().replace(/\/+$/, '');
+  }
+
+  async requestPasswordReset(emailInput?: string, originHint?: string) {
+    const email = emailInput?.trim().toLowerCase();
+    if (!email || !email.includes('@')) {
+      throw new BadRequestException('Please enter a valid work email address.');
+    }
+
+    const genericResponse: {
+      success: boolean;
+      message: string;
+      devPreviewUrl?: string;
+    } = {
+      success: true,
+      message:
+        'If an active account matches that email, a password reset link has been sent.',
+    };
+
+    const user = await this.userModel.findOne({ email }).exec();
+    if (!user || !user.isActive || user.role === 'super_admin') {
+      return genericResponse;
+    }
+
+    const tenant = await this.tenantModel.findById(user.tenantId).exec();
+    if (!tenant || tenant.status === 'suspended') {
+      return genericResponse;
+    }
+
+    // Cooldown guard (45s) prevents reset-email bombing while returning uniform success
+    const now = Date.now();
+    if (
+      user.resetPasswordRequestedAt &&
+      now - new Date(user.resetPasswordRequestedAt).getTime() < 45_000
+    ) {
+      return genericResponse;
+    }
+
+    const rawToken = `rst_${randomBytes(24).toString('hex')}`;
+    const expiresInMinutes = 30;
+    user.resetPasswordTokenHash = sha256Hex(rawToken);
+    user.resetPasswordExpiresAt = new Date(now + expiresInMinutes * 60_000);
+    user.resetPasswordRequestedAt = new Date(now);
+    await user.save();
+
+    const baseUrl = this.resolveFrontendResetBaseUrl(originHint);
+    const resetUrl = `${baseUrl}/reset-password?token=${encodeURIComponent(rawToken)}`;
+    const workspaceName =
+      (tenant.companyName || '').trim() || tenant.name || 'Leadsetu CRM';
+
+    const emailResult = await dispatchPasswordResetEmail({
+      toEmail: user.email,
+      memberName: user.name,
+      workspaceName,
+      resetUrl,
+      expiresInMinutes,
+    });
+
+    if (
+      process.env.NODE_ENV !== 'production' &&
+      emailResult.provider === 'preview'
+    ) {
+      genericResponse.devPreviewUrl = resetUrl;
+    }
+
+    return genericResponse;
+  }
+
+  async verifyResetPasswordToken(token?: string) {
+    const cleanToken = token?.trim();
+    if (!cleanToken) {
+      throw new BadRequestException('Password reset token is required.');
+    }
+
+    const tokenHash = sha256Hex(cleanToken);
+    const user = await this.userModel
+      .findOne({ resetPasswordTokenHash: tokenHash })
+      .exec();
+
+    if (!user) {
+      throw new BadRequestException(
+        'This password reset link is invalid or has already been used.',
+      );
+    }
+    if (!user.isActive) {
+      throw new ForbiddenException('Your user account is currently deactivated.');
+    }
+    if (
+      !user.resetPasswordExpiresAt ||
+      new Date(user.resetPasswordExpiresAt).getTime() < Date.now()
+    ) {
+      throw new BadRequestException(
+        'This password reset link has expired. Please request a new reset link.',
+      );
+    }
+
+    const tenant = await this.tenantModel.findById(user.tenantId).exec();
+    const workspaceName =
+      (tenant?.companyName || '').trim() || tenant?.name || 'Leadsetu CRM';
+
+    return {
+      valid: true,
+      maskedEmail: this.maskEmailAddress(user.email),
+      workspaceName,
+      expiresAt: user.resetPasswordExpiresAt,
+    };
+  }
+
+  async resetPassword(
+    input: { token: string; newPassword: string },
+    clientIp = '',
+  ) {
+    const cleanToken = input.token?.trim();
+    const nextPassword = input.newPassword || '';
+
+    if (!cleanToken) {
+      throw new BadRequestException('Password reset token is required.');
+    }
+    if (nextPassword.length < 8) {
+      throw new BadRequestException(
+        'New password must be at least 8 characters long.',
+      );
+    }
+
+    const tokenHash = sha256Hex(cleanToken);
+    const user = await this.userModel
+      .findOne({ resetPasswordTokenHash: tokenHash })
+      .exec();
+
+    if (!user) {
+      throw new BadRequestException(
+        'This password reset link is invalid or has already been used.',
+      );
+    }
+    if (!user.isActive) {
+      throw new ForbiddenException('Your user account has been deactivated.');
+    }
+    if (
+      !user.resetPasswordExpiresAt ||
+      new Date(user.resetPasswordExpiresAt).getTime() < Date.now()
+    ) {
+      throw new BadRequestException(
+        'This password reset link has expired. Please request a new reset link.',
+      );
+    }
+
+    const tenant = await this.tenantModel.findById(user.tenantId).exec();
+    if (!tenant || tenant.status === 'suspended') {
+      throw new ForbiddenException('This workspace is currently unavailable.');
+    }
+    if (clientIp && !isIpAllowed(clientIp, tenant.securityPolicy?.ipAllowlist)) {
+      throw new ForbiddenException(
+        `Password reset blocked: Your IP (${clientIp}) is outside the workspace IP allowlist.`,
+      );
+    }
+
+    user.passwordHash = this.hashSecret(nextPassword);
+    user.resetPasswordTokenHash = null;
+    user.resetPasswordExpiresAt = null;
+    user.refreshTokenHash = null;
+    user.sessionVersion = (user.sessionVersion || 1) + 1;
+    if (user.inviteStatus === 'pending') {
+      user.inviteStatus = 'active';
+    }
+    await user.save();
+
+    return {
+      success: true,
+      maskedEmail: this.maskEmailAddress(user.email),
+      message:
+        'Your password has been updated and all prior sessions were signed out.',
+    };
   }
 }

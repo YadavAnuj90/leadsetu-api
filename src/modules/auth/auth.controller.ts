@@ -387,4 +387,83 @@ export class AuthController {
   ) {
     return this.authService.changePassword(authorization, body);
   }
+
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Request a one-time password reset link by email',
+    description:
+      'Sends a 30-minute expiring one-time password reset link if an active workspace user matches the provided email address.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['email'],
+      properties: {
+        email: {
+          type: 'string',
+          format: 'email',
+          example: 'rajesh@rselectricals.in',
+          description: 'Registered workspace email address',
+        },
+      },
+    },
+  })
+  @ApiResponse({ status: 200, description: 'Generic confirmation returned (never enumerates accounts in production)' })
+  async forgotPassword(
+    @Body() body: { email: string },
+    @Req() req: Request,
+  ) {
+    const originHeader = req.headers.origin;
+    return this.authService.requestPasswordReset(body?.email, originHeader);
+  }
+
+  @Get('reset-password/verify')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Verify a password reset link token before showing reset form',
+    description:
+      'Validates token expiry/existence and returns masked email and workspace name without consuming the token.',
+  })
+  @ApiQuery({
+    name: 'token',
+    required: true,
+    description: 'One-time reset token from the password reset link',
+  })
+  async verifyResetToken(@Query('token') token?: string) {
+    return this.authService.verifyResetPasswordToken(token);
+  }
+
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Complete password reset using one-time token',
+    description:
+      'Validates the one-time token, updates the password hash, invalidates prior sessions, and consumes the token.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['token', 'newPassword'],
+      properties: {
+        token: {
+          type: 'string',
+          example: 'rst_8f3b2c...',
+          description: 'One-time password reset token from email link',
+        },
+        newPassword: {
+          type: 'string',
+          minLength: 8,
+          example: 'NewStrongPass@2026',
+          description: 'New password (minimum 8 characters)',
+        },
+      },
+    },
+  })
+  async resetPassword(
+    @Body() body: { token: string; newPassword: string },
+    @Req() req: Request,
+  ) {
+    return this.authService.resetPassword(body, extractClientIp(req));
+  }
 }
