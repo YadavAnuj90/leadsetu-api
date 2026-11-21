@@ -632,7 +632,11 @@ export class DocumentsController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Update document metadata, expiry, tags, or verification status' })
+  @ApiOperation({
+    summary: 'Update document metadata, expiry, tags, or verification status',
+    description: 'Modifies metadata or expiry on an existing vault document.',
+  })
+  @ApiParam({ name: 'id', description: 'Unique document ID' })
   @ApiBody({ type: UpdateCrmDocumentDto })
   async update(
     @Headers('authorization') authorization: string | undefined,
@@ -644,7 +648,11 @@ export class DocumentsController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete a document from the Document Center' })
+  @ApiOperation({
+    summary: 'Delete a document from the Document Center',
+    description: 'Permanently removes the document record from the workspace vault.',
+  })
+  @ApiParam({ name: 'id', description: 'Unique document ID' })
   async remove(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,

@@ -3,8 +3,14 @@ import type { RawBodyRequest } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { AppModule } from './app.module';
+import {
+  convertOpenApiToPostmanCollection,
+  sanitizeAndEnrichOpenApiDocument,
+  SWAGGER_POSTMAN_CSS,
+  SWAGGER_POSTMAN_JS,
+} from './swagger-postman.util';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -83,17 +89,60 @@ async function bootstrap() {
     .addTag('9. AI Workflows & Automation', 'Zero-code IF-THIS-THEN-THAT CRM automations, auto-task creation & execution logs')
     .addTag('10. Team & Role-Based Access', '5-digit workspace account ID, 10-digit user IDs, add members by email + phone, roles & rep performance')
     .addTag('11. Real-Time Analytics & Command Center', 'Live cross-collection aggregation across Leads, Deals, GST Invoices, Campaigns, Workflows & Team')
+    .addTag('12. Security & Audit Trail', 'Immutable tenant activity audit logs & security posture checks')
+    .addTag('13. Support & SLA Tickets', 'Customer service tickets, SLA breach timers & resolution workflows')
+    .addTag('14. Workspace & Organization', 'Tenant workspace profile, quota visibility & top-up requests')
+    .addTag('14. Product & HSN Catalog', 'B2B SKU catalogue, GST rates & HSN/SAC codes')
+    .addTag('14. Document Center & Compliance Vault', 'GST certificates, brochures, contracts & signed sales assets')
+    .addTag('15. SaaS Billing, Razorpay Checkout & Webhooks', 'Plans, proration, Razorpay subscriptions, invoices & GST credit notes')
+    .addTag('15. Super Admin Platform Authority', 'Leadsetu HQ governance, tenant provisioning, DPDP controls & billing ledger')
+    .addTag('16. Native CRM Voice Calling', 'Click-to-call WebRTC, Twilio/Exotel bridge & callback links')
+    .addTag('16. AI Copilot & 3 Indian B2B Pillars', 'SetuAI credit risk, Udhaar chasers, voice-to-CRM & dealer desk intelligence')
     .build();
 
-  const document = SwaggerModule.createDocument(app, swaggerConfig);
+  const port = Number(process.env.PORT || 3001);
+  const defaultServerUrl =
+    process.env.API_PUBLIC_URL || `http://localhost:${port}`;
+
+  const rawDocument = SwaggerModule.createDocument(app, swaggerConfig);
+  const document = sanitizeAndEnrichOpenApiDocument(
+    rawDocument,
+    defaultServerUrl,
+  );
+
+  const expressApp = app.getHttpAdapter().getInstance();
+  const servePostmanCollection = (req: Request, res: Response) => {
+    const protocol = req.protocol || 'http';
+    const host = req.get('host');
+    const resolvedBaseUrl = host
+      ? `${protocol}://${host}`
+      : defaultServerUrl;
+    const collection = convertOpenApiToPostmanCollection(
+      document,
+      resolvedBaseUrl,
+    );
+    if (req.query?.download === '1' || req.query?.download === 'true') {
+      res.setHeader(
+        'Content-Disposition',
+        'attachment; filename="leadsetu-crm-api.postman_collection.json"',
+      );
+    }
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.send(JSON.stringify(collection, null, 2));
+  };
+  expressApp.get('/docs-postman.json', servePostmanCollection);
+  expressApp.get('/v1/docs-postman.json', servePostmanCollection);
 
   const swaggerUiOptions = {
     customSiteTitle: 'Leadsetu API Docs — Swagger UI',
+    customCss: SWAGGER_POSTMAN_CSS,
+    customJsStr: SWAGGER_POSTMAN_JS,
     swaggerOptions: {
       persistAuthorization: true,
       docExpansion: 'list',
       filter: true,
       showRequestDuration: true,
+      defaultModelsExpandDepth: 1,
     },
   };
 
@@ -101,10 +150,12 @@ async function bootstrap() {
   SwaggerModule.setup('docs', app, document, swaggerUiOptions);
   SwaggerModule.setup('v1/docs', app, document, swaggerUiOptions);
 
-  const port = Number(process.env.PORT || 3001);
   await app.listen(port);
   console.log(`🚀 Leadsetu API running on http://localhost:${port}/v1`);
   console.log(`📘 Swagger API Docs live at http://localhost:${port}/docs`);
+  console.log(
+    `📮 Postman v2.1 Collection live at http://localhost:${port}/v1/docs-postman.json`,
+  );
 }
 
 bootstrap();

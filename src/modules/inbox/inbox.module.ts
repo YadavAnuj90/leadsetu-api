@@ -366,6 +366,17 @@ export class InboxController {
   @ApiOperation({
     summary: 'Test active WhatsApp Cloud API connection for this workspace',
   })
+  @ApiBody({
+    required: false,
+    schema: {
+      type: 'object',
+      properties: {
+        phoneNumberId: { type: 'string', example: '3849201948271' },
+        wabaId: { type: 'string', example: '9182736450192' },
+        accessToken: { type: 'string', example: 'EAAG...' },
+      },
+    },
+  })
   async testWhatsAppConfig(
     @Headers('authorization') authorization: string | undefined,
     @Body()
@@ -380,6 +391,16 @@ export class InboxController {
   @ApiOperation({
     summary:
       'Connect company WhatsApp Business number using only essential business details (number + display name)',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['phoneNumber'],
+      properties: {
+        phoneNumber: { type: 'string', example: '+91 9811001122' },
+        businessDisplayName: { type: 'string', example: 'RS Electricals Sales' },
+      },
+    },
   })
   async connectCompanyWhatsAppNumber(
     @Headers('authorization') authorization: string | undefined,
@@ -398,6 +419,18 @@ export class InboxController {
   @ApiOperation({
     summary:
       'Complete 1-click Meta Embedded Signup onboarding using Leadsetu Tech Provider app',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['code'],
+      properties: {
+        code: { type: 'string', example: 'AQBx91...' },
+        wabaId: { type: 'string', example: '9182736450192' },
+        phoneNumberId: { type: 'string', example: '3849201948271' },
+        redirectUri: { type: 'string', example: 'http://localhost:3000/settings/integrations' },
+      },
+    },
   })
   async completeEmbeddedSignup(
     @Headers('authorization') authorization: string | undefined,
@@ -450,6 +483,9 @@ export class InboxController {
 
   @Get('templates')
   @ApiOperation({ summary: 'List tenant WhatsApp templates & supported variables' })
+  @ApiQuery({ name: 'category', required: false, description: 'Filter by template category' })
+  @ApiQuery({ name: 'search', required: false, description: 'Search template name or body' })
+  @ApiQuery({ name: 'activeOnly', required: false, description: 'Pass "true" to return only active templates' })
   async listTemplates(
     @Headers('authorization') authorization: string | undefined,
     @Query() query: { category?: string; search?: string; activeOnly?: string },
@@ -484,6 +520,7 @@ export class InboxController {
 
   @Patch('templates/:templateId')
   @ApiOperation({ summary: 'Update a WhatsApp template' })
+  @ApiParam({ name: 'templateId', description: 'Unique WhatsApp template ID' })
   @ApiBody({ type: UpdateWhatsAppTemplateSwaggerDto })
   async updateTemplate(
     @Headers('authorization') authorization: string | undefined,
@@ -496,6 +533,7 @@ export class InboxController {
 
   @Delete('templates/:templateId')
   @ApiOperation({ summary: 'Delete a WhatsApp template' })
+  @ApiParam({ name: 'templateId', description: 'Unique WhatsApp template ID' })
   async deleteTemplate(
     @Headers('authorization') authorization: string | undefined,
     @Param('templateId') templateId: string,
@@ -506,6 +544,7 @@ export class InboxController {
 
   @Get('crm-entities')
   @ApiOperation({ summary: 'List Leads, Contacts, Deals & Tickets linkable to Inbox threads' })
+  @ApiQuery({ name: 'search', required: false, description: 'Filter CRM records by name, company, or phone' })
   async listCrmEntities(
     @Headers('authorization') authorization: string | undefined,
     @Query('search') search?: string,
@@ -552,6 +591,7 @@ export class InboxController {
   @Post(':id/read')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Mark conversation unread count as zero' })
+  @ApiParam({ name: 'id', description: 'Unique conversation thread ID' })
   async markRead(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,
@@ -565,6 +605,19 @@ export class InboxController {
   @ApiOperation({
     summary:
       'Generate SetuAI Hinglish/English WhatsApp Reply Draft & Conversation Summary using thread + Products + Quotes context',
+  })
+  @ApiParam({ name: 'id', description: 'Unique conversation thread ID' })
+  @ApiBody({
+    required: false,
+    schema: {
+      type: 'object',
+      properties: {
+        mode: { type: 'string', enum: ['both', 'reply', 'summary'], example: 'both' },
+        language: { type: 'string', enum: ['hinglish', 'english', 'hindi'], example: 'hinglish' },
+        tone: { type: 'string', enum: ['helpful', 'closing', 'followup'], example: 'helpful' },
+        customInstruction: { type: 'string', example: 'Mention 10% bulk discount for 50+ units' },
+      },
+    },
   })
   async generateAiAssist(
     @Headers('authorization') authorization: string | undefined,
@@ -583,6 +636,7 @@ export class InboxController {
 
   @Patch(':id/link')
   @ApiOperation({ summary: 'Link or unlink a conversation thread to a CRM Lead, Contact, Deal, or Ticket' })
+  @ApiParam({ name: 'id', description: 'Unique conversation thread ID' })
   @ApiBody({ type: LinkConversationEntitySwaggerDto })
   async linkEntity(
     @Headers('authorization') authorization: string | undefined,

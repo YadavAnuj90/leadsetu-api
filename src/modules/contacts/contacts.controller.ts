@@ -115,6 +115,17 @@ export class ContactsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Verify 15-digit Indian GSTIN format, state code & Mod-36 checksum',
+    description: 'Validates GSTIN structure, extracts state code, and marks verification status on the contact.',
+  })
+  @ApiParam({ name: 'id', description: 'Unique contact record ID', example: 'cnt_01a2b3c4d5e6' })
+  @ApiBody({
+    required: false,
+    schema: {
+      type: 'object',
+      properties: {
+        gstin: { type: 'string', example: '09AABCR1234F1Z5', description: 'Optional GSTIN override to validate before saving' },
+      },
+    },
   })
   async verifyGstin(
     @Headers('authorization') authorization: string | undefined,

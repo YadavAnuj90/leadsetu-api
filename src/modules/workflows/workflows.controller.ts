@@ -93,6 +93,20 @@ export class WorkflowsController {
   @ApiOperation({
     summary:
       'Convert natural-language English/Hinglish instruction into structured workflow trigger, conditions, action & WhatsApp template',
+    description: 'Uses SetuAI to generate a structured CRM automation rule ready for saving.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['prompt'],
+      properties: {
+        prompt: {
+          type: 'string',
+          example: 'Auto-send GST brochure on WhatsApp when an IndiaMART lead in Noida arrives and nudge after 24h',
+        },
+        language: { type: 'string', enum: ['english', 'hinglish', 'hindi'], example: 'english' },
+      },
+    },
   })
   async draftWithAi(
     @Headers('authorization') authorization: string | undefined,

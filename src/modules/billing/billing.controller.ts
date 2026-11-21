@@ -10,7 +10,14 @@
   Req,
 } from '@nestjs/common';
 import type { RawBodyRequest } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiHeader,
+  ApiOperation,
+  ApiQuery,
+  ApiTags,
+} from '@nestjs/swagger';
 import type { Request } from 'express';
 import {
   BillingService,
@@ -52,7 +59,11 @@ export class BillingController {
   @ApiOperation({
     summary:
       'Preview prorated unused-day upgrade credit, optional coupon discount & 18% GST recalculation',
+    description: 'Computes prorated remaining-day credit when upgrading plan tier or monthly->annual cycle.',
   })
+  @ApiQuery({ name: 'plan', required: true, enum: ['starter', 'growth', 'enterprise'] })
+  @ApiQuery({ name: 'billingCycle', required: false, enum: ['monthly', 'annual'] })
+  @ApiQuery({ name: 'couponCode', required: false, description: 'Optional Super Admin promo coupon code' })
   async getProrationPreview(
     @Headers('authorization') authorization: string | undefined,
     @Query('plan') plan: 'starter' | 'growth' | 'enterprise',
@@ -100,6 +111,18 @@ export class BillingController {
   @ApiBearerAuth('access-token')
   @ApiOperation({
     summary: 'Schedule a lower-tier plan downgrade effective at current period end',
+    description: 'Queues a downgrade to starter or growth when the current paid cycle concludes.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['targetPlan'],
+      properties: {
+        targetPlan: { type: 'string', enum: ['starter', 'growth'], example: 'starter' },
+        billingCycle: { type: 'string', enum: ['monthly', 'annual'], example: 'monthly' },
+        reason: { type: 'string', example: 'Seasonal seat right-sizing' },
+      },
+    },
   })
   async scheduleDowngrade(
     @Headers('authorization') authorization: string | undefined,
@@ -132,6 +155,17 @@ export class BillingController {
   @ApiOperation({
     summary:
       'Raise a GST Credit Note / Refund request linked directly to Super Admin refund workflow',
+    description: 'Submits a refund / GST Credit Note request for a paid subscription invoice.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['invoiceId', 'reason'],
+      properties: {
+        invoiceId: { type: 'string', example: 'inv-1760001-ab12' },
+        reason: { type: 'string', example: 'Accidental duplicate plan upgrade' },
+      },
+    },
   })
   async createRefundRequest(
     @Headers('authorization') authorization: string | undefined,
@@ -206,6 +240,18 @@ export class BillingController {
   @ApiOperation({
     summary:
       'Public Razorpay Webhook endpoint (verifies X-Razorpay-Signature for payment.captured, order.paid, payment.failed, refund.created)',
+    description: 'Processes Razorpay subscription payment, failure, and refund events using HMAC-SHA256 verification.',
+  })
+  @ApiHeader({ name: 'x-razorpay-signature', required: true, description: 'HMAC-SHA256 hex digest computed with RAZORPAY_WEBHOOK_SECRET' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['event', 'payload'],
+      properties: {
+        event: { type: 'string', example: 'payment.captured' },
+        payload: { type: 'object' },
+      },
+    },
   })
   async handleRazorpayWebhook(
     @Req() req: RawBodyRequest<Request>,

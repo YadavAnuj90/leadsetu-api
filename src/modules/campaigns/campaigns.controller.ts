@@ -134,6 +134,18 @@ export class CampaignsController {
   @ApiOperation({
     summary:
       'Toggle WhatsApp DND / opt-out status for a campaign recipient phone number',
+    description: 'Marks or clears Do-Not-Disturb status for a phone number inside the campaign.',
+  })
+  @ApiParam({ name: 'id', description: 'Unique campaign record ID', example: 'cmp_01a2b3c4d5e6' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['phone', 'optOut'],
+      properties: {
+        phone: { type: 'string', example: '+91 9811001122' },
+        optOut: { type: 'boolean', example: true },
+      },
+    },
   })
   async toggleOptOut(
     @Headers('authorization') authorization: string | undefined,

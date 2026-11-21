@@ -17,6 +17,7 @@ import {
   ApiOperation,
   ApiProperty,
   ApiPropertyOptional,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -205,6 +206,15 @@ export class AuthController {
   })
   @ApiResponse({ status: 200, description: 'New accessToken issued.' })
   @ApiResponse({ status: 401, description: 'Invalid or expired refresh cookie.' })
+  @ApiBody({
+    required: false,
+    schema: {
+      type: 'object',
+      properties: {
+        refreshToken: { type: 'string', description: 'Optional refresh token fallback for API/mobile clients (browser uses HttpOnly cookie).' },
+      },
+    },
+  })
   async refresh(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
@@ -288,7 +298,9 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Inspect a team invite link token before signing in or activating',
+    description: 'Returns masked invitee email, role, and target workspace name for the invite token.',
   })
+  @ApiQuery({ name: 'token', required: true, description: 'One-time workspace invite token from email/WhatsApp link' })
   async inviteInfo(@Query('token') token?: string) {
     return this.authService.getInviteInfo(token);
   }
@@ -297,6 +309,20 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Accept a workspace invite link with email & password (or set new password) and sign in',
+    description: 'Activates an invited user or lets an existing user join using the invite token, setting the scoped HttpOnly refresh cookie.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['token', 'email'],
+      properties: {
+        token: { type: 'string', example: 'inv_tok_8f3b2c...' },
+        email: { type: 'string', example: 'rohit.verma@rselectricals.in' },
+        password: { type: 'string', example: 'Leadsetu@2026' },
+        newPassword: { type: 'string', example: 'Leadsetu@2026' },
+        mode: { type: 'string', enum: ['login', 'set_password'], example: 'set_password' },
+      },
+    },
   })
   async acceptInvite(
     @Body()
@@ -317,7 +343,20 @@ export class AuthController {
   @Patch('profile')
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth('access-token')
-  @ApiOperation({ summary: 'Update the signed-in user profile (name, phone, territory)' })
+  @ApiOperation({
+    summary: 'Update the signed-in user profile (name, phone, territory)',
+    description: 'Updates own display name, mobile number, and sales territory.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', example: 'Anjali Yadav' },
+        phone: { type: 'string', example: '+91 9811001122' },
+        territory: { type: 'string', example: 'Noida Sector 62' },
+      },
+    },
+  })
   async updateProfile(
     @Headers('authorization') authorization: string | undefined,
     @Body() body: { name?: string; phone?: string; territory?: string },
@@ -328,7 +367,20 @@ export class AuthController {
   @Post('change-password')
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth('access-token')
-  @ApiOperation({ summary: 'Change password for the signed-in user' })
+  @ApiOperation({
+    summary: 'Change password for the signed-in user',
+    description: 'Verifies current password before updating password hash.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['currentPassword', 'newPassword'],
+      properties: {
+        currentPassword: { type: 'string', example: 'OldPass@2026' },
+        newPassword: { type: 'string', example: 'NewStrongPass@2026' },
+      },
+    },
+  })
   async changePassword(
     @Headers('authorization') authorization: string | undefined,
     @Body() body: { currentPassword: string; newPassword: string },

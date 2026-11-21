@@ -269,10 +269,19 @@ export class UpdateRecoveryConfigDto {
 }
 
 export class BankStatementEntryDto {
+  @ApiPropertyOptional({ example: 'stmt-row-01' })
   id?: string;
+
+  @ApiProperty({ example: '2026-11-21', description: 'Bank transaction date (YYYY-MM-DD)' })
   date!: string;
+
+  @ApiProperty({ example: 'NEFT CR-HDFC0000412-SHARMA STEEL WORKS-UTR99812', description: 'Bank statement narration string' })
   narration!: string;
+
+  @ApiProperty({ example: 'HDFCR5202611210099812', description: 'UTR or bank reference number' })
   utrOrRef!: string;
+
+  @ApiProperty({ example: 58410, description: 'Credited amount in INR' })
   creditAmount!: number;
 }
 
@@ -281,14 +290,33 @@ export class BankStatementReconcileDto {
   entries!: BankStatementEntryDto[];
 }
 
+export class BankMatchItemDto {
+  @ApiProperty({ example: '67401a2f8c1b9e0012ab3456', description: 'Target CRM Invoice ID' })
+  invoiceId!: string;
+
+  @ApiProperty({ example: 58410, description: 'Settled amount in INR' })
+  amountPaid!: number;
+
+  @ApiPropertyOptional({ example: 1180, description: 'TDS u/s 194C/194J deducted by buyer in INR' })
+  tdsDeducted?: number;
+
+  @ApiProperty({ example: 'HDFCR5202611210099812', description: 'UTR or cheque number' })
+  utrOrChequeNo!: string;
+
+  @ApiProperty({ example: '2026-11-21', description: 'Payment settlement date (ISO-8601)' })
+  paymentDate!: string;
+
+  @ApiPropertyOptional({
+    enum: ['UPI', 'NEFT', 'RTGS', 'Cheque', 'Razorpay', 'Cash'],
+    example: 'NEFT',
+  })
+  paymentMode?: 'UPI' | 'NEFT' | 'RTGS' | 'Cheque' | 'Razorpay' | 'Cash';
+
+  @ApiPropertyOptional({ example: 'Matched automatically from HDFC Nov statement' })
+  note?: string;
+}
+
 export class ApplyBankMatchDto {
-  matches!: {
-    invoiceId: string;
-    amountPaid: number;
-    tdsDeducted?: number;
-    utrOrChequeNo: string;
-    paymentDate: string;
-    paymentMode?: 'UPI' | 'NEFT' | 'RTGS' | 'Cheque' | 'Razorpay' | 'Cash';
-    note?: string;
-  }[];
+  @ApiProperty({ type: [BankMatchItemDto], description: 'Reconciled bank matches to post to invoice ledgers' })
+  matches!: BankMatchItemDto[];
 }

@@ -11,7 +11,7 @@
   Res,
   type RawBodyRequest,
 } from '@nestjs/common';
-import { ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { ApiBody, ApiHeader, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { InboxService } from '../inbox.service';
 
@@ -47,6 +47,17 @@ export class WhatsAppWebhookController {
   @ApiOperation({
     summary:
       'Meta WhatsApp Cloud API live webhook (X-Hub-Signature-256 + inbound messages & delivery statuses)',
+    description: 'Verifies Meta HMAC signature and ingests incoming customer WhatsApp messages & delivery status callbacks.',
+  })
+  @ApiHeader({ name: 'x-hub-signature-256', required: true, description: 'Meta sha256=<hex> webhook signature header' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        object: { type: 'string', example: 'whatsapp_business_account' },
+        entry: { type: 'array', items: { type: 'object' } },
+      },
+    },
   })
   @ApiResponse({ status: 200, description: 'Webhook processed cleanly.' })
   async receiveWebhook(

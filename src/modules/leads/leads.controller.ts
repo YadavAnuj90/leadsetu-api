@@ -208,6 +208,20 @@ export class LeadsController {
     description:
       'Imports up to 500 CSV rows, normalizes +91 Indian mobile numbers, de-duplicates matching phones/emails into timeline notes, and AI-scores new leads.',
   })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['rows'],
+      properties: {
+        rows: {
+          type: 'array',
+          description: 'Array of parsed CSV lead objects',
+          items: { type: 'object' },
+          example: [{ name: 'Rajesh Sharma', company: 'RS Electricals', phone: '+91 9811001122', city: 'Noida', source: 'indiamart', estimatedValue: 250000 }],
+        },
+      },
+    },
+  })
   @ApiResponse({ status: 201, description: 'Bulk import completed.' })
   async bulkImport(
     @Headers('authorization') authorization: string | undefined,
@@ -248,6 +262,21 @@ export class LeadsController {
     summary: 'Public inbound webhook lead capture (IndiaMART, Justdial, Meta Ads, Website)',
     description:
       'Captures inbound inquiry JSON, normalizes +91 phones, de-duplicates existing leads, and assigns new leads round-robin across active workspace reps.',
+  })
+  @ApiParam({ name: 'webhookKey', description: 'Tenant unique inbound capture key' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', example: 'Vikram Singh' },
+        company: { type: 'string', example: 'Apex Gears Pvt. Ltd.' },
+        phone: { type: 'string', example: '+91 9876543210' },
+        email: { type: 'string', example: 'vikram@apexgears.in' },
+        city: { type: 'string', example: 'Gurugram' },
+        source: { type: 'string', example: 'indiamart' },
+        notes: { type: 'string', example: 'Looking for 100 units 3-phase starter panels' },
+      },
+    },
   })
   @ApiResponse({ status: 201, description: 'Inbound webhook inquiry processed.' })
   async captureWebhook(

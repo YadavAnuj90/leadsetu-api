@@ -160,7 +160,9 @@ export class CallsController {
   @ApiOperation({
     summary:
       'Public endpoint: verify Customer Click-to-Call token and inspect assigned agent availability',
+    description: 'Validates a customer callback share token without workspace login.',
   })
+  @ApiParam({ name: 'token', description: 'Unique public click-to-call token' })
   async getPublicCallLink(@Param('token') token: string) {
     return this.callsService.getPublicCallLinkInfo(token);
   }
@@ -170,7 +172,9 @@ export class CallsController {
   @ApiOperation({
     summary:
       'Public endpoint: log a customer callback request & high-priority task when agent is offline/busy',
+    description: 'Submits a customer callback request on a public click-to-call share link.',
   })
+  @ApiParam({ name: 'token', description: 'Unique public click-to-call token' })
   @ApiBody({ type: PublicCallCallbackDto })
   async submitPublicCallback(
     @Param('token') token: string,
@@ -205,8 +209,18 @@ export class CallsController {
   @ApiOperation({
     summary:
       'Audited Super Admin Support Access: reveal participant identities & telemetry samples for a call given a mandatory ticket/reason (writes immutable audit log)',
+    description: 'Requires super_admin role and a reason (min 5 chars); writes audit logs to both tenant and platform trails.',
   })
   @ApiParam({ name: 'id', description: 'Call log record ID' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['reason'],
+      properties: {
+        reason: { type: 'string', example: 'Ticket #412 TURN packet loss diagnostics' },
+      },
+    },
+  })
   async requestSupportReveal(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,
@@ -248,8 +262,18 @@ export class CallsController {
   @ApiOperation({
     summary:
       'Mark a missed call or customer callback request as Called Back / Resolved (or reopen it)',
+    description: 'Updates resolved state on a missed-call or callback log entry.',
   })
   @ApiParam({ name: 'id', description: 'Call log record ID' })
+  @ApiBody({
+    required: false,
+    schema: {
+      type: 'object',
+      properties: {
+        resolved: { type: 'boolean', example: true },
+      },
+    },
+  })
   async resolveCallback(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,

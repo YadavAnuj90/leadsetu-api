@@ -75,6 +75,18 @@ export class TenantsController {
   @Post('me/topup-requests')
   @ApiOperation({
     summary: 'Request an AI or WhatsApp quota top-up from Leadsetu Super Admin',
+    description: 'Submits a manual quota top-up approval request visible in the Super Admin queue.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['resource', 'quantity'],
+      properties: {
+        resource: { type: 'string', enum: ['ai', 'whatsapp'], example: 'ai' },
+        quantity: { type: 'number', example: 1000 },
+        note: { type: 'string', example: 'Month-end sales campaign volume' },
+      },
+    },
   })
   async createTopupRequest(
     @Headers('authorization') authorization: string | undefined,

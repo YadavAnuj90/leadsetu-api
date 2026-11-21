@@ -17,6 +17,7 @@ import type { Request } from 'express';
 import {
   ApiBearerAuth,
   ApiBody,
+  ApiHeader,
   ApiOperation,
   ApiParam,
   ApiQuery,
@@ -172,6 +173,18 @@ export class InvoicesController {
   @ApiOperation({
     summary:
       'Public Razorpay Payment Webhook for Customer B2B GST Invoices (auto-flips paid, clears Credit Hold, sends WhatsApp receipt)',
+    description: 'Verifies X-Razorpay-Signature, records Razorpay settlement on the customer invoice, clears Contact Credit Hold if no other overdue unpaid invoices remain, and dispatches WhatsApp receipt.',
+  })
+  @ApiHeader({ name: 'x-razorpay-signature', required: true, description: 'HMAC-SHA256 hex digest from Razorpay' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['event', 'payload'],
+      properties: {
+        event: { type: 'string', example: 'payment_link.paid' },
+        payload: { type: 'object' },
+      },
+    },
   })
   async handleCustomerRazorpayWebhook(
     @Req() req: RawBodyRequest<Request>,
@@ -188,7 +201,9 @@ export class InvoicesController {
   @Get('public/:token')
   @ApiOperation({
     summary: 'Public buyer quotation view by shareable token (no auth required)',
+    description: 'Fetches buyer-facing GST Proforma Quotation details and line items using the shareable public token.',
   })
+  @ApiParam({ name: 'token', description: 'Unique public quotation token' })
   async getPublicQuote(@Param('token') token: string) {
     return this.invoicesService.getPublicQuote(token);
   }
@@ -198,6 +213,19 @@ export class InvoicesController {
   @ApiOperation({
     summary:
       'Buyer public quote decision (Approve Quote or Request Revision)',
+    description: 'Records buyer approval or change request directly from the shareable public quote page.',
+  })
+  @ApiParam({ name: 'token', description: 'Unique public quotation token' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['decision'],
+      properties: {
+        decision: { type: 'string', enum: ['approved', 'changes_requested'], example: 'approved' },
+        buyerName: { type: 'string', example: 'Rajesh Sharma' },
+        remark: { type: 'string', example: 'Approved, proceed with tax invoice.' },
+      },
+    },
   })
   async respondToPublicQuote(
     @Param('token') token: string,
@@ -216,6 +244,18 @@ export class InvoicesController {
   @ApiOperation({
     summary:
       'Convert an approved or pending Proforma Quotation into a GST Tax Invoice',
+    description: 'Converts a Proforma Quotation into a GST Tax Invoice (checks buyer Credit Hold unless overridden by Owner/Admin).',
+  })
+  @ApiParam({ name: 'id', description: 'Unique quotation record ID', example: 'inv_01a2b3c4d5e6' })
+  @ApiBody({
+    required: false,
+    schema: {
+      type: 'object',
+      properties: {
+        overrideCreditHold: { type: 'boolean', example: false },
+        overrideReason: { type: 'string', example: 'MD approved dispatch against PDC' },
+      },
+    },
   })
   async convertToInvoice(
     @Headers('authorization') authorization: string | undefined,
@@ -285,7 +325,9 @@ export class InvoicesController {
   @ApiOperation({
     summary:
       'Record a Partial / Advance Payment & TDS Deduction on an Invoice (Accounts Receivable Ledger)',
+    description: 'Appends a payment ledger entry with optional TDS deduction and updates balance due.',
   })
+  @ApiParam({ name: 'id', description: 'Unique invoice record ID', example: 'inv_01a2b3c4d5e6' })
   @ApiBody({ type: RecordInvoicePaymentDto })
   async recordPayment(
     @Headers('authorization') authorization: string | undefined,
@@ -299,7 +341,10 @@ export class InvoicesController {
   @Delete(':id/payments/:paymentId')
   @ApiOperation({
     summary: 'Reverse/delete an Accounts Receivable ledger payment entry on an invoice',
+    description: 'Removes a specific settlement entry and recalculates invoice balance due.',
   })
+  @ApiParam({ name: 'id', description: 'Unique invoice record ID', example: 'inv_01a2b3c4d5e6' })
+  @ApiParam({ name: 'paymentId', description: 'Unique AR payment ledger entry ID' })
   async deletePayment(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,
@@ -334,7 +379,10 @@ export class InvoicesController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Record Promise-to-Pay (PTP) date & committed amount on an unpaid invoice',
+    description: 'Logs buyer promise-to-pay commitment date and notes for AR follow-up.',
   })
+  @ApiParam({ name: 'id', description: 'Unique invoice record ID', example: 'inv_01a2b3c4d5e6' })
+  @ApiBody({ type: RecordPromiseToPayDto })
   async recordPtp(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,
@@ -348,7 +396,10 @@ export class InvoicesController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Dispatch WhatsApp + UPI Udhaar recovery reminder & log chaser history',
+    description: 'Sends an automated recovery message with payment link to the buyer.',
   })
+  @ApiParam({ name: 'id', description: 'Unique invoice record ID', example: 'inv_01a2b3c4d5e6' })
+  @ApiBody({ type: SendRecoveryChaserDto })
   async sendChaser(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,
@@ -363,6 +414,19 @@ export class InvoicesController {
   @ApiOperation({
     summary:
       '1-Click Send Quotation or GST Tax Invoice PDF + Razorpay payment link via connected WhatsApp Cloud & log to Deal/Lead timeline',
+    description: 'Generates document PDF and dispatches it to the buyer phone over Meta WhatsApp Cloud or CRM Inbox.',
+  })
+  @ApiParam({ name: 'id', description: 'Unique invoice or quotation ID', example: 'inv_01a2b3c4d5e6' })
+  @ApiBody({
+    required: false,
+    schema: {
+      type: 'object',
+      properties: {
+        phone: { type: 'string', example: '+91 9811001122' },
+        customMessage: { type: 'string', example: 'Please find attached GST Proforma Quotation.' },
+        publicBaseUrl: { type: 'string', example: 'http://localhost:3000' },
+      },
+    },
   })
   async sendOnWhatsApp(
     @Headers('authorization') authorization: string | undefined,
