@@ -5,11 +5,15 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { DealsController } from './deals.controller';
 import { DealsService } from './deals.service';
 import { Deal, DealSchema } from './schemas/deal.schema';
+import { PipelinesModule } from '../pipelines/pipelines.module';
+import { CustomFieldsModule } from '../custom-fields/custom-fields.module';
 
 @Module({
   imports: [
     ConfigModule,
     MongooseModule.forFeature([{ name: Deal.name, schema: DealSchema }]),
+    PipelinesModule,
+    CustomFieldsModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

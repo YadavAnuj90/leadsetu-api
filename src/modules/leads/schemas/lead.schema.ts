@@ -104,6 +104,9 @@ export class Lead {
   @Prop({ default: '' })
   notes!: string;
 
+  @Prop({ type: Object, default: {} })
+  customFields!: Record<string, unknown>;
+
   @Prop({ type: Array, default: [] })
   activities!: LeadActivity[];
 }

@@ -6,11 +6,13 @@ import { LeadsController } from './leads.controller';
 import { LeadsService } from './leads.service';
 import { Lead, LeadSchema } from './schemas/lead.schema';
 import { WorkflowsModule } from '../workflows/workflows.module';
+import { CustomFieldsModule } from '../custom-fields/custom-fields.module';
 
 @Module({
   imports: [
     ConfigModule,
     WorkflowsModule,
+    CustomFieldsModule,
     MongooseModule.forFeature([{ name: Lead.name, schema: LeadSchema }]),
     JwtModule.registerAsync({
       imports: [ConfigModule],

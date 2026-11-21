@@ -21,6 +21,8 @@ import { SuperAdminModule } from './modules/super-admin/super-admin.module';
 import { AiBridgeModule } from './modules/ai-bridge/ai-bridge.module';
 import { CallsModule } from './modules/calls/calls.module';
 import { BillingModule } from './modules/billing/billing.module';
+import { PipelinesModule } from './modules/pipelines/pipelines.module';
+import { CustomFieldsModule } from './modules/custom-fields/custom-fields.module';
 
 @Module({
   imports: [
@@ -60,6 +62,8 @@ import { BillingModule } from './modules/billing/billing.module';
     SuperAdminModule,
     CallsModule,
     BillingModule,
+    PipelinesModule,
+    CustomFieldsModule,
   ],
 })
 export class AppModule {}

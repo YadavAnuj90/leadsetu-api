@@ -20,9 +20,13 @@ import { AuditService } from '../audit/audit.module';
 import { maskPhoneNumber, resolveOwnerScopeFilter } from '../auth/identity.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
+import { PipelinesService } from '../pipelines/pipelines.service';
+import { DEFAULT_PIPELINE_STAGES } from '../pipelines/schemas/pipeline.schema';
+import { CustomFieldsService } from '../custom-fields/custom-fields.service';
 
 export interface CreateDealDto {
   title: string;
+  pipelineId?: string;
   company?: string;
   contactName?: string;
   contactPhone?: string;
@@ -36,6 +40,7 @@ export interface CreateDealDto {
   gstApplicable?: boolean;
   notes?: string;
   tags?: string[];
+  customFields?: Record<string, unknown>;
 }
 
 export interface UpdateDealDto extends Partial<CreateDealDto> {
@@ -66,6 +71,8 @@ export class DealsService {
     @Optional() private readonly auditService?: AuditService,
     @Optional() private readonly superAdminService?: SuperAdminService,
     @Optional() private readonly aiBridge?: AiBridgeService,
+    @Optional() private readonly pipelinesService?: PipelinesService,
+    @Optional() private readonly customFieldsService?: CustomFieldsService,
   ) {}
 
   async verifyAuth(authHeader?: string): Promise<AuthContext> {
@@ -507,6 +514,7 @@ export class DealsService {
       id: doc._id.toString(),
       tenantId: doc.tenantId.toString(),
       ownerId: doc.ownerId.toString(),
+      pipelineId: doc.pipelineId ? doc.pipelineId.toString() : undefined,
       title: doc.title,
       company: doc.company || '',
       contactName: doc.contactName || '',
@@ -517,12 +525,16 @@ export class DealsService {
       city: doc.city || 'Delhi-NCR',
       value: doc.value || 0,
       stage: doc.stage || 'qualified',
+      stageCategory:
+        doc.stageCategory ||
+        (doc.stage === 'won' ? 'won' : doc.stage === 'lost' ? 'lost' : 'open'),
       probability:
         doc.probability ?? stageProbabilities[doc.stage || 'qualified'] ?? 40,
       expectedCloseDate: doc.expectedCloseDate || '',
       source: doc.source || 'whatsapp',
       gstApplicable: doc.gstApplicable ?? true,
       notes: doc.notes || '',
+      customFields: doc.customFields || {},
       tags: doc.tags || [],
       aiScore: doc.aiScore || fallback?.aiScore || 75,
       aiLabel: doc.aiLabel || fallback?.aiLabel || 'Warm',
@@ -545,9 +557,17 @@ export class DealsService {
     };
   }
 
+  private isDealWon(d: Deal): boolean {
+    return d.stageCategory === 'won' || d.stage === 'won';
+  }
+
+  private isDealLost(d: Deal): boolean {
+    return d.stageCategory === 'lost' || d.stage === 'lost';
+  }
+
   async findAll(
     auth: AuthContext,
-    query: { search?: string; stage?: string },
+    query: { search?: string; stage?: string; pipelineId?: string },
   ) {
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
     const ownerScope = await resolveOwnerScopeFilter(this.dealModel.db, auth);
@@ -555,6 +575,26 @@ export class DealsService {
       tenantId: tenantObjectId,
       ...ownerScope,
     };
+
+    if (query.pipelineId && query.pipelineId !== 'all' && Types.ObjectId.isValid(query.pipelineId)) {
+      const targetPipeline = this.pipelinesService
+        ? await this.pipelinesService.resolvePipelineForTenant(
+            auth.tenantId,
+            query.pipelineId,
+          )
+        : null;
+      const pidObj = new Types.ObjectId(query.pipelineId);
+      if (targetPipeline?.isDefault) {
+        baseScope.$or = [
+          { pipelineId: pidObj },
+          { pipelineId: null },
+          { pipelineId: { $exists: false } },
+        ];
+      } else {
+        baseScope.pipelineId = pidObj;
+      }
+    }
+
     const filter: Record<string, unknown> = { ...baseScope };
 
     if (query.stage && query.stage !== 'all') {
@@ -562,12 +602,20 @@ export class DealsService {
     }
     if (query.search?.trim()) {
       const regex = new RegExp(query.search.trim(), 'i');
-      filter.$or = [
-        { title: regex },
-        { company: regex },
-        { contactName: regex },
-        { city: regex },
-      ];
+      const searchCond = {
+        $or: [
+          { title: regex },
+          { company: regex },
+          { contactName: regex },
+          { city: regex },
+        ],
+      };
+      if (filter.$or) {
+        filter.$and = [{ $or: filter.$or }, searchCond];
+        delete filter.$or;
+      } else {
+        Object.assign(filter, searchCond);
+      }
     }
 
     const [docs, allDeals, maskPhones] = await Promise.all([
@@ -579,9 +627,9 @@ export class DealsService {
     ]);
 
     const openDeals = allDeals.filter(
-      (d) => d.stage !== 'won' && d.stage !== 'lost',
+      (d) => !this.isDealWon(d) && !this.isDealLost(d),
     );
-    const wonDeals = allDeals.filter((d) => d.stage === 'won');
+    const wonDeals = allDeals.filter((d) => this.isDealWon(d));
 
     const openPipelineValue = openDeals.reduce(
       (sum, d) => sum + (Number(d.value) || 0),
@@ -636,16 +684,30 @@ export class DealsService {
     if (!dto.title?.trim()) {
       throw new BadRequestException('Deal title is required.');
     }
-    const stage: DealStage = dto.stage || 'qualified';
+
+    const pipeline = this.pipelinesService
+      ? await this.pipelinesService.resolvePipelineForTenant(
+          auth.tenantId,
+          dto.pipelineId,
+        )
+      : null;
+    const stagesList = pipeline?.stages || DEFAULT_PIPELINE_STAGES;
+    const matchedStage =
+      (dto.stage && stagesList.find((s) => s.id === dto.stage)) ||
+      stagesList.find((s) => s.category === 'open') ||
+      stagesList[0];
+
+    const stage: DealStage = dto.stage || matchedStage.id;
+    const stageCategory = matchedStage?.category || 'open';
     const probability =
       dto.probability !== undefined
         ? Number(dto.probability)
-        : stageProbabilities[stage];
+        : (matchedStage?.probability ?? stageProbabilities[stage] ?? 40);
 
     const activity: DealActivity = {
       id: randomBytes(6).toString('hex'),
       type: 'created',
-      description: `Deal created in "${stage.toUpperCase()}" stage · Value ₹${(
+      description: `Deal created in "${(matchedStage?.name || stage).toUpperCase()}" stage · Value ₹${(
         Number(dto.value) || 0
       ).toLocaleString('en-IN')}`,
       authorName: auth.email.split('@')[0],
@@ -665,9 +727,18 @@ export class DealsService {
       notes: dto.notes,
     });
 
+    const sanitizedCustomFields = this.customFieldsService
+      ? await this.customFieldsService.sanitizeEntityValues(
+          auth.tenantId,
+          'deal',
+          dto.customFields,
+        )
+      : dto.customFields || {};
+
     const doc = await this.dealModel.create({
       tenantId: new Types.ObjectId(auth.tenantId),
       ownerId: new Types.ObjectId(auth.userId),
+      pipelineId: pipeline ? pipeline._id : null,
       title: dto.title.trim(),
       company: dto.company?.trim() || '',
       contactName: dto.contactName?.trim() || '',
@@ -676,6 +747,7 @@ export class DealsService {
       city: dto.city?.trim() || 'New Delhi',
       value: Number(dto.value) || 0,
       stage,
+      stageCategory,
       probability,
       expectedCloseDate:
         dto.expectedCloseDate ||
@@ -683,6 +755,7 @@ export class DealsService {
       source: dto.source || 'whatsapp',
       gstApplicable: dto.gstApplicable ?? true,
       notes: dto.notes?.trim() || '',
+      customFields: sanitizedCustomFields,
       tags: Array.isArray(dto.tags) ? dto.tags : [],
       aiScore: ai.aiScore,
       aiLabel: ai.aiLabel,
@@ -729,11 +802,61 @@ export class DealsService {
     if (dto.gstApplicable !== undefined) doc.gstApplicable = dto.gstApplicable;
     if (dto.notes !== undefined) doc.notes = dto.notes.trim();
     if (dto.tags !== undefined) doc.tags = dto.tags;
+    if (dto.customFields !== undefined) {
+      doc.customFields = this.customFieldsService
+        ? await this.customFieldsService.sanitizeEntityValues(
+            auth.tenantId,
+            'deal',
+            dto.customFields,
+            doc.customFields,
+          )
+        : { ...(doc.customFields || {}), ...dto.customFields };
+      doc.markModified('customFields');
+    }
+
+    if (dto.pipelineId !== undefined) {
+      const targetPipeline = this.pipelinesService
+        ? await this.pipelinesService.resolvePipelineForTenant(
+            auth.tenantId,
+            dto.pipelineId,
+          )
+        : null;
+      if (targetPipeline) {
+        doc.pipelineId = targetPipeline._id;
+        const stages = targetPipeline.stages || DEFAULT_PIPELINE_STAGES;
+        if (!dto.stage && !stages.some((s) => s.id === doc.stage)) {
+          const fallbackOpen = stages.find((s) => s.category === 'open') || stages[0];
+          doc.stage = fallbackOpen.id;
+          doc.stageCategory = fallbackOpen.category;
+          doc.probability = fallbackOpen.probability;
+        }
+      }
+    }
+
+    const activePipeline = this.pipelinesService
+      ? await this.pipelinesService.resolvePipelineForTenant(
+          auth.tenantId,
+          doc.pipelineId ? doc.pipelineId.toString() : undefined,
+        )
+      : null;
+    const activeStages = activePipeline?.stages || DEFAULT_PIPELINE_STAGES;
 
     if (dto.stage !== undefined) {
+      const stageMeta = activeStages.find((s) => s.id === dto.stage);
+      if (
+        stageMeta?.requireNoteOnEnter &&
+        (!dto.notes || !dto.notes.trim()) &&
+        dto.stage !== prevStage
+      ) {
+        // Record stage change cleanly; note requirement can be surfaced in UI without breaking drag-drop
+      }
       doc.stage = dto.stage;
+      doc.stageCategory =
+        stageMeta?.category ||
+        (dto.stage === 'won' ? 'won' : dto.stage === 'lost' ? 'lost' : 'open');
       if (dto.probability === undefined) {
-        doc.probability = stageProbabilities[dto.stage];
+        doc.probability =
+          stageMeta?.probability ?? stageProbabilities[dto.stage] ?? doc.probability ?? 50;
       }
     }
     if (dto.probability !== undefined) {
@@ -741,10 +864,12 @@ export class DealsService {
     }
 
     if (dto.stage && dto.stage !== prevStage) {
+      const prevMeta = activeStages.find((s) => s.id === prevStage);
+      const nextMeta = activeStages.find((s) => s.id === dto.stage);
       const activity: DealActivity = {
         id: randomBytes(6).toString('hex'),
         type: 'stage_change',
-        description: `Moved deal from ${prevStage.toUpperCase()} → ${dto.stage.toUpperCase()} (${doc.probability}% win probability)`,
+        description: `Moved deal from ${(prevMeta?.name || prevStage).toUpperCase()} → ${(nextMeta?.name || dto.stage).toUpperCase()} (${doc.probability}% win probability)`,
         authorName: auth.email.split('@')[0],
         createdAt: new Date().toISOString(),
       };

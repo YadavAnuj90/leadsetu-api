@@ -73,6 +73,13 @@ export class CreateContactDto {
   notes?: string;
 
   @ApiPropertyOptional({
+    description: 'Tenant-defined custom field key/value pairs (e.g. Drug License No., Credit Days)',
+    type: Object,
+    example: { drug_license_no: 'DL-20B-112940' },
+  })
+  customFields?: Record<string, unknown>;
+
+  @ApiPropertyOptional({
     description: 'Approved B2B credit limit in INR (0 = uncapped unless Credit Hold enabled)',
     example: 500000,
     default: 0,

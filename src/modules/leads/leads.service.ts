@@ -26,6 +26,7 @@ import {
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import { WorkflowsService } from '../workflows/workflows.service';
 import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
+import { CustomFieldsService } from '../custom-fields/custom-fields.service';
 
 export interface CreateLeadDto {
   name: string;
@@ -38,6 +39,7 @@ export interface CreateLeadDto {
   estimatedValue?: number;
   tags?: string[];
   notes?: string;
+  customFields?: Record<string, unknown>;
 }
 
 export interface UpdateLeadDto extends Partial<CreateLeadDto> {
@@ -70,6 +72,7 @@ export class LeadsService {
     @Optional() private readonly superAdminService?: SuperAdminService,
     @Optional() private readonly workflowsService?: WorkflowsService,
     @Optional() private readonly aiBridge?: AiBridgeService,
+    @Optional() private readonly customFieldsService?: CustomFieldsService,
   ) {}
 
   async verifyAuth(authHeader?: string): Promise<AuthContext> {
@@ -532,6 +535,7 @@ export class LeadsService {
       aiScoredAt: doc.aiScoredAt || '',
       tags: doc.tags || [],
       notes: doc.notes || '',
+      customFields: doc.customFields || {},
       activities: doc.activities || [],
       createdAt: raw.createdAt ? new Date(raw.createdAt).toISOString() : new Date().toISOString(),
       updatedAt: raw.updatedAt ? new Date(raw.updatedAt).toISOString() : new Date().toISOString(),
@@ -675,6 +679,14 @@ export class LeadsService {
       createdAt: nowIso,
     };
 
+    const sanitizedCustomFields = this.customFieldsService
+      ? await this.customFieldsService.sanitizeEntityValues(
+          auth.tenantId,
+          'lead',
+          dto.customFields,
+        )
+      : dto.customFields || {};
+
     const doc = await this.leadModel.create({
       tenantId: new Types.ObjectId(auth.tenantId),
       ownerId: new Types.ObjectId(auth.userId),
@@ -695,6 +707,7 @@ export class LeadsService {
       aiScoredAt: ai.aiScoredAt,
       tags: Array.isArray(dto.tags) ? dto.tags : [],
       notes: dto.notes?.trim() || '',
+      customFields: sanitizedCustomFields,
       activities: [initialActivity],
     });
 
@@ -785,6 +798,17 @@ export class LeadsService {
       doc.estimatedValue = Number(dto.estimatedValue) || 0;
     if (dto.tags !== undefined) doc.tags = dto.tags;
     if (dto.notes !== undefined) doc.notes = dto.notes.trim();
+    if (dto.customFields !== undefined) {
+      doc.customFields = this.customFieldsService
+        ? await this.customFieldsService.sanitizeEntityValues(
+            auth.tenantId,
+            'lead',
+            dto.customFields,
+            doc.customFields,
+          )
+        : { ...(doc.customFields || {}), ...dto.customFields };
+      doc.markModified('customFields');
+    }
 
     if (dto.rescoreAi) {
       await this.superAdminService?.assertFeatureEnabled(auth.tenantId, 'aiScoring');

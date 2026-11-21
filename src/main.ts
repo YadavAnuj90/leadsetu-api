@@ -92,6 +92,7 @@ async function bootstrap() {
     .addTag('12. Security & Audit Trail', 'Immutable tenant activity audit logs & security posture checks')
     .addTag('13. Support & SLA Tickets', 'Customer service tickets, SLA breach timers & resolution workflows')
     .addTag('14. Workspace & Organization', 'Tenant workspace profile, quota visibility & top-up requests')
+    .addTag('14. Custom Fields Builder', 'Per-tenant custom CRM fields on Leads, Contacts & Deals')
     .addTag('14. Product & HSN Catalog', 'B2B SKU catalogue, GST rates & HSN/SAC codes')
     .addTag('14. Document Center & Compliance Vault', 'GST certificates, brochures, contracts & signed sales assets')
     .addTag('15. SaaS Billing, Razorpay Checkout & Webhooks', 'Plans, proration, Razorpay subscriptions, invoices & GST credit notes')

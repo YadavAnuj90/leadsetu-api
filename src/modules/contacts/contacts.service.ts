@@ -13,6 +13,7 @@ import { HydratedDocument, Model, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.module';
 import { maskPhoneNumber, resolveOwnerScopeFilter } from '../auth/identity.util';
 import { CreateContactDto } from './dto/contacts.dto';
+import { CustomFieldsService } from '../custom-fields/custom-fields.service';
 
 export type ContactDocument = HydratedDocument<Contact>;
 
@@ -215,6 +216,9 @@ export class Contact {
   @Prop({ default: '' })
   notes!: string;
 
+  @Prop({ type: Object, default: {} })
+  customFields!: Record<string, unknown>;
+
   @Prop({ type: Array, default: [] })
   activities!: ContactActivity[];
 }
@@ -229,6 +233,7 @@ export class ContactsService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     @Optional() private readonly auditService?: AuditService,
+    @Optional() private readonly customFieldsService?: CustomFieldsService,
   ) {}
 
   async verifyAuth(authHeader?: string) {
@@ -366,6 +371,7 @@ export class ContactsService {
       creditUtilizationPct,
       tags: doc.tags || [],
       notes: doc.notes || '',
+      customFields: doc.customFields || {},
       activities: doc.activities || [],
       createdAt: raw.createdAt
         ? new Date(raw.createdAt).toISOString()
@@ -474,6 +480,14 @@ export class ContactsService {
     const cleanGstin = dto.gstin?.trim().toUpperCase() || '';
     const gstCheck = cleanGstin ? validateIndianGstin(cleanGstin) : null;
 
+    const sanitizedCustomFields = this.customFieldsService
+      ? await this.customFieldsService.sanitizeEntityValues(
+          auth.tenantId,
+          'contact',
+          dto.customFields,
+        )
+      : dto.customFields || {};
+
     const doc = await this.contactModel.create({
       tenantId: new Types.ObjectId(auth.tenantId),
       ownerId: new Types.ObjectId(auth.userId),
@@ -495,6 +509,7 @@ export class ContactsService {
       creditHoldReason: dto.creditHoldReason?.trim() || '',
       tags: Array.isArray(dto.tags) ? dto.tags : [],
       notes: dto.notes?.trim() || '',
+      customFields: sanitizedCustomFields,
     });
     return this.toDto(doc);
   }
@@ -556,6 +571,17 @@ export class ContactsService {
       doc.creditHoldReason = dto.creditHoldReason.trim();
     if (dto.tags !== undefined) doc.tags = dto.tags;
     if (dto.notes !== undefined) doc.notes = dto.notes.trim();
+    if (dto.customFields !== undefined) {
+      doc.customFields = this.customFieldsService
+        ? await this.customFieldsService.sanitizeEntityValues(
+            auth.tenantId,
+            'contact',
+            dto.customFields,
+            doc.customFields,
+          )
+        : { ...(doc.customFields || {}), ...dto.customFields };
+      doc.markModified('customFields');
+    }
 
     await doc.save();
 

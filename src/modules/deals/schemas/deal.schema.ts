@@ -3,13 +3,7 @@ import { HydratedDocument, Types } from 'mongoose';
 
 export type DealDocument = HydratedDocument<Deal>;
 
-export type DealStage =
-  | 'qualified'
-  | 'discovery'
-  | 'proposal'
-  | 'negotiation'
-  | 'won'
-  | 'lost';
+export type DealStage = string;
 
 export interface DealActivity {
   id: string;
@@ -34,6 +28,9 @@ export class Deal {
   @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
   ownerId!: Types.ObjectId;
 
+  @Prop({ type: Types.ObjectId, ref: 'Pipeline', index: true, default: null })
+  pipelineId?: Types.ObjectId | null;
+
   @Prop({ required: true, trim: true })
   title!: string;
 
@@ -56,11 +53,18 @@ export class Deal {
   value!: number;
 
   @Prop({
+    type: String,
     default: 'qualified',
-    enum: ['qualified', 'discovery', 'proposal', 'negotiation', 'won', 'lost'],
     index: true,
   })
   stage!: DealStage;
+
+  @Prop({
+    type: String,
+    default: 'open',
+    enum: ['open', 'won', 'lost'],
+  })
+  stageCategory?: 'open' | 'won' | 'lost';
 
   @Prop({ type: Number, default: 40 })
   probability!: number;
@@ -76,6 +80,9 @@ export class Deal {
 
   @Prop({ default: '' })
   notes!: string;
+
+  @Prop({ type: Object, default: {} })
+  customFields!: Record<string, unknown>;
 
   @Prop({ type: [String], default: [] })
   tags!: string[];

@@ -71,8 +71,13 @@ export class CreateDealSwaggerDto implements CreateDealDto {
   value?: number;
 
   @ApiPropertyOptional({
-    description: 'Kanban pipeline stage',
-    enum: ['qualified', 'discovery', 'proposal', 'negotiation', 'won', 'lost'],
+    description: 'Target Sales Pipeline ID (defaults to workspace default pipeline)',
+    example: '67401a2f8c1b9e0012ab3456',
+  })
+  pipelineId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Kanban pipeline stage ID (supports both default stages and custom pipeline stages)',
     default: 'qualified',
     example: 'proposal',
   })
@@ -118,6 +123,13 @@ export class CreateDealSwaggerDto implements CreateDealDto {
     example: ['18% GST Quote', 'Bulk Order'],
   })
   tags?: string[];
+
+  @ApiPropertyOptional({
+    description: 'Tenant-defined custom field key/value pairs (e.g. Dispatch Mode, Payment Terms)',
+    type: Object,
+    example: { dispatch_mode: 'Ex-Works' },
+  })
+  customFields?: Record<string, unknown>;
 }
 
 export class UpdateDealSwaggerDto
@@ -159,10 +171,14 @@ export class DealsController {
     example: 'Switchgear',
   })
   @ApiQuery({
+    name: 'pipelineId',
+    required: false,
+    description: 'Filter deals belonging to a specific sales pipeline ID (or "all")',
+  })
+  @ApiQuery({
     name: 'stage',
     required: false,
-    enum: ['all', 'qualified', 'discovery', 'proposal', 'negotiation', 'won', 'lost'],
-    description: 'Filter deals by Kanban stage',
+    description: 'Filter deals by Kanban stage ID (or "all")',
   })
   @ApiResponse({
     status: 200,
@@ -170,7 +186,7 @@ export class DealsController {
   })
   async findAll(
     @Headers('authorization') authorization: string | undefined,
-    @Query() query: { search?: string; stage?: string },
+    @Query() query: { search?: string; stage?: string; pipelineId?: string },
   ) {
     const auth = await this.dealsService.verifyAuth(authorization);
     return this.dealsService.findAll(auth, query);

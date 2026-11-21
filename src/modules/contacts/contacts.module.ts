@@ -10,6 +10,7 @@ import {
   ContactsService,
 } from './contacts.service';
 import { CreateContactDto, UpdateContactDto } from './dto/contacts.dto';
+import { CustomFieldsModule } from '../custom-fields/custom-fields.module';
 
 export {
   Contact,
@@ -24,6 +25,7 @@ export type { ContactDocument };
 @Module({
   imports: [
     ConfigModule,
+    CustomFieldsModule,
     MongooseModule.forFeature([{ name: Contact.name, schema: ContactSchema }]),
     JwtModule.registerAsync({
       imports: [ConfigModule],

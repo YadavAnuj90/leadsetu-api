@@ -108,6 +108,13 @@ export class CreateLeadSwaggerDto implements CreateLeadDto {
       'Urgent requirement for 500 industrial switchgear units with GST proforma invoice.',
   })
   notes?: string;
+
+  @ApiPropertyOptional({
+    description: 'Tenant-defined custom field key/value pairs (e.g. MOQ, Plant Location)',
+    type: Object,
+    example: { moq: 500, plant_location: 'Noida Phase-II' },
+  })
+  customFields?: Record<string, unknown>;
 }
 
 export class UpdateLeadSwaggerDto
