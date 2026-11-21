@@ -86,6 +86,18 @@ export class Lead {
   @Prop({ default: '' })
   aiInsight!: string;
 
+  @Prop({ default: '' })
+  aiSummary!: string;
+
+  @Prop({ default: '' })
+  aiNextAction!: string;
+
+  @Prop({ type: [String], default: [] })
+  aiReasons!: string[];
+
+  @Prop({ default: '' })
+  aiScoredAt!: string;
+
   @Prop({ type: [String], default: [] })
   tags!: string[];
 

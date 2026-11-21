@@ -25,6 +25,9 @@ export class UpdateSecuritySettingsDto {
   blockAgentExport?: boolean;
 }
 
+export type AuditSeverity = 'info' | 'warning' | 'critical';
+export type AuditVisibility = 'tenant' | 'platform';
+
 export interface RecordAuditInput {
   tenantId: string;
   actorId: string;
@@ -36,7 +39,16 @@ export interface RecordAuditInput {
   entityType: AuditEntityType;
   entityId?: string;
   entityLabel?: string;
+  resourceType?: string;
+  resourceId?: string;
   summary: string;
+  severity?: AuditSeverity;
+  visibility?: AuditVisibility;
+  before?: Record<string, unknown>;
+  after?: Record<string, unknown>;
+  ip?: string;
+  userAgent?: string;
+  requestId?: string;
   metadata?: Record<string, unknown>;
 }
 

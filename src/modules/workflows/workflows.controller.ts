@@ -88,6 +88,20 @@ export class WorkflowsController {
     return this.workflowsService.create(auth, dto);
   }
 
+  @Post('ai-draft')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Convert natural-language English/Hinglish instruction into structured workflow trigger, conditions, action & WhatsApp template',
+  })
+  async draftWithAi(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: { prompt: string; language?: string },
+  ) {
+    const auth = await this.workflowsService.verifyAuth(authorization);
+    return this.workflowsService.draftWithAi(auth, body || {});
+  }
+
   @Patch(':id/toggle')
   @ApiOperation({
     summary: 'Toggle a workflow between Active and Paused',

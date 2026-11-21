@@ -57,6 +57,12 @@ export class SubscribePlanDto {
       'Thank you for choosing Leadsetu to bridge every B2B lead, deal & GST workflow!',
   })
   greetingNote?: string;
+
+  @ApiPropertyOptional({
+    description: 'Optional Super Admin promo/coupon code applied before 18% GST',
+    example: 'LAUNCH20',
+  })
+  couponCode?: string;
 }
 
 export interface TenantAuthContext {

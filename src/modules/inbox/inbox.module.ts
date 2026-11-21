@@ -560,6 +560,27 @@ export class InboxController {
     return this.inboxService.markConversationRead(auth, id);
   }
 
+  @Post(':id/ai-assist')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Generate SetuAI Hinglish/English WhatsApp Reply Draft & Conversation Summary using thread + Products + Quotes context',
+  })
+  async generateAiAssist(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body()
+    body?: {
+      mode?: 'both' | 'reply' | 'summary';
+      language?: 'hinglish' | 'english' | 'hindi';
+      tone?: 'helpful' | 'closing' | 'followup';
+      customInstruction?: string;
+    },
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.generateAiAssistForConversation(auth, id, body);
+  }
+
   @Patch(':id/link')
   @ApiOperation({ summary: 'Link or unlink a conversation thread to a CRM Lead, Contact, Deal, or Ticket' })
   @ApiBody({ type: LinkConversationEntitySwaggerDto })

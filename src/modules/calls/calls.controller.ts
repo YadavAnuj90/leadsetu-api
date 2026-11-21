@@ -8,7 +8,9 @@ import {
   Param,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
+import type { Request } from 'express';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -180,15 +182,48 @@ export class CallsController {
   @Get(':id/telemetry')
   @ApiOperation({
     summary:
-      'Get aggregated connection summary and ordered WebRTC telemetry snapshots for a call',
+      'Get aggregated connection summary and ordered WebRTC telemetry snapshots for a call (Super Admin requires ?supportReason=)',
   })
   @ApiParam({ name: 'id', description: 'Call log record ID' })
+  @ApiQuery({ name: 'supportReason', required: false })
   async getCallTelemetry(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,
+    @Query('supportReason') supportReason?: string,
+    @Req() req?: Request,
   ) {
     const auth = await this.callsService.verifyAuthHeader(authorization);
-    return this.callsService.getCallTelemetry(auth, id);
+    return this.callsService.getCallTelemetry(auth, id, supportReason, {
+      ip: req?.ip || '',
+      userAgent: String(req?.headers?.['user-agent'] || ''),
+      requestId: String(req?.headers?.['x-request-id'] || ''),
+    });
+  }
+
+  @Post(':id/support-access')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Audited Super Admin Support Access: reveal participant identities & telemetry samples for a call given a mandatory ticket/reason (writes immutable audit log)',
+  })
+  @ApiParam({ name: 'id', description: 'Call log record ID' })
+  async requestSupportReveal(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() body: { reason?: string },
+    @Req() req?: Request,
+  ) {
+    const auth = await this.callsService.verifyAuthHeader(authorization);
+    return this.callsService.requestCallSupportReveal(
+      auth,
+      id,
+      body?.reason || '',
+      {
+        ip: req?.ip || '',
+        userAgent: String(req?.headers?.['user-agent'] || ''),
+        requestId: String(req?.headers?.['x-request-id'] || ''),
+      },
+    );
   }
 
   @Post(':id/disposition')

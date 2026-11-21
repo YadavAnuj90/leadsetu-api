@@ -334,6 +334,30 @@ export class LeadsController {
     return this.leadsService.addActivity(auth, id, body);
   }
 
+  @Post(':id/ai-analyze')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Run SetuAI 360° Lead Intent Scoring, Summary & Next Best Action recommendation',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'Unique lead record ID',
+    example: 'ld_01a2b3c4d5e6',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Returns updated lead with live LLM `aiScore`, `aiLabel`, `aiSummary`, `aiNextAction`, and `aiReasons`.',
+  })
+  async analyzeWithAi(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+  ) {
+    const auth = await this.leadsService.verifyAuth(authorization);
+    return this.leadsService.analyzeWithAi(auth, id);
+  }
+
   @Delete(':id')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({

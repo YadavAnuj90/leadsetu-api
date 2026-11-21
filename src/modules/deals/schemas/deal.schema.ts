@@ -13,7 +13,14 @@ export type DealStage =
 
 export interface DealActivity {
   id: string;
-  type: 'created' | 'stage_change' | 'note' | 'quote' | 'call' | 'whatsapp';
+  type:
+    | 'created'
+    | 'stage_change'
+    | 'note'
+    | 'quote'
+    | 'call'
+    | 'whatsapp'
+    | 'ai_score';
   description: string;
   authorName: string;
   createdAt: string;
@@ -72,6 +79,27 @@ export class Deal {
 
   @Prop({ type: [String], default: [] })
   tags!: string[];
+
+  @Prop({ type: Number, default: 75 })
+  aiScore!: number;
+
+  @Prop({ default: 'Warm', enum: ['Hot', 'Warm', 'Cold'] })
+  aiLabel!: 'Hot' | 'Warm' | 'Cold';
+
+  @Prop({ default: '' })
+  aiInsight!: string;
+
+  @Prop({ default: '' })
+  aiSummary!: string;
+
+  @Prop({ default: '' })
+  aiNextAction!: string;
+
+  @Prop({ type: [String], default: [] })
+  aiReasons!: string[];
+
+  @Prop({ default: '' })
+  aiScoredAt!: string;
 
   @Prop({ type: Array, default: [] })
   activities!: DealActivity[];

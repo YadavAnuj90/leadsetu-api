@@ -23,6 +23,7 @@ import { SuperAdminService } from '../super-admin/super-admin.service';
 import { resolveOwnerScopeFilter } from '../auth/identity.util';
 import { InboxService } from '../inbox/inbox.service';
 import { Lead, LeadDocument } from '../leads/schemas/lead.schema';
+import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 
 export type WorkflowDocument = HydratedDocument<Workflow>;
 
@@ -129,6 +130,7 @@ export class WorkflowsService {
     private readonly configService: ConfigService,
     private readonly inboxService: InboxService,
     @Optional() private readonly superAdminService?: SuperAdminService,
+    @Optional() private readonly aiBridge?: AiBridgeService,
   ) {}
 
   async verifyAuth(authHeader?: string) {
@@ -762,5 +764,257 @@ export class WorkflowsService {
       })
       .exec();
     return { success: true, id };
+  }
+
+  private buildLocalWorkflowDraft(promptText: string) {
+    const goal = promptText.trim();
+    const lower = goal.toLowerCase();
+
+    const sourceFilter = /indiamart/i.test(lower)
+      ? 'indiamart'
+      : /justdial/i.test(lower)
+        ? 'justdial'
+        : /meta|facebook|instagram/i.test(lower)
+          ? 'meta_ads'
+          : /website|web form/i.test(lower)
+            ? 'website'
+            : /whatsapp/i.test(lower) &&
+                !/send.*whatsapp|on whatsapp|via whatsapp/i.test(lower)
+              ? 'whatsapp'
+              : 'all';
+
+    const hourMatch = lower.match(/(\d+)\s*(?:h|hr|hrs|hour|hours)/i);
+    const dayMatch = lower.match(/(\d+)\s*(?:d|day|days)/i);
+    const staleHours = hourMatch
+      ? Math.min(720, Math.max(1, Number(hourMatch[1])))
+      : dayMatch
+        ? Math.min(720, Math.max(1, Number(dayMatch[1]) * 24))
+        : 24;
+
+    const cityMatch = goal.match(
+      /\b(Noida|Delhi-NCR|Delhi|Gurugram|Gurgaon|Pune|Mumbai|Ahmedabad|Bengaluru|Bangalore|Chennai|Hyderabad|Surat|Jaipur)\b/i,
+    );
+    const cityLabel = cityMatch ? cityMatch[1] : '';
+
+    let triggerType: WorkflowTriggerType = 'lead.created';
+    if (/overdue|udhaar|due date|payment pending|unpaid invoice/i.test(lower)) {
+      triggerType = 'invoice.overdue';
+    } else if (
+      /stays in|stale|no reply for|uncontacted for|inactive for|sit in/i.test(
+        lower,
+      ) &&
+      !/when.*arrives|new.*lead/i.test(lower)
+    ) {
+      triggerType = 'lead.stale_followup';
+    } else if (/hot|score.*80|high intent|ai score/i.test(lower)) {
+      triggerType = 'lead.hot_scored';
+    } else if (/deal.*stage|kanban|moved to|closed won/i.test(lower)) {
+      triggerType = 'deal.stage_changed';
+    } else if (
+      /inbound.*whatsapp|buyer replies|incoming whatsapp/i.test(lower)
+    ) {
+      triggerType = 'whatsapp.inbound';
+    }
+
+    const staleStage = /proposal|quote/i.test(lower)
+      ? 'proposal'
+      : /qualified/i.test(lower)
+        ? 'qualified'
+        : /contacted/i.test(lower)
+          ? 'contacted'
+          : 'new';
+
+    let actionType: WorkflowActionType = 'send_whatsapp_create_task';
+    if (
+      triggerType === 'invoice.overdue' ||
+      /payment reminder|udhaar|razorpay reminder/i.test(lower)
+    ) {
+      actionType = 'send_payment_reminder';
+    } else if (/generate.*invoice|tax invoice|18% gst invoice/i.test(lower)) {
+      actionType = 'generate_gst_invoice';
+    } else if (/senior closer|assign.*closer|escalate/i.test(lower)) {
+      actionType = 'assign_senior_closer';
+    }
+
+    const sourceLabel =
+      sourceFilter === 'indiamart'
+        ? 'IndiaMART'
+        : sourceFilter === 'justdial'
+          ? 'Justdial'
+          : sourceFilter === 'meta_ads'
+            ? 'Meta Lead Ads'
+            : sourceFilter === 'website'
+              ? 'Website'
+              : 'All Channels';
+
+    const conditionParts: string[] = [];
+    if (sourceFilter !== 'all') {
+      conditionParts.push(`Lead Source = ${sourceLabel}`);
+    } else {
+      conditionParts.push('Lead Source IN [IndiaMART, WhatsApp, Meta Ads]');
+    }
+    if (cityLabel) {
+      conditionParts.push(`City = ${cityLabel}`);
+    }
+    if (triggerType === 'lead.hot_scored') {
+      conditionParts.push('SetuAI Score >= 80 (Hot)');
+    }
+    if (triggerType === 'lead.stale_followup') {
+      conditionParts.push(
+        `Stage = ${staleStage.toUpperCase()} for >= ${staleHours}h`,
+      );
+    }
+    const conditionSummary = conditionParts.join(' AND ');
+
+    const nudgeClause =
+      hourMatch || dayMatch || /nudge|follow[- ]?up/i.test(lower)
+        ? ` + Schedule ${staleHours}h Follow-Up Nudge Task`
+        : ' + Create 15-Min Call Reminder Task';
+
+    const actionSummary =
+      actionType === 'send_payment_reminder'
+        ? 'Send Hinglish WhatsApp Payment Reminder with Razorpay Link + Notify Accounts Team'
+        : actionType === 'generate_gst_invoice'
+          ? 'Auto-Generate 18% GST Tax Invoice Draft + Share Razorpay Link on WhatsApp'
+          : actionType === 'assign_senior_closer'
+            ? `Assign to Senior Closer + High-Priority Alert${nudgeClause}`
+            : `Send GST Brochure & Catalogue on WhatsApp${nudgeClause}`;
+
+    const whatsappTemplateBody =
+      actionType === 'send_payment_reminder'
+        ? 'Namaste {{buyer_name}} ji 🙏, gentle reminder regarding your pending GST invoice for {{company}} ({{deal_value}}). You can complete payment directly via the Razorpay link shared. Reply if you need assistance!'
+        : triggerType === 'lead.stale_followup'
+          ? `Namaste {{buyer_name}} ji 👋, checking in on your requirement for {{company}}${cityLabel ? ` (${cityLabel})` : ''} ({{deal_value}}). Let us know if you need our GST proforma quotation or priority dispatch!`
+          : `Namaste {{buyer_name}} ji 👋, thank you for your ${sourceFilter !== 'all' ? `${sourceLabel} ` : ''}inquiry for {{company}} ({{city}}). Sharing our GST brochure, product catalogue & quotation details right away!`;
+
+    const name =
+      triggerType === 'invoice.overdue'
+        ? 'Overdue GST Invoice -> WhatsApp Razorpay Payment Nudge'
+        : triggerType === 'lead.stale_followup'
+          ? `${staleHours}h Stale ${staleStage.toUpperCase()} Lead -> Auto WhatsApp Follow-Up`
+          : `${sourceFilter !== 'all' ? sourceLabel : 'New'}${cityLabel ? ` ${cityLabel}` : ''} Lead -> Instant WhatsApp GST Brochure & ${staleHours}h Nudge`;
+
+    return {
+      name,
+      description: `AI-generated rule from: "${goal.slice(0, 140)}"`,
+      triggerType,
+      sourceFilter,
+      staleStage,
+      staleHours,
+      conditionSummary,
+      actionType,
+      actionSummary,
+      whatsappTemplateBody,
+    };
+  }
+
+  async draftWithAi(
+    auth: { userId: string; tenantId: string; email: string },
+    body: { prompt?: string; language?: string },
+  ) {
+    const prompt = String(body?.prompt || '').trim();
+    if (!prompt) {
+      throw new BadRequestException(
+        'Please describe the automation rule you want SetuAI to build.',
+      );
+    }
+
+    await this.superAdminService?.consumeTenantQuota(auth.tenantId, 'ai', 1);
+
+    const fallback = this.buildLocalWorkflowDraft(prompt);
+    const aiRes = this.aiBridge
+      ? await this.aiBridge
+          .draftWorkflowRule(
+            {
+              tenantId: auth.tenantId,
+              userId: auth.userId,
+              userRole: 'owner',
+              context: {
+                prompt,
+                goal: prompt,
+                language: body?.language || 'hinglish',
+              },
+            },
+            { skipMetering: true, timeoutMs: 7500 },
+          )
+          .catch(() => null)
+      : null;
+
+    const validTriggers = new Set<WorkflowTriggerType>([
+      'lead.created',
+      'lead.hot_scored',
+      'lead.stale_followup',
+      'deal.stage_changed',
+      'invoice.overdue',
+      'whatsapp.inbound',
+    ]);
+    const validActions = new Set<WorkflowActionType>([
+      'send_whatsapp_create_task',
+      'assign_senior_closer',
+      'generate_gst_invoice',
+      'send_payment_reminder',
+    ]);
+    const validSources = new Set([
+      'all',
+      'indiamart',
+      'website',
+      'meta_ads',
+      'whatsapp',
+      'justdial',
+    ]);
+    const validStaleStages = new Set([
+      'new',
+      'proposal',
+      'contacted',
+      'qualified',
+      'any',
+    ]);
+
+    const s = aiRes?.structured;
+    const triggerType =
+      s?.triggerType && validTriggers.has(s.triggerType as WorkflowTriggerType)
+        ? (s.triggerType as WorkflowTriggerType)
+        : fallback.triggerType;
+    const actionType =
+      s?.actionType && validActions.has(s.actionType as WorkflowActionType)
+        ? (s.actionType as WorkflowActionType)
+        : fallback.actionType;
+    const sourceFilter =
+      s?.sourceFilter && validSources.has(s.sourceFilter)
+        ? s.sourceFilter
+        : fallback.sourceFilter;
+    const staleStage =
+      s?.staleStage && validStaleStages.has(s.staleStage)
+        ? s.staleStage
+        : fallback.staleStage;
+    const staleHours =
+      typeof s?.staleHours === 'number' && s.staleHours >= 0
+        ? Math.min(720, Math.round(s.staleHours))
+        : fallback.staleHours;
+
+    return {
+      prompt,
+      name: s?.name?.trim() || fallback.name,
+      description: s?.description?.trim() || fallback.description,
+      triggerType,
+      sourceFilter,
+      staleStage,
+      staleHours,
+      conditionSummary:
+        s?.conditionSummary?.trim() ||
+        (Array.isArray(s?.conditions) && s.conditions.length > 0
+          ? s.conditions.join(' AND ')
+          : fallback.conditionSummary),
+      actionType,
+      actionSummary:
+        s?.actionSummary?.trim() ||
+        (Array.isArray(s?.actions) && s.actions.length > 0
+          ? s.actions.join(' + ')
+          : fallback.actionSummary),
+      whatsappTemplateBody:
+        s?.whatsappTemplateBody?.trim() || fallback.whatsappTemplateBody,
+      provider: aiRes?.provider || 'fallback',
+      model: aiRes?.model || 'leadsetu-heuristic-v1',
+    };
   }
 }

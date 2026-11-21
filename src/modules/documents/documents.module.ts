@@ -42,6 +42,7 @@ import { AuditService } from '../audit/audit.module';
 import { resolveOwnerScopeFilter } from '../auth/identity.util';
 import { uploadToCloudinary } from '../auth/cloudinary.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
+import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 
 export type DocumentCategory =
   | 'gst_certificate'
@@ -241,6 +242,7 @@ export class DocumentsService {
     private readonly configService: ConfigService,
     @Optional() private readonly auditService?: AuditService,
     @Optional() private readonly superAdminService?: SuperAdminService,
+    @Optional() private readonly aiBridge?: AiBridgeService,
   ) {}
 
   async verifyAuth(authHeader?: string) {
@@ -481,6 +483,10 @@ export class DocumentsService {
       summary: `Uploaded ${doc.category} document "${doc.title}" (${doc.docCode})`,
     });
 
+    this.aiBridge
+      ?.syncTenantKnowledgeIndex(auth.tenantId, auth.userId)
+      .catch(() => {});
+
     return this.toDto(doc, false);
   }
 
@@ -530,6 +536,10 @@ export class DocumentsService {
       entityLabel: `${doc.docCode} · ${doc.title}`,
       summary: `Updated metadata on document "${doc.title}"`,
     });
+
+    this.aiBridge
+      ?.syncTenantKnowledgeIndex(auth.tenantId, auth.userId)
+      .catch(() => {});
 
     return this.toDto(doc, false);
   }

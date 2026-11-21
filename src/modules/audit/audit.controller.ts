@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Headers, Patch, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Patch, Query, Req } from '@nestjs/common';
+import type { Request } from 'express';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -70,8 +71,13 @@ export class AuditController {
   async updateSecurity(
     @Headers('authorization') authorization: string | undefined,
     @Body() dto: UpdateSecuritySettingsDto,
+    @Req() req: Request,
   ) {
     const auth = await this.auditService.verifyAuth(authorization);
-    return this.auditService.updateSecuritySettings(auth, dto);
+    return this.auditService.updateSecuritySettings(auth, dto, {
+      ip: req.ip || '',
+      userAgent: String(req.headers['user-agent'] || ''),
+      requestId: String(req.headers['x-request-id'] || ''),
+    });
   }
 }

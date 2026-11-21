@@ -127,6 +127,13 @@ export class AuthService {
       tsv: tenant.sessionVersion ?? 1,
     };
 
+    // Refresh tokens carry no email/role/tenantId PII—server verifies identity via sub + refreshTokenHash.
+    const refreshPayload = {
+      sub: user._id.toString(),
+      typ: 'refresh',
+      jti: randomBytes(12).toString('hex'),
+    };
+
     const accessSecret =
       this.configService.get<string>('JWT_SECRET') ||
       'leadsetu_super_secret_access_key_2026_delhi_ncr';
@@ -148,7 +155,7 @@ export class AuthService {
         secret: accessSecret,
         expiresIn: accessExpiresIn,
       }),
-      this.jwtService.signAsync(payload, {
+      this.jwtService.signAsync(refreshPayload, {
         secret: refreshSecret,
         expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRES_IN') || '7d',
       }),
@@ -518,16 +525,17 @@ export class AuthService {
       this.configService.get<string>('JWT_REFRESH_SECRET') ||
       'leadsetu_super_secret_refresh_key_2026_delhi_ncr';
 
-    let payload: { sub: string; tenantId: string; sv?: number; tsv?: number };
+    let payload: { sub: string; typ?: string };
     try {
       payload = await this.jwtService.verifyAsync<{
         sub: string;
-        tenantId: string;
-        sv?: number;
-        tsv?: number;
+        typ?: string;
       }>(refreshToken, { secret: refreshSecret });
     } catch {
       throw new UnauthorizedException('Refresh token expired or invalid.');
+    }
+    if (payload.typ && payload.typ !== 'refresh') {
+      throw new UnauthorizedException('Invalid refresh token type.');
     }
 
     const user = await this.userModel.findById(payload.sub).exec();

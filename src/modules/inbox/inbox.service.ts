@@ -37,6 +37,7 @@ import {
   PlatformWhatsAppProviderConfig,
 } from '../super-admin/schemas/platform-config.schema';
 import { SuperAdminService } from '../super-admin/super-admin.service';
+import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 import { Ticket, TicketDocument } from '../tickets/tickets.service';
 import { MetaWhatsAppService } from './meta-whatsapp.service';
 import {
@@ -269,6 +270,7 @@ export class InboxService {
     private readonly configService: ConfigService,
     @Optional() private readonly auditService?: AuditService,
     @Optional() private readonly superAdminService?: SuperAdminService,
+    @Optional() private readonly aiBridge?: AiBridgeService,
   ) {}
 
   registerRealtimeEmitter(
@@ -2743,6 +2745,7 @@ export class InboxService {
       entitySnapshot: snapshot,
     });
 
+    doc.aiSuggestedReply = '';
     await doc.save();
     this.emitRealtimeConversationUpdate(doc, 'message.outbound');
     const maskPhones = this.auditService
@@ -2798,6 +2801,354 @@ export class InboxService {
       ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
       : false;
     return this.toDto(doc, maskPhones);
+  }
+
+  // ─── SetuAI Inbox Reply Draft & Conversation Summary ───────────────────────
+
+  private async buildConversationAiContext(
+    tenantId: string,
+    conv: ConversationDocument,
+    opts?: {
+      language?: string;
+      tone?: string;
+      customInstruction?: string;
+    },
+  ) {
+    const tenantOid = new Types.ObjectId(tenantId);
+    const db = this.convModel.db;
+    const msgs = (conv.messages || []).slice(-8);
+    const lastInbound =
+      [...msgs].reverse().find((m) => m.direction === 'inbound')?.content ||
+      msgs[msgs.length - 1]?.content ||
+      '';
+
+    const recentMessages = msgs.map((m) => ({
+      direction: m.direction,
+      sender: m.direction === 'inbound' ? conv.contactName : m.senderName || 'Sales Rep',
+      content: m.content,
+      createdAt: m.createdAt,
+    }));
+
+    const transcript = recentMessages
+      .map((m) => `${m.sender}: ${m.content}`)
+      .join('\n');
+
+    // Load active product SKUs relevant to conversation text
+    let productsCatalog: Array<{
+      name: string;
+      sku: string;
+      hsnSac: string;
+      moq: number;
+      unit: string;
+      unitPrice: number;
+      gstRate: number;
+      description: string;
+      brochureUrl: string;
+    }> = [];
+    try {
+      const products = await db
+        .collection('products')
+        .find({ tenantId: tenantOid, isActive: { $ne: false } })
+        .sort({ updatedAt: -1 })
+        .limit(20)
+        .toArray();
+      const lowerText = transcript.toLowerCase();
+      const matched = products.filter((p) => {
+        const nameWords = String(p.name || '')
+          .toLowerCase()
+          .split(/\s+/)
+          .filter((w) => w.length >= 4);
+        const sku = String(p.sku || '').toLowerCase();
+        const hsn = String(p.hsnSac || '').toLowerCase();
+        return (
+          (sku && lowerText.includes(sku)) ||
+          (hsn && lowerText.includes(hsn)) ||
+          nameWords.some((w) => lowerText.includes(w))
+        );
+      });
+      const picked = (matched.length > 0 ? matched : products).slice(0, 5);
+      productsCatalog = picked.map((p) => ({
+        name: String(p.name || ''),
+        sku: String(p.sku || ''),
+        hsnSac: String(p.hsnSac || '850440'),
+        moq: Number(p.moq || 1),
+        unit: String(p.unit || 'pcs'),
+        unitPrice: Number(p.unitPrice ?? p.price ?? 0),
+        gstRate: Number(p.gstRate ?? 18),
+        description: String(p.description || ''),
+        brochureUrl: String(p.brochureUrl || ''),
+      }));
+    } catch {
+      productsCatalog = [];
+    }
+
+    // Load Document Vault brochures / GST certificates / specs for this workspace
+    let documentsVault: Array<{
+      docCode: string;
+      title: string;
+      category: string;
+      documentNumber: string;
+      description: string;
+      externalUrl: string;
+    }> = [];
+    try {
+      const docs = await db
+        .collection('documents')
+        .find({ tenantId: tenantOid })
+        .sort({ createdAt: -1 })
+        .limit(6)
+        .toArray();
+      documentsVault = docs.map((d) => ({
+        docCode: String(d.docCode || ''),
+        title: String(d.title || ''),
+        category: String(d.category || 'brochure'),
+        documentNumber: String(d.documentNumber || ''),
+        description: String(d.description || ''),
+        externalUrl: String(d.externalUrl || ''),
+      }));
+    } catch {
+      documentsVault = [];
+    }
+
+    // Load recent quotations / invoices for this buyer
+    let quoteContext: Array<{
+      invoiceNumber: string;
+      docType: string;
+      grandTotal: number;
+      balanceDue: number;
+      paymentLink: string;
+      status: string;
+    }> = [];
+    try {
+      const last10 = extractLast10Digits(conv.phone);
+      const orClauses: Record<string, unknown>[] = [];
+      if (conv.linkedEntityType === 'lead' && conv.linkedEntityId) {
+        orClauses.push({ linkedLeadId: conv.linkedEntityId });
+      }
+      if (conv.linkedEntityType === 'deal' && conv.linkedEntityId) {
+        orClauses.push({ linkedDealId: conv.linkedEntityId });
+      }
+      if (last10.length >= 10) {
+        orClauses.push({ phone: { $regex: last10 } });
+      }
+      if (conv.company) {
+        orClauses.push({ clientName: conv.company });
+      }
+      if (orClauses.length > 0) {
+        const invs = await db
+          .collection('invoices')
+          .find({ tenantId: tenantOid, $or: orClauses })
+          .sort({ createdAt: -1 })
+          .limit(3)
+          .toArray();
+        quoteContext = invs.map((i) => ({
+          invoiceNumber: String(i.invoiceNumber || ''),
+          docType: String(i.docType || 'tax_invoice'),
+          grandTotal: Number(i.grandTotal || 0),
+          balanceDue: Number(i.balanceDue || 0),
+          paymentLink: String(i.paymentLink || ''),
+          status: String(i.status || ''),
+        }));
+      }
+    } catch {
+      quoteContext = [];
+    }
+
+    return {
+      conversationId: conv._id.toString(),
+      buyerName: conv.contactName,
+      contactName: conv.contactName,
+      company: conv.company || '',
+      city: conv.city || 'Delhi-NCR',
+      phone: conv.phone || '',
+      estimatedValue: conv.estimatedValue || 0,
+      language: opts?.language || 'hinglish',
+      tone: opts?.tone || 'helpful',
+      customInstruction: opts?.customInstruction || '',
+      lastInboundMessage: lastInbound,
+      recentMessages,
+      messages: recentMessages,
+      transcript,
+      productsCatalog,
+      documentsVault,
+      quoteContext,
+    };
+  }
+
+  private buildLocalConversationAiFallback(ctx: {
+    buyerName: string;
+    company: string;
+    city: string;
+    language: string;
+    lastInboundMessage: string;
+    productsCatalog: Array<{ name: string; unitPrice: number }>;
+    quoteContext: Array<{
+      invoiceNumber: string;
+      grandTotal: number;
+      paymentLink: string;
+    }>;
+  }) {
+    const lower = (ctx.lastInboundMessage || '').toLowerCase();
+    const topProduct = ctx.productsCatalog[0];
+    const topQuote = ctx.quoteContext[0];
+    const productHint = topProduct?.name
+      ? `${topProduct.name}${
+          topProduct.unitPrice
+            ? ` (₹${Number(topProduct.unitPrice).toLocaleString('en-IN')})`
+            : ''
+        }`
+      : 'your product requirement';
+
+    let replyDraft = '';
+    if (ctx.language === 'english') {
+      if (topQuote?.invoiceNumber && /quote|invoice|price|rate|pay|bill/i.test(lower)) {
+        replyDraft = `Hello ${ctx.buyerName}${ctx.company ? ` (${ctx.company})` : ''}, ${topQuote.invoiceNumber} for ₹${topQuote.grandTotal.toLocaleString('en-IN')} is ready.${
+          topQuote.paymentLink ? ` Pay link: ${topQuote.paymentLink}.` : ''
+        } Please confirm dispatch timing for ${ctx.city}.`;
+      } else {
+        replyDraft = `Hello ${ctx.buyerName}${ctx.company ? ` (${ctx.company})` : ''}, thank you for contacting us regarding ${productHint}. We supply with 18% GST billing and priority dispatch to ${ctx.city}. Please confirm required quantity/MOQ.`;
+      }
+    } else if (
+      topQuote?.invoiceNumber &&
+      /quote|invoice|price|rate|pay|bill|link/i.test(lower)
+    ) {
+      replyDraft = `Namaste ${ctx.buyerName} ji! ${topQuote.invoiceNumber} (₹${topQuote.grandTotal.toLocaleString('en-IN')}) ready hai.${
+        topQuote.paymentLink ? ` Payment link: ${topQuote.paymentLink}` : ''
+      } Kripya confirm karein taaki hum ${ctx.city} dispatch schedule karein.`;
+    } else {
+      replyDraft = `Namaste ${ctx.buyerName} ji! ${productHint} ke liye 18% GST bill aur best B2B rate available hai (${ctx.city} dispatch). Kripya exact quantity/MOQ share karein taaki hum turant Proforma Quote bhej sakein.`;
+    }
+
+    const snippet = (ctx.lastInboundMessage || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+    const summary = snippet
+      ? `${ctx.buyerName}${ctx.company ? ` (${ctx.company})` : ''} sent: "${snippet}${
+          ctx.lastInboundMessage.length > 140 ? '...' : ''
+        }" — Confirm quantity/GST quote & dispatch SLA.`
+      : `Thread open with ${ctx.buyerName}${ctx.company ? ` (${ctx.company})` : ''} — qualify MOQ, GSTIN, and timeline.`;
+
+    return { replyDraft, summary };
+  }
+
+  async generateAiAssistForConversation(
+    auth: InboxAuthContext,
+    id: string,
+    dto?: {
+      mode?: 'both' | 'reply' | 'summary';
+      language?: 'hinglish' | 'english' | 'hindi';
+      tone?: 'helpful' | 'closing' | 'followup';
+      customInstruction?: string;
+    },
+  ) {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new NotFoundException('Conversation not found.');
+    }
+    await this.superAdminService?.assertFeatureEnabled(auth.tenantId, 'aiScoring');
+
+    const ownerScope = await resolveOwnerScopeFilter(this.convModel.db, auth);
+    const conv = await this.convModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
+      })
+      .exec();
+    if (!conv) throw new NotFoundException('Conversation not found.');
+
+    const mode = dto?.mode || 'both';
+    const ctx = await this.buildConversationAiContext(auth.tenantId, conv, dto);
+    const fallback = this.buildLocalConversationAiFallback(ctx);
+
+    let nextReply = conv.aiSuggestedReply || '';
+    let nextSummary = conv.aiSummary || '';
+    let provider = 'leadsetu-fallback';
+    let model = 'leadsetu-heuristic-v1';
+
+    if (mode === 'both' || mode === 'reply') {
+      const replyRes = this.aiBridge
+        ? await this.aiBridge.draftWhatsAppReply({
+            tenantId: auth.tenantId,
+            userId: auth.userId,
+            userRole: auth.role,
+            context: ctx,
+          })
+        : null;
+      nextReply = replyRes?.result?.trim() || fallback.replyDraft;
+      if (replyRes?.provider) provider = replyRes.provider;
+      if (replyRes?.model) model = replyRes.model;
+    }
+
+    if (mode === 'both' || mode === 'summary') {
+      const sumRes = this.aiBridge
+        ? await this.aiBridge.summarizeConversation({
+            tenantId: auth.tenantId,
+            userId: auth.userId,
+            userRole: auth.role,
+            context: ctx,
+          })
+        : null;
+      nextSummary = sumRes?.result?.trim() || fallback.summary;
+      if (sumRes?.provider) provider = sumRes.provider;
+      if (sumRes?.model) model = sumRes.model;
+    }
+
+    conv.aiSuggestedReply = nextReply;
+    conv.aiSummary = nextSummary;
+    await conv.save();
+    this.emitRealtimeConversationUpdate(conv, 'conversation.updated');
+
+    const maskPhones = this.auditService
+      ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
+      : false;
+
+    return {
+      conversation: this.toDto(conv, maskPhones),
+      aiSummary: conv.aiSummary,
+      aiSuggestedReply: conv.aiSuggestedReply,
+      provider,
+      model,
+    };
+  }
+
+  private async refreshConversationAiOnInbound(conv: ConversationDocument) {
+    try {
+      const tenantId = conv.tenantId.toString();
+      const userId = conv.ownerId?.toString() || 'system-webhook';
+      const ctx = await this.buildConversationAiContext(tenantId, conv, {
+        language: 'hinglish',
+        tone: 'helpful',
+      });
+      const fallback = this.buildLocalConversationAiFallback(ctx);
+
+      const [replyRes, sumRes] = await Promise.all([
+        this.aiBridge
+          ? this.aiBridge
+              .draftWhatsAppReply({
+                tenantId,
+                userId,
+                userRole: 'owner',
+                context: ctx,
+              })
+              .catch(() => null)
+          : Promise.resolve(null),
+        this.aiBridge
+          ? this.aiBridge
+              .summarizeConversation({
+                tenantId,
+                userId,
+                userRole: 'owner',
+                context: ctx,
+              })
+              .catch(() => null)
+          : Promise.resolve(null),
+      ]);
+
+      conv.aiSuggestedReply = replyRes?.result?.trim() || fallback.replyDraft;
+      conv.aiSummary = sumRes?.result?.trim() || fallback.summary;
+      await conv.save();
+      this.emitRealtimeConversationUpdate(conv, 'conversation.updated');
+    } catch {
+      // Non-blocking AI auto-draft hook on webhook arrival
+    }
   }
 
   // ─── Meta Cloud API Webhooks (Challenge + Live Two-Way + Status Ticks) ───
@@ -3221,6 +3572,7 @@ export class InboxService {
               extracted.text,
               nowIso,
             );
+            await this.refreshConversationAiOnInbound(conv);
           }
 
           if (conv.linkedEntityType && conv.linkedEntityId) {

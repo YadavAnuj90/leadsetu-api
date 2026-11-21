@@ -39,7 +39,13 @@ async function bootstrap() {
     ],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Auth-Scope',
+      'X-Razorpay-Signature',
+      'X-Hub-Signature-256',
+    ],
   });
 
   // ─── Swagger / OpenAPI Configuration ─────────────────

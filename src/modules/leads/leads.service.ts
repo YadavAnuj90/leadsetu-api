@@ -25,6 +25,7 @@ import {
 } from '../auth/identity.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import { WorkflowsService } from '../workflows/workflows.service';
+import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 
 export interface CreateLeadDto {
   name: string;
@@ -68,6 +69,7 @@ export class LeadsService {
     @Optional() private readonly auditService?: AuditService,
     @Optional() private readonly superAdminService?: SuperAdminService,
     @Optional() private readonly workflowsService?: WorkflowsService,
+    @Optional() private readonly aiBridge?: AiBridgeService,
   ) {}
 
   async verifyAuth(authHeader?: string): Promise<AuthContext> {
@@ -98,6 +100,8 @@ export class LeadsService {
   }
 
   private computeAiIntelligence(input: {
+    name?: string;
+    city?: string;
     source?: LeadSource;
     status?: LeadStatus;
     estimatedValue?: number;
@@ -105,8 +109,24 @@ export class LeadsService {
     phone?: string;
     email?: string;
     notes?: string;
-  }): { aiScore: number; aiLabel: 'Hot' | 'Warm' | 'Cold'; aiInsight: string } {
+    whatsappMessages?: Array<{ direction?: string; content?: string }>;
+    quotesOrInvoices?: Array<{
+      invoiceNumber?: string;
+      docType?: string;
+      grandTotal?: number;
+      status?: string;
+    }>;
+    recentActivities?: Array<{ type?: string; description?: string }>;
+  }): {
+    aiScore: number;
+    aiLabel: 'Hot' | 'Warm' | 'Cold';
+    aiInsight: string;
+    aiSummary: string;
+    aiNextAction: string;
+    aiReasons: string[];
+  } {
     let score = 52;
+    const reasons: string[] = [];
 
     const sourceBoost: Record<string, number> = {
       whatsapp: 16,
@@ -118,27 +138,68 @@ export class LeadsService {
       website: 10,
       manual: 8,
     };
-    score += sourceBoost[input.source || 'whatsapp'] || 10;
+    const src = input.source || 'whatsapp';
+    score += sourceBoost[src] || 10;
+    if (src === 'whatsapp' || src === 'indiamart' || src === 'referral') {
+      reasons.push(`High-intent channel (${src.toUpperCase()})`);
+    }
 
     const val = Number(input.estimatedValue || 0);
-    if (val >= 500000) score += 18;
-    else if (val >= 200000) score += 14;
-    else if (val >= 50000) score += 9;
-    else if (val > 0) score += 5;
+    if (val >= 500000) {
+      score += 18;
+      reasons.push('Enterprise ticket size (₹5L+)');
+    } else if (val >= 200000) {
+      score += 14;
+      reasons.push('High B2B ticket size (₹2L+)');
+    } else if (val >= 50000) {
+      score += 9;
+      reasons.push('Qualified order value (₹50K+)');
+    } else if (val > 0) {
+      score += 5;
+    }
 
-    if (input.company?.trim()) score += 5;
+    if (input.company?.trim()) {
+      score += 5;
+      reasons.push(`Verified firm (${input.company.trim()})`);
+    }
     if (input.phone?.trim()) score += 5;
     if (input.email?.trim()) score += 3;
 
-    const notesLower = (input.notes || '').toLowerCase();
-    if (/urgent|immediate|bulk|gst|quote|quotation|ready|visit|payment|order/.test(notesLower)) {
+    const waMsgs = input.whatsappMessages || [];
+    const quotes = input.quotesOrInvoices || [];
+    const acts = input.recentActivities || [];
+
+    const combinedText = [
+      input.notes || '',
+      ...waMsgs.map((m) => m.content || ''),
+      ...acts.map((a) => a.description || ''),
+    ]
+      .join(' ')
+      .toLowerCase();
+
+    if (
+      /urgent|immediate|bulk|gst|quote|quotation|ready|visit|payment|order|po|finalize|turant|jaldi/.test(
+        combinedText,
+      )
+    ) {
       score += 8;
+      reasons.push('Commercial urgency / GST / MOQ intent detected');
+    }
+
+    if (waMsgs.some((m) => m.direction === 'inbound')) {
+      score += 6;
+      reasons.push('Two-way buyer WhatsApp engagement');
+    }
+    if (quotes.length > 0) {
+      score += 7;
+      reasons.push(`Quotation on record (${quotes[0]?.invoiceNumber || 'Sent'})`);
     }
 
     if (input.status === 'qualified' || input.status === 'proposal') {
       score = Math.max(score, 82);
     } else if (input.status === 'converted') {
       score = 98;
+      reasons.unshift('Lead converted to Deal');
     } else if (input.status === 'lost') {
       score = Math.min(score, 35);
     }
@@ -147,23 +208,302 @@ export class LeadsService {
     const aiLabel: 'Hot' | 'Warm' | 'Cold' =
       finalScore >= 80 ? 'Hot' : finalScore >= 58 ? 'Warm' : 'Cold';
 
-    let aiInsight =
-      'Send introductory WhatsApp message and confirm buyer requirement.';
+    const latestQuote = quotes[0];
+    const cityLabel = input.city?.trim() || 'Delhi-NCR';
+    const buyerLabel = input.name?.trim() || 'Buyer';
+    const companyLabel = input.company?.trim() || 'Direct Account';
+
+    let aiNextAction =
+      'Send introductory WhatsApp message, qualify MOQ & GSTIN, and confirm buyer requirement.';
     if (input.status === 'converted') {
-      aiInsight = 'Deal won! Trigger onboarding & GST tax invoice workflow.';
-    } else if (finalScore >= 85) {
-      aiInsight = `High-intent buyer (${
+      aiNextAction =
+        'Deal won! Issue 18% GST tax invoice with Razorpay payment link and trigger onboarding.';
+    } else if (latestQuote?.invoiceNumber) {
+      aiNextAction = `Follow up on ${latestQuote.invoiceNumber} (₹${Number(
+        latestQuote.grandTotal || val,
+      ).toLocaleString('en-IN')}) via WhatsApp and confirm dispatch timeline for ${cityLabel}.`;
+    } else if (finalScore >= 82 || input.status === 'proposal' || input.status === 'qualified') {
+      aiNextAction = `High-intent buyer (${
         val > 0 ? `₹${val.toLocaleString('en-IN')} est.` : 'priority'
-      }) — share GST proforma quote on WhatsApp within 15 mins.`;
-    } else if (finalScore >= 70) {
-      aiInsight =
-        'Strong B2B fit — schedule a 5-minute discovery call and send product catalogue PDF.';
+      }) — generate & send 18% GST Proforma Quotation PDF on WhatsApp within 15 mins.`;
+    } else if (finalScore >= 68) {
+      aiNextAction =
+        'Strong B2B fit — schedule a 5-minute discovery call and share product catalogue PDF on WhatsApp.';
     } else if (finalScore < 50) {
-      aiInsight =
+      aiNextAction =
         'Low immediate urgency — enroll in automated 7-day WhatsApp nurture sequence.';
     }
 
-    return { aiScore: finalScore, aiLabel, aiInsight };
+    const aiInsight = aiNextAction;
+    const latestInbound = [...waMsgs]
+      .reverse()
+      .find((m) => m.direction === 'inbound' && m.content);
+    const aiSummary = `${buyerLabel} (${companyLabel}, ${cityLabel}) enquired via ${src.toUpperCase()} for ~₹${val.toLocaleString(
+      'en-IN',
+    )}. ${
+      latestInbound?.content
+        ? `Latest buyer WhatsApp reply: "${String(latestInbound.content).slice(0, 110)}".`
+        : input.notes?.trim()
+        ? `Requirement: ${input.notes.trim().slice(0, 130)}.`
+        : aiNextAction
+    }`;
+
+    return {
+      aiScore: finalScore,
+      aiLabel,
+      aiInsight,
+      aiSummary,
+      aiNextAction,
+      aiReasons: reasons.slice(0, 4),
+    };
+  }
+
+  private async buildLeadAiContext(
+    tenantId: string,
+    input: {
+      entityId?: string;
+      name?: string;
+      company?: string;
+      phone?: string;
+      email?: string;
+      city?: string;
+      source?: LeadSource;
+      status?: LeadStatus;
+      estimatedValue?: number;
+      notes?: string;
+      tags?: string[];
+      activities?: LeadActivity[];
+    },
+  ) {
+    const tenantObjectId = new Types.ObjectId(tenantId);
+    const tenDigits = this.last10Digits(input.phone);
+
+    let whatsappMessages: Array<{
+      direction: string;
+      senderName: string;
+      content: string;
+    }> = [];
+    let conversationAiSummary = '';
+    let quotesOrInvoices: Array<{
+      invoiceNumber: string;
+      docType: string;
+      grandTotal: number;
+      status: string;
+    }> = [];
+
+    try {
+      const convOr: Record<string, unknown>[] = [];
+      if (input.entityId) {
+        convOr.push({ linkedEntityType: 'lead', linkedEntityId: input.entityId });
+      }
+      if (tenDigits) {
+        const pattern = `${tenDigits.slice(0, 5)}\\D*${tenDigits.slice(5)}$`;
+        convOr.push({ phone: { $regex: pattern } });
+      }
+      if (convOr.length > 0) {
+        const conv = await this.leadModel.db
+          .collection('conversations')
+          .findOne(
+            { tenantId: tenantObjectId, $or: convOr },
+            { sort: { updatedAt: -1 } },
+          );
+        if (conv) {
+          conversationAiSummary = String(conv.aiSummary || '');
+          const rawMsgs = Array.isArray(conv.messages) ? conv.messages : [];
+          whatsappMessages = rawMsgs.slice(-6).map((m: Record<string, unknown>) => ({
+            direction: String(m.direction || 'inbound'),
+            senderName: String(m.senderName || ''),
+            content: String(m.content || ''),
+          }));
+        }
+      }
+    } catch {
+      // ignore optional conversation lookup errors
+    }
+
+    try {
+      const invOr: Record<string, unknown>[] = [];
+      if (input.entityId) {
+        invOr.push({ linkedLeadId: input.entityId });
+      }
+      if (tenDigits) {
+        const pattern = `${tenDigits.slice(0, 5)}\\D*${tenDigits.slice(5)}$`;
+        invOr.push({ phone: { $regex: pattern } });
+      }
+      if (invOr.length > 0) {
+        const invDocs = await this.leadModel.db
+          .collection('invoices')
+          .find({ tenantId: tenantObjectId, $or: invOr })
+          .sort({ createdAt: -1 })
+          .limit(3)
+          .toArray();
+        quotesOrInvoices = invDocs.map((inv) => ({
+          invoiceNumber: String(inv.invoiceNumber || ''),
+          docType: String(inv.docType || 'proforma_quote'),
+          grandTotal: Number(inv.grandTotal || 0),
+          status: String(inv.status || 'sent'),
+        }));
+      }
+    } catch {
+      // ignore optional invoice lookup errors
+    }
+
+    const recentActivities = (input.activities || []).slice(0, 6).map((a) => ({
+      type: a.type,
+      description: a.description,
+      createdAt: a.createdAt,
+    }));
+
+    return {
+      entityType: 'lead',
+      name: input.name || 'Buyer',
+      company: input.company || '',
+      phone: input.phone || '',
+      email: input.email || '',
+      city: input.city || 'Delhi-NCR',
+      source: input.source || 'whatsapp',
+      status: input.status || 'new',
+      estimatedValue: Number(input.estimatedValue || 0),
+      notes: input.notes || '',
+      tags: input.tags || [],
+      conversationAiSummary,
+      whatsappMessages,
+      quotesOrInvoices,
+      recentActivities,
+    };
+  }
+
+  private async evaluateLeadAiIntelligence(
+    auth: AuthContext,
+    input: {
+      entityId?: string;
+      name?: string;
+      company?: string;
+      phone?: string;
+      email?: string;
+      city?: string;
+      source?: LeadSource;
+      status?: LeadStatus;
+      estimatedValue?: number;
+      notes?: string;
+      tags?: string[];
+      activities?: LeadActivity[];
+    },
+  ): Promise<{
+    aiScore: number;
+    aiLabel: 'Hot' | 'Warm' | 'Cold';
+    aiInsight: string;
+    aiSummary: string;
+    aiNextAction: string;
+    aiReasons: string[];
+    aiScoredAt: string;
+    provider: string;
+    model: string;
+  }> {
+    const ctx = await this.buildLeadAiContext(auth.tenantId, input);
+    const fallback = this.computeAiIntelligence({
+      name: ctx.name,
+      city: ctx.city,
+      source: ctx.source,
+      status: ctx.status,
+      estimatedValue: ctx.estimatedValue,
+      company: ctx.company,
+      phone: ctx.phone,
+      email: ctx.email,
+      notes: ctx.notes,
+      whatsappMessages: ctx.whatsappMessages,
+      quotesOrInvoices: ctx.quotesOrInvoices,
+      recentActivities: ctx.recentActivities,
+    });
+
+    const [scoreRes, summaryRes, actionRes] = await Promise.all([
+      this.aiBridge
+        ? this.aiBridge
+            .scoreLeadIntent(
+              {
+                tenantId: auth.tenantId,
+                userId: auth.userId,
+                userRole: 'owner',
+                context: ctx,
+              },
+              { skipMetering: true, timeoutMs: 6500 },
+            )
+            .catch(() => null)
+        : Promise.resolve(null),
+      this.aiBridge
+        ? this.aiBridge
+            .summarizeLeadOrDeal(
+              {
+                tenantId: auth.tenantId,
+                userId: auth.userId,
+                userRole: 'owner',
+                context: ctx,
+              },
+              { skipMetering: true, timeoutMs: 6500 },
+            )
+            .catch(() => null)
+        : Promise.resolve(null),
+      this.aiBridge
+        ? this.aiBridge
+            .recommendNextBestAction(
+              {
+                tenantId: auth.tenantId,
+                userId: auth.userId,
+                userRole: 'owner',
+                context: { ...ctx, aiScore: fallback.aiScore },
+              },
+              { skipMetering: true, timeoutMs: 6500 },
+            )
+            .catch(() => null)
+        : Promise.resolve(null),
+    ]);
+
+    const structured = scoreRes?.structured;
+    const aiScore =
+      typeof structured?.aiScore === 'number'
+        ? Math.min(99, Math.max(15, Math.round(structured.aiScore)))
+        : fallback.aiScore;
+    const aiLabel: 'Hot' | 'Warm' | 'Cold' =
+      structured?.aiLabel === 'Hot' ||
+      structured?.aiLabel === 'Warm' ||
+      structured?.aiLabel === 'Cold'
+        ? structured.aiLabel
+        : aiScore >= 80
+        ? 'Hot'
+        : aiScore >= 58
+        ? 'Warm'
+        : 'Cold';
+    const aiNextAction =
+      actionRes?.result?.trim() ||
+      structured?.aiInsight?.trim() ||
+      fallback.aiNextAction;
+    const aiInsight =
+      structured?.aiInsight?.trim() || aiNextAction || fallback.aiInsight;
+    const aiSummary = summaryRes?.result?.trim() || fallback.aiSummary;
+    const aiReasons =
+      Array.isArray(structured?.reasons) && structured.reasons.length > 0
+        ? structured.reasons.slice(0, 4).map((r) => String(r))
+        : fallback.aiReasons;
+
+    return {
+      aiScore,
+      aiLabel,
+      aiInsight,
+      aiSummary,
+      aiNextAction,
+      aiReasons,
+      aiScoredAt: new Date().toISOString(),
+      provider:
+        scoreRes?.provider ||
+        actionRes?.provider ||
+        summaryRes?.provider ||
+        'fallback',
+      model:
+        scoreRes?.model ||
+        actionRes?.model ||
+        summaryRes?.model ||
+        'leadsetu-heuristic-v1',
+    };
   }
 
   private toDto(doc: LeadDocument, maskPhones = false) {
@@ -186,6 +526,10 @@ export class LeadsService {
       aiScore: doc.aiScore || 70,
       aiLabel: doc.aiLabel || 'Warm',
       aiInsight: doc.aiInsight || '',
+      aiSummary: doc.aiSummary || doc.aiInsight || '',
+      aiNextAction: doc.aiNextAction || doc.aiInsight || '',
+      aiReasons: Array.isArray(doc.aiReasons) ? doc.aiReasons : [],
+      aiScoredAt: doc.aiScoredAt || '',
       tags: doc.tags || [],
       notes: doc.notes || '',
       activities: doc.activities || [],
@@ -309,11 +653,17 @@ export class LeadsService {
       await this.superAdminService?.consumeTenantQuota(auth.tenantId, 'ai', 1);
     }
     const ai = aiEnabled
-      ? this.computeAiIntelligence(dto)
+      ? await this.evaluateLeadAiIntelligence(auth, dto)
       : {
           aiScore: 0,
           aiLabel: 'Warm' as const,
           aiInsight: 'SetuAI Lead Scoring disabled by Leadsetu HQ.',
+          aiSummary: 'SetuAI Lead Scoring disabled by Leadsetu HQ.',
+          aiNextAction: 'SetuAI Lead Scoring disabled by Leadsetu HQ.',
+          aiReasons: [] as string[],
+          aiScoredAt: '',
+          provider: 'disabled',
+          model: 'none',
         };
     const nowIso = new Date().toISOString();
 
@@ -339,6 +689,10 @@ export class LeadsService {
       aiScore: ai.aiScore,
       aiLabel: ai.aiLabel,
       aiInsight: ai.aiInsight,
+      aiSummary: ai.aiSummary,
+      aiNextAction: ai.aiNextAction,
+      aiReasons: ai.aiReasons,
+      aiScoredAt: ai.aiScoredAt,
       tags: Array.isArray(dto.tags) ? dto.tags : [],
       notes: dto.notes?.trim() || '',
       activities: [initialActivity],
@@ -442,18 +796,42 @@ export class LeadsService {
       if (dto.rescoreAi) {
         await this.superAdminService?.consumeTenantQuota(auth.tenantId, 'ai', 1);
       }
-      const ai = this.computeAiIntelligence({
-        source: doc.source,
-        status: doc.status,
-        estimatedValue: doc.estimatedValue,
-        company: doc.company,
-        phone: doc.phone,
-        email: doc.email,
-        notes: doc.notes,
-      });
+      const ai = dto.rescoreAi
+        ? await this.evaluateLeadAiIntelligence(auth, {
+            entityId: doc._id.toString(),
+            name: doc.name,
+            city: doc.city,
+            source: doc.source,
+            status: doc.status,
+            estimatedValue: doc.estimatedValue,
+            company: doc.company,
+            phone: doc.phone,
+            email: doc.email,
+            notes: doc.notes,
+            tags: doc.tags,
+            activities: doc.activities,
+          })
+        : {
+            ...this.computeAiIntelligence({
+              name: doc.name,
+              city: doc.city,
+              source: doc.source,
+              status: doc.status,
+              estimatedValue: doc.estimatedValue,
+              company: doc.company,
+              phone: doc.phone,
+              email: doc.email,
+              notes: doc.notes,
+            }),
+            aiScoredAt: new Date().toISOString(),
+          };
       doc.aiScore = ai.aiScore;
       doc.aiLabel = ai.aiLabel;
       doc.aiInsight = ai.aiInsight;
+      doc.aiSummary = ai.aiSummary;
+      doc.aiNextAction = ai.aiNextAction;
+      doc.aiReasons = ai.aiReasons;
+      doc.aiScoredAt = ai.aiScoredAt;
     }
 
     if (dto.status && dto.status !== prevStatus) {
@@ -525,6 +903,91 @@ export class LeadsService {
       ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
       : false;
     return this.toDto(doc, maskPhones);
+  }
+
+  async analyzeWithAi(auth: AuthContext, id: string) {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new NotFoundException('Lead not found.');
+    }
+    await this.superAdminService?.assertFeatureEnabled(
+      auth.tenantId,
+      'aiScoring',
+    );
+    const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
+    const doc = await this.leadModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
+      })
+      .exec();
+
+    if (!doc) {
+      throw new NotFoundException('Lead not found in your workspace.');
+    }
+
+    await this.superAdminService?.consumeTenantQuota(auth.tenantId, 'ai', 1);
+
+    const ai = await this.evaluateLeadAiIntelligence(auth, {
+      entityId: doc._id.toString(),
+      name: doc.name,
+      company: doc.company,
+      phone: doc.phone,
+      email: doc.email,
+      city: doc.city,
+      source: doc.source,
+      status: doc.status,
+      estimatedValue: doc.estimatedValue,
+      notes: doc.notes,
+      tags: doc.tags,
+      activities: doc.activities,
+    });
+
+    doc.aiScore = ai.aiScore;
+    doc.aiLabel = ai.aiLabel;
+    doc.aiInsight = ai.aiInsight;
+    doc.aiSummary = ai.aiSummary;
+    doc.aiNextAction = ai.aiNextAction;
+    doc.aiReasons = ai.aiReasons;
+    doc.aiScoredAt = ai.aiScoredAt;
+
+    const activity: LeadActivity = {
+      id: randomBytes(6).toString('hex'),
+      type: 'ai_score',
+      description: `SetuAI 360° Intent Rescore: ${ai.aiScore}/100 (${ai.aiLabel}) · Next Best Action: ${ai.aiNextAction}`,
+      authorName: 'SetuAI Copilot',
+      createdAt: ai.aiScoredAt,
+    };
+    doc.activities = [activity, ...(doc.activities || [])];
+    await doc.save();
+
+    await this.auditService?.record({
+      tenantId: auth.tenantId,
+      actorId: auth.userId,
+      actorEmail: auth.email,
+      action: 'lead.ai_analyzed',
+      entityType: 'lead',
+      entityId: doc._id.toString(),
+      entityLabel: `${doc.name}${doc.company ? ` (${doc.company})` : ''}`,
+      summary: `SetuAI scored lead ${doc.name} at ${ai.aiScore}/100 (${ai.aiLabel})`,
+    });
+
+    const maskPhones = this.auditService
+      ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
+      : false;
+
+    return {
+      lead: this.toDto(doc, maskPhones),
+      aiScore: ai.aiScore,
+      aiLabel: ai.aiLabel,
+      aiInsight: ai.aiInsight,
+      aiSummary: ai.aiSummary,
+      aiNextAction: ai.aiNextAction,
+      aiReasons: ai.aiReasons,
+      aiScoredAt: ai.aiScoredAt,
+      provider: ai.provider,
+      model: ai.model,
+    };
   }
 
   async remove(auth: AuthContext, id: string) {

@@ -3352,6 +3352,127 @@ export class SuperAdminService implements OnModuleInit {
     return this.listTopupRequests('all');
   }
 
+  // ─── Customer GST Credit Note / Refund Request Queue ────────────────────
+
+  async listRefundRequests(status?: string) {
+    const tenants = await this.tenantModel
+      .find({
+        isPlatformHq: { $ne: true },
+        slug: { $ne: 'leadsetu-platform-hq' },
+        'refundRequests.0': { $exists: true },
+      })
+      .select('name accountId plan status city refundRequests subscriptionInvoices')
+      .exec();
+
+    const rows = tenants.flatMap((t) =>
+      (t.refundRequests || []).map((r) => ({
+        tenantId: t._id.toString(),
+        tenantName: t.name,
+        accountId: t.accountId || '',
+        plan: t.plan,
+        tenantStatus: t.status,
+        city: t.city || '',
+        id: r.id,
+        invoiceId: r.invoiceId,
+        invoiceNumber: r.invoiceNumber,
+        amountInr: r.amountInr,
+        reason: r.reason || '',
+        status: r.status,
+        requestedByName: r.requestedByName || '',
+        requestedByEmail: r.requestedByEmail || '',
+        createdAt: r.createdAt || '',
+        resolvedAt: r.resolvedAt || '',
+        resolvedByEmail: r.resolvedByEmail || '',
+        resolutionNote: r.resolutionNote || '',
+      })),
+    );
+
+    const filtered =
+      status && status !== 'all' ? rows.filter((r) => r.status === status) : rows;
+    filtered.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+
+    return {
+      data: filtered,
+      stats: {
+        pending: rows.filter((r) => r.status === 'pending').length,
+        approved: rows.filter((r) => r.status === 'approved').length,
+        rejected: rows.filter((r) => r.status === 'rejected').length,
+      },
+    };
+  }
+
+  async resolveRefundRequest(
+    actor: SuperAdminActor,
+    tenantId: string,
+    requestId: string,
+    dto: { action: 'approve' | 'reject'; note?: string },
+    ipAddress = '',
+  ) {
+    if (!Types.ObjectId.isValid(tenantId)) {
+      throw new NotFoundException('Workspace not found.');
+    }
+    const tenant = await this.tenantModel.findById(tenantId).exec();
+    if (!tenant || tenant.isPlatformHq) {
+      throw new NotFoundException('Customer workspace not found.');
+    }
+    const reqItem = (tenant.refundRequests || []).find((r) => r.id === requestId);
+    if (!reqItem) throw new NotFoundException('Refund request not found.');
+    if (reqItem.status !== 'pending') {
+      throw new BadRequestException(
+        `This refund request is already ${reqItem.status}.`,
+      );
+    }
+    if (dto.action !== 'approve' && dto.action !== 'reject') {
+      throw new BadRequestException('Action must be approve or reject.');
+    }
+
+    const resolutionNote =
+      dto.note?.trim() ||
+      (dto.action === 'approve'
+        ? `Approved GST Credit Note & Refund for ${reqItem.invoiceNumber}`
+        : `Declined refund request for ${reqItem.invoiceNumber}`);
+
+    if (dto.action === 'approve') {
+      await this.updateSubscriptionInvoiceStatus(
+        actor,
+        tenantId,
+        reqItem.invoiceId,
+        {
+          action: 'refund',
+          reason: `${resolutionNote} (Customer Reason: ${reqItem.reason})`,
+        },
+        ipAddress,
+      );
+    }
+
+    const fresh = await this.tenantModel.findById(tenantId).exec();
+    if (!fresh) throw new NotFoundException('Customer workspace not found.');
+    fresh.refundRequests = (fresh.refundRequests || []).map((r) =>
+      r.id === requestId
+        ? {
+            ...r,
+            status: dto.action === 'approve' ? 'approved' : 'rejected',
+            resolvedAt: new Date().toISOString(),
+            resolvedByEmail: actor.email,
+            resolutionNote,
+          }
+        : r,
+    );
+    fresh.markModified('refundRequests');
+    await fresh.save();
+
+    await this.recordAudit(actor, {
+      action: 'tenant.refund_request_resolved',
+      severity: dto.action === 'approve' ? 'warning' : 'info',
+      targetTenant: fresh,
+      summary: `${dto.action === 'approve' ? 'Approved' : 'Rejected'} refund request for ${reqItem.invoiceNumber} (₹${reqItem.amountInr.toLocaleString('en-IN')})`,
+      reason: resolutionNote,
+      ipAddress,
+    });
+
+    return this.listRefundRequests('all');
+  }
+
   // ─── Territory & Industry Cluster Analytics ─────────────────────────────
 
   async getTerritoryAnalytics() {

@@ -142,7 +142,7 @@ export class AiBridgeController {
 
   @Post('chat')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Tenant-scoped RAG CRM Q&A Copilot' })
+  @ApiOperation({ summary: 'Tenant-scoped RAG CRM Q&A Copilot (Products, Documents, Leads, Deals, Invoices, Tasks)' })
   async chat(
     @Headers('authorization') authorization: string | undefined,
     @Body() body: { question: string; records?: unknown[] },
@@ -158,6 +158,41 @@ export class AiBridgeController {
       source: res ? 'leadsetu-ai' : 'unavailable',
       response: res,
     };
+  }
+
+  @Post('knowledge/sync')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Auto-index workspace Product Catalogue (/products), Document Vault (/documents) & CRM records into leadsetu-ai RAG store',
+  })
+  async syncKnowledge(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.aiBridge.verifyAuth(authorization);
+    return this.aiBridge.syncTenantKnowledgeIndex(auth.tenantId, auth.userId);
+  }
+
+  @Post('execute-action')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Execute a confirmed Copilot transactional action (create_task, schedule_call, create_quotation)',
+  })
+  async executeAction(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    body: {
+      type:
+        | 'create_task'
+        | 'schedule_call'
+        | 'create_quotation'
+        | 'send_whatsapp_draft';
+      payload?: Record<string, unknown>;
+    },
+  ) {
+    const auth = await this.aiBridge.verifyAuth(authorization);
+    return this.aiBridge.executeCopilotAction(auth, body);
   }
 
   @Get('usage')

@@ -10,7 +10,10 @@
   Patch,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
+import type { RawBodyRequest } from '@nestjs/common';
+import type { Request } from 'express';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -162,6 +165,24 @@ export class InvoicesController {
   ) {
     const auth = await this.invoicesService.verifyAuth(authorization);
     return this.invoicesService.applyBankMatches(auth, dto);
+  }
+
+  @Post('webhooks/razorpay')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Public Razorpay Payment Webhook for Customer B2B GST Invoices (auto-flips paid, clears Credit Hold, sends WhatsApp receipt)',
+  })
+  async handleCustomerRazorpayWebhook(
+    @Req() req: RawBodyRequest<Request>,
+    @Headers('x-razorpay-signature') signature: string | undefined,
+    @Body() payload: Record<string, unknown>,
+  ) {
+    return this.invoicesService.handleCustomerRazorpayWebhook(
+      req.rawBody,
+      signature,
+      payload || {},
+    );
   }
 
   @Get('public/:token')

@@ -84,6 +84,8 @@ export class LoginSwaggerDto implements LoginInput {
 }
 
 const REFRESH_COOKIE_NAME = 'leadsetu_refresh_token';
+const SA_REFRESH_COOKIE_NAME = 'leadsetu_sa_refresh_token';
+const REFRESH_COOKIE_PATH = '/api/auth/refresh';
 
 function extractCookie(cookieHeader: string | undefined, name: string): string | undefined {
   if (!cookieHeader) return undefined;
@@ -108,11 +110,21 @@ export class AuthController {
       tenant: unknown;
     },
   ) {
-    res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, {
+    const role = String(
+      (result.user as { role?: string } | null | undefined)?.role || '',
+    );
+    const cookieName =
+      role === 'super_admin' ? SA_REFRESH_COOKIE_NAME : REFRESH_COOKIE_NAME;
+
+    // Clear any legacy root-scoped cookies so old path:'/' tokens are not sent on every API call
+    res.clearCookie(REFRESH_COOKIE_NAME, { path: '/' });
+    res.clearCookie(SA_REFRESH_COOKIE_NAME, { path: '/' });
+
+    res.cookie(cookieName, result.refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
-      path: '/',
+      path: REFRESH_COOKIE_PATH,
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
 
@@ -198,7 +210,12 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
     @Body('refreshToken') bodyFallbackToken?: string,
   ) {
-    const cookieToken = extractCookie(req.headers.cookie, REFRESH_COOKIE_NAME);
+    const scopeHeader = String(req.headers['x-auth-scope'] || '').toLowerCase();
+    const isSuperAdminScope = scopeHeader === 'super_admin';
+    const cookieName = isSuperAdminScope
+      ? SA_REFRESH_COOKIE_NAME
+      : REFRESH_COOKIE_NAME;
+    const cookieToken = extractCookie(req.headers.cookie, cookieName);
     const result = await this.authService.refresh(
       cookieToken || bodyFallbackToken,
       extractClientIp(req),
@@ -215,13 +232,36 @@ export class AuthController {
   @ApiResponse({ status: 200, description: 'Logged out and cookie cleared.' })
   async logout(
     @Headers('authorization') authorization: string | undefined,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    res.clearCookie(REFRESH_COOKIE_NAME, {
-      httpOnly: true,
-      sameSite: 'lax',
-      path: '/',
-    });
+    const scopeHeader = String(req.headers['x-auth-scope'] || '').toLowerCase();
+    res.clearCookie(REFRESH_COOKIE_NAME, { path: '/' });
+    res.clearCookie(SA_REFRESH_COOKIE_NAME, { path: '/' });
+    if (scopeHeader === 'super_admin') {
+      res.clearCookie(SA_REFRESH_COOKIE_NAME, {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: REFRESH_COOKIE_PATH,
+      });
+    } else if (scopeHeader === 'workspace') {
+      res.clearCookie(REFRESH_COOKIE_NAME, {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: REFRESH_COOKIE_PATH,
+      });
+    } else {
+      res.clearCookie(REFRESH_COOKIE_NAME, {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: REFRESH_COOKIE_PATH,
+      });
+      res.clearCookie(SA_REFRESH_COOKIE_NAME, {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: REFRESH_COOKIE_PATH,
+      });
+    }
     return this.authService.logout(authorization);
   }
 

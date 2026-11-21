@@ -497,6 +497,40 @@ export class SuperAdminController {
     );
   }
 
+  @Get('billing/refund-requests')
+  @ApiOperation({
+    summary: 'List customer self-serve GST Credit Note / Refund requests',
+  })
+  async listRefundRequests(
+    @Headers('authorization') authorization: string | undefined,
+    @Query('status') status?: string,
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.listRefundRequests(status);
+  }
+
+  @Post('billing/refund-requests/:tenantId/:requestId/resolve')
+  @ApiOperation({
+    summary:
+      'Approve (marks SaaS invoice refunded) or reject a customer GST Credit Note / Refund request',
+  })
+  async resolveRefundRequest(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('tenantId') tenantId: string,
+    @Param('requestId') requestId: string,
+    @Body() dto: { action: 'approve' | 'reject'; note?: string },
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.resolveRefundRequest(
+      actor,
+      tenantId,
+      requestId,
+      dto,
+      clientIp(req),
+    );
+  }
+
   @Get('analytics/territories')
   @ApiOperation({ summary: 'Territory / industrial cluster analytics & per-company health scores' })
   async getTerritoryAnalytics(@Headers('authorization') authorization: string | undefined) {

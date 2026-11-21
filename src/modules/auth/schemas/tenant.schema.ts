@@ -116,6 +116,9 @@ export class SubscriptionInvoiceRecord {
   @Prop({ type: Number, default: 0 })
   discountAmount?: number;
 
+  @Prop({ type: Number, default: 0 })
+  proratedCreditAmount?: number;
+
   @Prop({ trim: true, uppercase: true, default: '' })
   couponCode?: string;
 
@@ -235,6 +238,80 @@ export class TopupRequestRecord {
 }
 
 export const TopupRequestRecordSchema = SchemaFactory.createForClass(TopupRequestRecord);
+
+/** Customer owner-initiated GST Credit Note / Refund request resolved by Super Admin. */
+@Schema({ _id: false })
+export class SubscriptionRefundRequestRecord {
+  @Prop({ required: true, trim: true })
+  id!: string;
+
+  @Prop({ required: true, trim: true })
+  invoiceId!: string;
+
+  @Prop({ required: true, trim: true })
+  invoiceNumber!: string;
+
+  @Prop({ type: Number, required: true })
+  amountInr!: number;
+
+  @Prop({ required: true, trim: true })
+  reason!: string;
+
+  @Prop({ default: 'pending', enum: ['pending', 'approved', 'rejected'] })
+  status!: 'pending' | 'approved' | 'rejected';
+
+  @Prop({ trim: true, default: '' })
+  requestedByUserId!: string;
+
+  @Prop({ trim: true, default: '' })
+  requestedByName!: string;
+
+  @Prop({ trim: true, default: '' })
+  requestedByEmail!: string;
+
+  @Prop({ required: true, trim: true })
+  createdAt!: string;
+
+  @Prop({ trim: true, default: '' })
+  resolvedAt!: string;
+
+  @Prop({ trim: true, default: '' })
+  resolvedByEmail!: string;
+
+  @Prop({ trim: true, default: '' })
+  resolutionNote!: string;
+}
+
+export const SubscriptionRefundRequestRecordSchema =
+  SchemaFactory.createForClass(SubscriptionRefundRequestRecord);
+
+@Schema({ _id: false })
+export class SubscriptionLifecycleState {
+  @Prop({ type: Boolean, default: true })
+  autoRenew!: boolean;
+
+  @Prop({ type: Boolean, default: false })
+  cancelAtPeriodEnd!: boolean;
+
+  @Prop({ trim: true, default: '' })
+  cancellationReason!: string;
+
+  @Prop({ trim: true, default: '' })
+  cancelledAt!: string;
+
+  @Prop({ trim: true, default: '' })
+  scheduledDowngradePlan!: '' | 'starter' | 'growth' | 'enterprise';
+
+  @Prop({ trim: true, default: '' })
+  scheduledDowngradeCycle!: '' | 'monthly' | 'annual';
+
+  @Prop({ trim: true, default: '' })
+  scheduledForDate!: string;
+}
+
+export const SubscriptionLifecycleStateSchema = SchemaFactory.createForClass(
+  SubscriptionLifecycleState,
+);
 
 /** Per-tenant Official Meta WhatsApp Cloud API credentials & connection state. */
 @Schema({ _id: false })
@@ -397,6 +474,14 @@ export class Tenant {
   /** Company Admin AI / WhatsApp top-up requests awaiting or resolved by Super Admin. */
   @Prop({ type: [TopupRequestRecordSchema], default: [] })
   topupRequests?: TopupRequestRecord[];
+
+  /** Customer self-serve GST Credit Note / Refund requests linked to Super Admin refund workflow. */
+  @Prop({ type: [SubscriptionRefundRequestRecordSchema], default: [] })
+  refundRequests?: SubscriptionRefundRequestRecord[];
+
+  /** Self-serve auto-renewal cancellation & period-end downgrade scheduling state. */
+  @Prop({ type: SubscriptionLifecycleStateSchema, default: () => ({}) })
+  subscriptionLifecycle?: SubscriptionLifecycleState;
 
   /** Incremented on whole-tenant panic revoke to invalidate all tenant JWTs immediately. */
   @Prop({ type: Number, default: 1 })

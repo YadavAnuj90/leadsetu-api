@@ -40,6 +40,7 @@ import {
 import { HydratedDocument, Model, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.module';
 import { resolveOwnerScopeFilter } from '../auth/identity.util';
+import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 
 export type ProductUnit = 'pcs' | 'box' | 'set' | 'kg' | 'mtr' | 'service' | 'license';
 export type ProductDocument = HydratedDocument<ProductItem>;
@@ -145,6 +146,7 @@ export class ProductsService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     @Optional() private readonly auditService?: AuditService,
+    @Optional() private readonly aiBridge?: AiBridgeService,
   ) {}
 
   async verifyAuth(authHeader?: string): Promise<AuthContext> {
@@ -301,6 +303,10 @@ export class ProductsService {
       summary: `Added catalog SKU ${doc.sku} (${doc.name}) at ₹${doc.unitPrice.toLocaleString('en-IN')} (${doc.gstRate}% GST)`,
     });
 
+    this.aiBridge
+      ?.syncTenantKnowledgeIndex(auth.tenantId, auth.userId)
+      .catch(() => {});
+
     return this.toDto(doc);
   }
 
@@ -337,6 +343,9 @@ export class ProductsService {
     if (dto.inStock !== undefined) doc.inStock = Boolean(dto.inStock);
 
     await doc.save();
+    this.aiBridge
+      ?.syncTenantKnowledgeIndex(auth.tenantId, auth.userId)
+      .catch(() => {});
     return this.toDto(doc);
   }
 

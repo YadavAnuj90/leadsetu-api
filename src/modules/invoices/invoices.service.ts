@@ -15,7 +15,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { HydratedDocument, Model, Types } from 'mongoose';
-import { randomBytes } from 'crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { AuditService } from '../audit/audit.service';
 import {
   maskPhoneNumber,
@@ -3044,6 +3044,319 @@ export class InvoicesService {
       linkedLeadId: doc.linkedLeadId || '',
       message: dispatch.renderedMessage || defaultMessage,
       error: dispatch.deliveryError || dispatch.reason || '',
+    };
+  }
+
+  /**
+   * Public Razorpay Payment Webhook for Customer B2B GST Invoices / Quotations.
+   * Verifies `X-Razorpay-Signature`, flips matching invoice (`sent`/`overdue`/`partial` -> `paid`),
+   * records an Accounts Receivable settlement entry, removes buyer Credit Hold automatically
+   * when no other overdue unpaid invoices remain, and dispatches instant WhatsApp receipt.
+   */
+  async handleCustomerRazorpayWebhook(
+    rawBody: Buffer | string | undefined,
+    signatureHeader: string | undefined,
+    payload: Record<string, unknown>,
+  ) {
+    const keySecret = (
+      this.configService.get<string>('RAZORPAY_KEY_SECRET') ||
+      process.env.RAZORPAY_KEY_SECRET ||
+      ''
+    ).trim();
+    const webhookSecret = (
+      this.configService.get<string>('RAZORPAY_WEBHOOK_SECRET') ||
+      process.env.RAZORPAY_WEBHOOK_SECRET ||
+      keySecret ||
+      'leadsetu_razorpay_default_secret_2026'
+    ).trim();
+
+    const rawBuf = Buffer.isBuffer(rawBody)
+      ? rawBody
+      : Buffer.from(
+          typeof rawBody === 'string' && rawBody.length > 0
+            ? rawBody
+            : JSON.stringify(payload || {}),
+          'utf8',
+        );
+
+    const expectedHex = createHmac('sha256', webhookSecret)
+      .update(rawBuf)
+      .digest('hex');
+
+    let sigOk = false;
+    try {
+      const a = Buffer.from(expectedHex.toLowerCase(), 'utf8');
+      const b = Buffer.from((signatureHeader || '').trim().toLowerCase(), 'utf8');
+      sigOk = a.length === b.length && timingSafeEqual(a, b);
+    } catch {
+      sigOk = false;
+    }
+
+    if (!sigOk) {
+      throw new UnauthorizedException('Invalid Razorpay webhook signature.');
+    }
+
+    const eventType = String(payload?.event || '').trim();
+    if (
+      eventType !== 'payment_link.paid' &&
+      eventType !== 'payment.captured' &&
+      eventType !== 'order.paid'
+    ) {
+      return {
+        received: true,
+        event: eventType,
+        action: 'unhandled_event_acknowledged',
+      };
+    }
+
+    const payloadObj = (payload?.payload || {}) as Record<
+      string,
+      { entity?: Record<string, unknown> }
+    >;
+    const paymentEntity = payloadObj.payment?.entity || {};
+    const orderEntity = payloadObj.order?.entity || {};
+    const paymentLinkEntity = payloadObj.payment_link?.entity || {};
+
+    const notes = {
+      ...((orderEntity.notes as Record<string, unknown>) || {}),
+      ...((paymentLinkEntity.notes as Record<string, unknown>) || {}),
+      ...((paymentEntity.notes as Record<string, unknown>) || {}),
+    };
+
+    const paymentId = String(paymentEntity.id || `rzp_${Date.now()}`).trim();
+    const amountPaise = Number(
+      paymentEntity.amount || paymentLinkEntity.amount_paid || 0,
+    );
+    const amountInr = amountPaise > 0 ? Math.round(amountPaise / 100) : 0;
+
+    const hintInvoiceId = String(notes.invoiceId || '').trim();
+    const hintInvoiceNumber = String(
+      notes.invoiceNumber || paymentLinkEntity.reference_id || '',
+    ).trim();
+    const hintPaymentLink = String(
+      paymentLinkEntity.short_url || paymentLinkEntity.id || '',
+    ).trim();
+    const descriptionHint = String(
+      paymentEntity.description || paymentLinkEntity.description || '',
+    ).trim();
+
+    let doc: InvoiceDocument | null = null;
+    if (hintInvoiceId && Types.ObjectId.isValid(hintInvoiceId)) {
+      doc = await this.invoiceModel.findById(hintInvoiceId).exec();
+    }
+    if (!doc && hintInvoiceNumber) {
+      doc = await this.invoiceModel
+        .findOne({ invoiceNumber: hintInvoiceNumber })
+        .exec();
+    }
+    if (!doc && hintPaymentLink) {
+      doc = await this.invoiceModel
+        .findOne({
+          paymentLink: {
+            $regex: hintPaymentLink.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+          },
+        })
+        .exec();
+    }
+    if (!doc && descriptionHint) {
+      const invMatch = descriptionHint.match(/(?:INV|QT)-[A-Z0-9-]+/i);
+      if (invMatch) {
+        doc = await this.invoiceModel
+          .findOne({ invoiceNumber: invMatch[0].toUpperCase() })
+          .exec();
+      }
+    }
+
+    if (!doc) {
+      return {
+        received: true,
+        event: eventType,
+        paymentId,
+        action: 'invoice_not_found',
+      };
+    }
+
+    const existingPayments = Array.isArray(doc.payments) ? doc.payments : [];
+    if (existingPayments.some((p) => p.utrOrChequeNo === paymentId)) {
+      return {
+        received: true,
+        event: eventType,
+        invoiceId: doc._id.toString(),
+        invoiceNumber: doc.invoiceNumber,
+        paymentId,
+        alreadyProcessed: true,
+        action: 'already_reconciled',
+      };
+    }
+
+    const settlementBefore = this.computeSettlement(doc);
+    const settledAmount =
+      amountInr > 0
+        ? Math.min(amountInr, Math.max(amountInr, settlementBefore.balanceDue))
+        : settlementBefore.balanceDue;
+    const appliedAmount = Math.min(
+      Math.max(0, settledAmount),
+      settlementBefore.balanceDue || settledAmount,
+    );
+
+    if (appliedAmount > 0 && doc.status !== 'paid') {
+      const entry: InvoicePaymentRecord = {
+        id: `pay-${Date.now()}-${randomBytes(3).toString('hex')}`,
+        amountPaid: appliedAmount,
+        tdsDeducted: 0,
+        totalSettled: appliedAmount,
+        paymentMode: 'Razorpay',
+        utrOrChequeNo: paymentId,
+        paymentDate: new Date().toISOString().slice(0, 10),
+        note: `Auto-reconciled via Razorpay Webhook (${eventType})`,
+        recordedAt: new Date().toISOString(),
+      };
+      doc.payments = [...existingPayments, entry];
+      const next = this.computeSettlement(doc);
+      doc.amountPaid = next.amountPaid;
+      doc.tdsDeducted = next.tdsDeducted;
+      doc.balanceDue = next.balanceDue;
+      doc.status = next.balanceDue <= 0 ? 'paid' : 'partial';
+      doc.paymentMethod = 'razorpay';
+      doc.markModified('payments');
+      await doc.save();
+    }
+
+    const tenantIdStr = doc.tenantId.toString();
+    const db = this.invoiceModel.db;
+
+    // Auto-clear Credit Hold on buyer Contact if all overdue invoices are settled
+    let creditHoldRemoved = false;
+    let resolvedContactId = '';
+    try {
+      const contactsCol = db.collection('contacts');
+      let contact: (Record<string, unknown> & { _id?: Types.ObjectId }) | null =
+        null;
+      if (doc.phone) {
+        const l10 = extractLast10Digits(doc.phone);
+        if (l10) {
+          contact = await contactsCol.findOne({
+            tenantId: doc.tenantId,
+            phone: { $regex: l10 },
+          });
+        }
+      }
+      if (!contact && doc.clientName) {
+        contact = await contactsCol.findOne({
+          tenantId: doc.tenantId,
+          $or: [{ company: doc.clientName }, { name: doc.clientName }],
+        });
+      }
+      if (contact?._id) {
+        resolvedContactId = contact._id.toString();
+      }
+
+      if (contact && contact.creditHold && contact._id) {
+        const openInvoices = await this.invoiceModel
+          .find({
+            tenantId: doc.tenantId,
+            docType: 'tax_invoice',
+            status: { $in: ['sent', 'overdue', 'partial'] },
+            _id: { $ne: doc._id },
+          })
+          .exec();
+        const contactL10 = extractLast10Digits(String(contact.phone || ''));
+        const stillOverdue = openInvoices.some((inv) => {
+          const sameBuyer =
+            (contactL10 && extractLast10Digits(inv.phone) === contactL10) ||
+            (contact?.company &&
+              inv.clientName.toLowerCase() ===
+                String(contact.company).toLowerCase());
+          if (!sameBuyer) return false;
+          const dueMs = new Date(inv.dueDate || '').getTime();
+          return (
+            Number.isFinite(dueMs) &&
+            dueMs < Date.now() &&
+            this.computeSettlement(inv).balanceDue > 0
+          );
+        });
+
+        if (!stillOverdue) {
+          await contactsCol.updateOne(
+            { _id: contact._id },
+            {
+              $set: {
+                creditHold: false,
+                creditHoldReason: '',
+              },
+            },
+          );
+          creditHoldRemoved = true;
+        }
+      }
+    } catch {
+      // ignore optional contact credit hold update error
+    }
+
+    // Send instant WhatsApp Payment Receipt Confirmation
+    let whatsappReceiptSent = false;
+    const formattedPhone = doc.phone
+      ? normalizeIndianPhone(doc.phone) || doc.phone
+      : '';
+    if (this.inboxService && formattedPhone && extractLast10Digits(formattedPhone).length >= 10) {
+      const receiptMsg = `Namaste ${doc.contactPerson || doc.clientName} ji 🙏,\n\nWe have received your Razorpay payment of *₹${appliedAmount.toLocaleString('en-IN')}* (Txn ID: \`${paymentId}\`) against *${doc.invoiceNumber}* for *${doc.clientName}*.\n\nStatus: *${doc.status === 'paid' ? 'PAID IN FULL ✅' : `PARTIAL PAID · Balance ₹${Number(doc.balanceDue || 0).toLocaleString('en-IN')}`}*.\nThank you for your prompt settlement!`;
+
+      const entityType: 'deal' | 'lead' | 'contact' =
+        doc.linkedDealId && Types.ObjectId.isValid(doc.linkedDealId)
+          ? 'deal'
+          : doc.linkedLeadId && Types.ObjectId.isValid(doc.linkedLeadId)
+            ? 'lead'
+            : 'contact';
+      const entityId =
+        entityType === 'deal'
+          ? doc.linkedDealId
+          : entityType === 'lead'
+            ? doc.linkedLeadId
+            : resolvedContactId || doc._id.toString();
+
+      try {
+        const dispatch = await this.inboxService.dispatchAutomatedWhatsApp({
+          tenantId: tenantIdStr,
+          userId: doc.ownerId.toString(),
+          actorName: 'Razorpay Auto-Reconciliation',
+          linkedEntityType: entityType,
+          linkedEntityId: entityId,
+          contactName: doc.contactPerson || doc.clientName,
+          company: doc.clientName,
+          phone: formattedPhone,
+          estimatedValue: doc.grandTotal,
+          messageBody: receiptMsg,
+          sendMode: 'text',
+          timelineMarker: `Razorpay payment ₹${appliedAmount.toLocaleString('en-IN')} (${paymentId}) auto-reconciled on ${doc.invoiceNumber}`,
+        });
+        whatsappReceiptSent = !dispatch.skippedDnd && dispatch.status !== 'failed';
+      } catch {
+        whatsappReceiptSent = false;
+      }
+    }
+
+    await this.auditService?.record({
+      tenantId: tenantIdStr,
+      actorId: doc.ownerId.toString(),
+      action: 'invoice.razorpay_webhook_reconciled',
+      entityType: 'invoice',
+      entityId: doc._id.toString(),
+      entityLabel: `${doc.invoiceNumber} · ${doc.clientName}`,
+      summary: `Razorpay webhook reconciled ₹${appliedAmount.toLocaleString('en-IN')} (${paymentId}) -> ${doc.invoiceNumber} status=${doc.status}${creditHoldRemoved ? ' · Credit Hold Cleared' : ''}${whatsappReceiptSent ? ' · WhatsApp Receipt Sent' : ''}`,
+    });
+
+    return {
+      received: true,
+      event: eventType,
+      invoiceId: doc._id.toString(),
+      invoiceNumber: doc.invoiceNumber,
+      paymentId,
+      amountSettledInr: appliedAmount,
+      balanceDue: doc.balanceDue,
+      status: doc.status,
+      creditHoldRemoved,
+      whatsappReceiptSent,
+      action: doc.status === 'paid' ? 'invoice_paid' : 'partial_payment_recorded',
     };
   }
 }

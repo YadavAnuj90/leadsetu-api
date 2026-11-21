@@ -20,6 +20,7 @@ import { TenantsModule } from './modules/tenants/tenants.module';
 import { SuperAdminModule } from './modules/super-admin/super-admin.module';
 import { AiBridgeModule } from './modules/ai-bridge/ai-bridge.module';
 import { CallsModule } from './modules/calls/calls.module';
+import { BillingModule } from './modules/billing/billing.module';
 
 @Module({
   imports: [
@@ -58,6 +59,7 @@ import { CallsModule } from './modules/calls/calls.module';
     TenantsModule,
     SuperAdminModule,
     CallsModule,
+    BillingModule,
   ],
 })
 export class AppModule {}

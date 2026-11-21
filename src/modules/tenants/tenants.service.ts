@@ -133,12 +133,19 @@ export class TenantsService {
       paymentMode: string;
       paymentReference?: string;
       greetingNote?: string;
+      discountAmount?: number;
+      couponCode?: string;
       seq: number;
     },
   ): SubscriptionInvoiceRecord {
     const spec = PLAN_CATALOG[params.plan] || PLAN_CATALOG.growth;
-    const baseAmount =
+    const listBaseAmount =
       params.billingCycle === 'annual' ? spec.annualPrice : spec.monthlyPrice;
+    const discountAmount = Math.min(
+      listBaseAmount,
+      Math.max(0, Math.round(Number(params.discountAmount || 0))),
+    );
+    const baseAmount = Math.max(0, listBaseAmount - discountAmount);
     const buyerState = (tenant.state || tenant.city || 'Delhi (07)').trim();
     const isIntraState =
       buyerState.toLowerCase().includes('delhi') ||
@@ -176,6 +183,8 @@ export class TenantsService {
       igstAmount,
       totalAmount,
       status: params.status,
+      discountAmount,
+      couponCode: (params.couponCode || '').trim().toUpperCase(),
       paymentMode: params.paymentMode,
       paymentReference: ref,
       issuedAt: now.toISOString(),
@@ -393,6 +402,72 @@ export class TenantsService {
     const existing = await this.ensureInitialInvoice(tenant, auth.email);
 
     const billingCycle = dto.billingCycle === 'annual' ? 'annual' : 'monthly';
+    const spec = PLAN_CATALOG[dto.plan];
+    const listBaseAmount =
+      billingCycle === 'annual' ? spec.annualPrice : spec.monthlyPrice;
+
+    let discountAmount = 0;
+    let appliedCouponCode = '';
+    if (dto.couponCode?.trim()) {
+      const codeUpper = dto.couponCode.trim().toUpperCase();
+      const couponsCol = this.tenantModel.db.collection('saas_coupons');
+      const coupon = await couponsCol.findOne({ code: codeUpper });
+      if (!coupon || coupon.isActive === false) {
+        throw new BadRequestException(
+          `Promo code "${codeUpper}" is invalid or inactive.`,
+        );
+      }
+      if (
+        coupon.expiresAt &&
+        new Date(String(coupon.expiresAt)).getTime() < Date.now()
+      ) {
+        throw new BadRequestException(`Promo code "${codeUpper}" has expired.`);
+      }
+      if (
+        Number(coupon.maxRedemptions || 0) > 0 &&
+        Number(coupon.redemptionsCount || 0) >= Number(coupon.maxRedemptions)
+      ) {
+        throw new BadRequestException(
+          `Promo code "${codeUpper}" has reached its redemption limit.`,
+        );
+      }
+      if (
+        Array.isArray(coupon.applicablePlans) &&
+        coupon.applicablePlans.length > 0 &&
+        !coupon.applicablePlans.includes(dto.plan)
+      ) {
+        throw new BadRequestException(
+          `Promo code "${codeUpper}" is not valid for the ${dto.plan.toUpperCase()} plan.`,
+        );
+      }
+      if (
+        coupon.billingCycle &&
+        coupon.billingCycle !== 'all' &&
+        coupon.billingCycle !== billingCycle
+      ) {
+        throw new BadRequestException(
+          `Promo code "${codeUpper}" only applies to ${String(coupon.billingCycle)} billing.`,
+        );
+      }
+
+      discountAmount =
+        coupon.discountType === 'percent'
+          ? Math.round((listBaseAmount * Number(coupon.discountValue || 0)) / 100)
+          : Math.round(Number(coupon.discountValue || 0));
+      discountAmount = Math.min(listBaseAmount, Math.max(0, discountAmount));
+      appliedCouponCode = codeUpper;
+
+      await couponsCol.updateOne(
+        { _id: coupon._id },
+        {
+          $inc: {
+            redemptionsCount: 1,
+            totalDiscountGivenInr: discountAmount,
+          },
+        },
+      );
+    }
+
     const newInvoice = this.buildSubscriptionInvoice(tenant, auth.email, {
       plan: dto.plan,
       billingCycle,
@@ -400,6 +475,8 @@ export class TenantsService {
       paymentMode: dto.paymentMode?.trim() || 'Razorpay UPI / NEFT',
       paymentReference: dto.paymentReference,
       greetingNote: dto.greetingNote,
+      discountAmount,
+      couponCode: appliedCouponCode,
       seq: existing.length + 1,
     });
 

@@ -252,6 +252,30 @@ export class DealsController {
     return this.dealsService.addActivity(auth, id, body);
   }
 
+  @Post(':id/ai-analyze')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Run SetuAI 360° Deal Intent Scoring, Summary & Next Best Action recommendation',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'Unique deal record ID',
+    example: 'del_01a2b3c4d5e6',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Returns updated deal with live LLM `aiScore`, `aiLabel`, `aiSummary`, `aiNextAction`, and `aiReasons`.',
+  })
+  async analyzeWithAi(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+  ) {
+    const auth = await this.dealsService.verifyAuth(authorization);
+    return this.dealsService.analyzeWithAi(auth, id);
+  }
+
   @Delete(':id')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({

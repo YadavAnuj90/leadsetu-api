@@ -73,6 +73,41 @@ export class AuditLog {
   @Prop({ required: true, trim: true })
   summary!: string;
 
+  @Prop({
+    enum: ['info', 'warning', 'critical'],
+    default: 'info',
+    index: true,
+  })
+  severity!: 'info' | 'warning' | 'critical';
+
+  @Prop({
+    enum: ['tenant', 'platform'],
+    default: 'tenant',
+    index: true,
+  })
+  visibility!: 'tenant' | 'platform';
+
+  @Prop({ trim: true, default: '' })
+  resourceType!: string;
+
+  @Prop({ trim: true, default: '' })
+  resourceId!: string;
+
+  @Prop({ type: Object, default: undefined })
+  before?: Record<string, unknown>;
+
+  @Prop({ type: Object, default: undefined })
+  after?: Record<string, unknown>;
+
+  @Prop({ trim: true, default: '' })
+  ip!: string;
+
+  @Prop({ trim: true, default: '' })
+  userAgent!: string;
+
+  @Prop({ trim: true, default: '' })
+  requestId!: string;
+
   @Prop({ type: Object, default: {} })
   metadata!: Record<string, unknown>;
 }
@@ -190,6 +225,17 @@ export class AuditService {
         }
       }
 
+      const visibility = input.visibility === 'platform' ? 'platform' : 'tenant';
+      const severity =
+        input.severity && ['info', 'warning', 'critical'].includes(input.severity)
+          ? input.severity
+          : 'info';
+      const resolvedResourceType = input.resourceType || input.entityType;
+      const resolvedResourceId = input.resourceId || input.entityId || '';
+      const reqId =
+        input.requestId?.trim() ||
+        `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+
       await this.auditModel.create({
         tenantId: new Types.ObjectId(input.tenantId),
         actorId: new Types.ObjectId(input.actorId),
@@ -201,9 +247,44 @@ export class AuditService {
         entityType: input.entityType,
         entityId: input.entityId || '',
         entityLabel: input.entityLabel || '',
+        resourceType: resolvedResourceType,
+        resourceId: resolvedResourceId,
         summary: input.summary,
+        severity,
+        visibility,
+        before: input.before,
+        after: input.after,
+        ip: input.ip || '',
+        userAgent: input.userAgent || '',
+        requestId: reqId,
         metadata: input.metadata || {},
       });
+
+      // Route sensitive admin/security events marked visibility='platform' to HQ audit feed
+      // without leaking routine customer lead/deal PII.
+      if (visibility === 'platform' && this.connection.db) {
+        const tenantDoc = await this.connection.db
+          .collection('tenants')
+          .findOne(
+            { _id: new Types.ObjectId(input.tenantId) },
+            { projection: { name: 1, accountId: 1 } },
+          );
+        await this.connection.db.collection('platform_audit_logs').insertOne({
+          actorUserId: input.actorId,
+          actorName: actorName || actorEmail || 'Tenant Admin',
+          actorEmail,
+          action: input.action,
+          severity,
+          targetTenantId: input.tenantId,
+          targetTenantName: String(tenantDoc?.name || ''),
+          targetAccountId: String(tenantDoc?.accountId || ''),
+          summary: `[Tenant Security] ${input.summary}`,
+          reason: input.entityLabel || '',
+          ipAddress: input.ip || '',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      }
     } catch {
       // Never break primary CRM flow if audit logging encounters a transient error
     }
@@ -262,6 +343,7 @@ export class AuditService {
   async updateSecuritySettings(
     auth: AuditAuthContext,
     dto: UpdateSecuritySettingsDto,
+    reqMeta?: { ip?: string; userAgent?: string; requestId?: string },
   ) {
     const db = this.connection.db;
     if (
@@ -272,20 +354,32 @@ export class AuditService {
       throw new BadRequestException('Invalid workspace session.');
     }
 
-    const actor = await db
-      .collection('users')
-      .findOne({ _id: new Types.ObjectId(auth.userId) });
+    const [actor, existingTenant] = await Promise.all([
+      db.collection('users').findOne({ _id: new Types.ObjectId(auth.userId) }),
+      db
+        .collection('tenants')
+        .findOne(
+          { _id: new Types.ObjectId(auth.tenantId) },
+          { projection: { maskPhoneForAgents: 1, blockAgentExport: 1 } },
+        ),
+    ]);
     if (!actor || (actor.role !== 'owner' && actor.role !== 'admin')) {
       throw new ForbiddenException(
         'Only the workspace owner or admin can update data-leak security settings.',
       );
     }
 
+    const beforeDiff: Record<string, unknown> = {};
     const updates: Record<string, boolean> = {};
     if (typeof dto.maskPhoneForAgents === 'boolean') {
+      beforeDiff.maskPhoneForAgents = Boolean(existingTenant?.maskPhoneForAgents);
       updates.maskPhoneForAgents = dto.maskPhoneForAgents;
     }
     if (typeof dto.blockAgentExport === 'boolean') {
+      beforeDiff.blockAgentExport =
+        existingTenant?.blockAgentExport === undefined
+          ? true
+          : Boolean(existingTenant.blockAgentExport);
       updates.blockAgentExport = dto.blockAgentExport;
     }
 
@@ -320,7 +414,16 @@ export class AuditService {
       entityType: 'security',
       entityId: auth.tenantId,
       entityLabel: 'Anti-Data-Leak Shield',
+      resourceType: 'tenant_security',
+      resourceId: auth.tenantId,
       summary: changesDesc.join(' · '),
+      severity: 'warning',
+      visibility: 'platform',
+      before: beforeDiff,
+      after: updates,
+      ip: reqMeta?.ip || '',
+      userAgent: reqMeta?.userAgent || '',
+      requestId: reqMeta?.requestId || '',
       metadata: updates,
     });
 
@@ -347,6 +450,27 @@ export class AuditService {
     const baseScope: Record<string, unknown> = { tenantId: tenantObjectId };
     if (viewerRole === 'agent' && Types.ObjectId.isValid(auth.userId)) {
       baseScope.actorId = new Types.ObjectId(auth.userId);
+    } else if (viewerRole === 'manager' && db && Types.ObjectId.isValid(auth.userId)) {
+      const teamMembers = await db
+        .collection('users')
+        .find(
+          {
+            tenantId: tenantObjectId,
+            $or: [
+              { _id: new Types.ObjectId(auth.userId) },
+              { managerId: auth.userId },
+              { managerId: new Types.ObjectId(auth.userId) },
+              { role: 'agent' },
+            ],
+          },
+          { projection: { _id: 1 } },
+        )
+        .toArray();
+      const allowedIds = teamMembers.map((m) => m._id as Types.ObjectId);
+      if (!allowedIds.some((id) => id.toString() === auth.userId)) {
+        allowedIds.push(new Types.ObjectId(auth.userId));
+      }
+      baseScope.actorId = { $in: allowedIds };
     }
 
     const filter: Record<string, unknown> = { ...baseScope };
@@ -390,6 +514,15 @@ export class AuditService {
           entityId: d.entityId,
           entityLabel: d.entityLabel,
           summary: d.summary,
+          severity: d.severity || 'info',
+          visibility: d.visibility || 'tenant',
+          resourceType: d.resourceType || d.entityType,
+          resourceId: d.resourceId || d.entityId || '',
+          before: d.before,
+          after: d.after,
+          ip: d.ip || '',
+          userAgent: d.userAgent || '',
+          requestId: d.requestId || '',
           metadata: d.metadata || {},
           createdAt: raw.createdAt
             ? new Date(raw.createdAt).toISOString()

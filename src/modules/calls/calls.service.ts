@@ -2316,16 +2316,32 @@ export class CallsService {
   }
 
   async getAnalytics(auth: CallAuthContext, scope?: string) {
-    if (!['owner', 'admin', 'super_admin'].includes(auth.role)) {
+    if (!['owner', 'admin', 'manager', 'super_admin'].includes(auth.role)) {
       throw new ForbiddenException(
-        'Calling analytics is restricted to Workspace Admins and Super Admins.',
+        'Calling analytics is restricted to Workspace Admins, Managers, and Super Admins.',
       );
     }
 
-    const filter: Record<string, unknown> =
-      auth.role === 'super_admin' && scope === 'platform'
-        ? {}
-        : { tenantId: new Types.ObjectId(auth.tenantId) };
+    const isPlatformScope = auth.role === 'super_admin' && scope === 'platform';
+    const filter: Record<string, unknown> = isPlatformScope
+      ? {}
+      : { tenantId: new Types.ObjectId(auth.tenantId) };
+
+    if (!isPlatformScope && auth.role === 'manager') {
+      const teamMembers = await this.userModel
+        .find({
+          tenantId: new Types.ObjectId(auth.tenantId),
+          $or: [
+            { _id: new Types.ObjectId(auth.userId) },
+            { managerId: auth.userId },
+            { role: 'agent' },
+          ],
+        })
+        .select('_id')
+        .exec();
+      const ids = teamMembers.map((m) => m._id);
+      filter.$or = [{ callerId: { $in: ids } }, { calleeId: { $in: ids } }];
+    }
 
     const calls = await this.callLogModel
       .find(filter)
@@ -2401,7 +2417,158 @@ export class CallsService {
       ).length,
     };
 
-    const recentCalls = calls.slice(0, 30).map((c) => ({
+    if (isPlatformScope) {
+      const tenantIds = Array.from(
+        new Set(calls.map((c) => c.tenantId?.toString()).filter(Boolean)),
+      );
+      const tenantDocs =
+        tenantIds.length > 0
+          ? await this.tenantModel
+              .find({
+                _id: {
+                  $in: tenantIds
+                    .filter((id) => Types.ObjectId.isValid(id))
+                    .map((id) => new Types.ObjectId(id)),
+                },
+              })
+              .select('name accountId')
+              .lean()
+              .exec()
+          : [];
+      const tenantMap = new Map(
+        tenantDocs.map((t) => [
+          t._id.toString(),
+          { name: t.name || 'Workspace', accountId: t.accountId || '' },
+        ]),
+      );
+
+      const byTenant = new Map<
+        string,
+        {
+          totalCalls: number;
+          connectedCalls: number;
+          failedCalls: number;
+          turnRelayCalls: number;
+          rttSum: number;
+          rttCount: number;
+          estimatedRelayBytes: number;
+        }
+      >();
+      for (const c of webrtcCalls) {
+        const tid = c.tenantId?.toString() || 'unknown';
+        const cur = byTenant.get(tid) || {
+          totalCalls: 0,
+          connectedCalls: 0,
+          failedCalls: 0,
+          turnRelayCalls: 0,
+          rttSum: 0,
+          rttCount: 0,
+          estimatedRelayBytes: 0,
+        };
+        cur.totalCalls += 1;
+        if (c.status === 'completed' || c.status === 'connected') {
+          cur.connectedCalls += 1;
+          if (c.connection?.turnUsed) {
+            cur.turnRelayCalls += 1;
+            cur.estimatedRelayBytes +=
+              Number(c.connection?.bytesSent || 0) +
+              Number(c.connection?.bytesReceived || 0);
+          }
+          if (Number(c.connection?.rttMs || 0) > 0) {
+            cur.rttSum += Number(c.connection?.rttMs || 0);
+            cur.rttCount += 1;
+          }
+        }
+        if (c.status === 'failed') cur.failedCalls += 1;
+        byTenant.set(tid, cur);
+      }
+
+      const tenantAggregates = Array.from(byTenant.entries())
+        .map(([tid, agg]) => {
+          const meta = tenantMap.get(tid);
+          return {
+            tenantId: tid,
+            tenantName: meta?.name || `Workspace ${tid.slice(-4)}`,
+            accountId: meta?.accountId || '',
+            totalCalls: agg.totalCalls,
+            connectedCalls: agg.connectedCalls,
+            failedCalls: agg.failedCalls,
+            turnRelayCalls: agg.turnRelayCalls,
+            turnUsagePct:
+              agg.connectedCalls > 0
+                ? Math.round((agg.turnRelayCalls / agg.connectedCalls) * 100)
+                : 0,
+            avgRttMs:
+              agg.rttCount > 0 ? Math.round(agg.rttSum / agg.rttCount) : 0,
+            estimatedRelayBytes: agg.estimatedRelayBytes,
+          };
+        })
+        .sort((a, b) => b.totalCalls - a.totalCalls);
+
+      // Privacy-safe anonymized technical rows ONLY (no caller/callee names, no personal timestamps)
+      const anonymizedCalls = calls.slice(0, 30).map((c) => {
+        const tid = c.tenantId?.toString() || '';
+        const meta = tenantMap.get(tid);
+        const callerIdStr = c.callerId?.toString() || '0000';
+        const calleeIdStr = c.calleeId?.toString() || '0000';
+        const conn = c.connection || {
+          icePath: 'direct',
+          turnUsed: false,
+          relayProtocol: '',
+          rttMs: 0,
+          maxRttMs: 0,
+          packetsLost: 0,
+          bytesSent: 0,
+          bytesReceived: 0,
+          iceFailureReason: '',
+        };
+        return {
+          id: c._id.toString(),
+          callRef: `call_${c._id.toString().slice(-6)}`,
+          tenantId: tid,
+          tenantName: meta?.name || 'Workspace',
+          accountId: meta?.accountId || '',
+          callerRef: `u_***${callerIdStr.slice(-2)}`,
+          calleeRef: `u_***${calleeIdStr.slice(-2)}`,
+          status: c.status,
+          setupTimeMs: c.setupTimeMs || 0,
+          endReason: c.endReason || '',
+          connection: {
+            icePath: conn.icePath,
+            turnUsed: conn.turnUsed,
+            relayProtocol: conn.relayProtocol,
+            rttMs: conn.rttMs,
+            maxRttMs: conn.maxRttMs,
+            packetsLost: conn.packetsLost,
+            iceFailureReason: conn.iceFailureReason || '',
+          },
+        };
+      });
+
+      return {
+        scope: 'platform' as const,
+        privacyRedacted: true,
+        totalCalls,
+        connectedCalls: connectedCalls.length,
+        directP2pCalls,
+        failedCalls: failedCalls.length,
+        missedOrRejectedCalls: calls.filter((c) =>
+          ['missed', 'rejected', 'timeout', 'cancelled'].includes(c.status),
+        ).length,
+        successRatePct,
+        avgSetupTimeMs,
+        turnRelayCalls: turnCalls.length,
+        turnUsagePct,
+        avgRttMs,
+        estimatedRelayBytes,
+        protocolBreakdown,
+        tenantAggregates,
+        anonymizedCalls,
+        recentCalls: [],
+      };
+    }
+
+    const recentCalls = calls.slice(0, 50).map((c) => ({
       id: c._id.toString(),
       tenantId: c.tenantId.toString(),
       callerName: c.callerName,
@@ -2425,6 +2592,8 @@ export class CallsService {
     }));
 
     return {
+      scope: 'workspace' as const,
+      privacyRedacted: false,
       totalCalls,
       connectedCalls: connectedCalls.length,
       directP2pCalls,
@@ -2439,11 +2608,18 @@ export class CallsService {
       avgRttMs,
       estimatedRelayBytes,
       protocolBreakdown,
+      tenantAggregates: [],
+      anonymizedCalls: [],
       recentCalls,
     };
   }
 
-  async getCallTelemetry(auth: CallAuthContext, callId: string) {
+  async getCallTelemetry(
+    auth: CallAuthContext,
+    callId: string,
+    supportReason?: string,
+    reqMeta?: { ip?: string; userAgent?: string; requestId?: string },
+  ) {
     if (!Types.ObjectId.isValid(callId)) {
       throw new NotFoundException('Call record not found.');
     }
@@ -2466,9 +2642,51 @@ export class CallsService {
       call.calleeId.toString() === auth.userId;
     if (
       !isParticipant &&
-      !['owner', 'admin', 'super_admin'].includes(auth.role)
+      !['owner', 'admin', 'manager', 'super_admin'].includes(auth.role)
     ) {
       throw new ForbiddenException('Access denied to this call telemetry.');
+    }
+
+    const cleanReason = String(supportReason || '').trim();
+    if (auth.role === 'super_admin') {
+      if (cleanReason.length < 5) {
+        throw new ForbiddenException(
+          'Super Admin access to tenant call telemetry requires a support reason or ticket reference (min 5 characters).',
+        );
+      }
+
+      const targetTenant = await this.tenantModel
+        .findById(call.tenantId)
+        .select('name accountId securityPolicy')
+        .lean()
+        .exec();
+      if (targetTenant?.securityPolicy?.allowImpersonation === false) {
+        throw new ForbiddenException(
+          'This customer workspace has disabled external Support Access in its security policy.',
+        );
+      }
+
+      const callRef = `call_${call._id.toString().slice(-6)}`;
+      await this.auditService?.record({
+        tenantId: call.tenantId.toString(),
+        actorId: auth.userId,
+        actorName: auth.name,
+        actorEmail: auth.email,
+        actorRole: auth.role,
+        action: 'support.call_telemetry_accessed',
+        entityType: 'security',
+        entityId: call._id.toString(),
+        entityLabel: `${callRef} (Support Ticket Access)`,
+        resourceType: 'call_telemetry',
+        resourceId: call._id.toString(),
+        summary: `Leadsetu Support (${auth.email}) inspected call telemetry ${callRef}. Reason: ${cleanReason}`,
+        severity: 'warning',
+        visibility: 'platform',
+        ip: reqMeta?.ip || '',
+        userAgent: reqMeta?.userAgent || '',
+        requestId: reqMeta?.requestId || '',
+        metadata: { supportReason: cleanReason, callRef },
+      });
     }
 
     const samples = await this.telemetryModel
@@ -2477,7 +2695,118 @@ export class CallsService {
       .exec();
 
     return {
-      call: this.toDto(call, auth.userId),
+      call:
+        auth.role === 'super_admin'
+          ? {
+              id: call._id.toString(),
+              callRef: `call_${call._id.toString().slice(-6)}`,
+              tenantId: call.tenantId.toString(),
+              callerName: `u_***${call.callerId.toString().slice(-2)}`,
+              calleeName: `u_***${call.calleeId.toString().slice(-2)}`,
+              status: call.status,
+              setupTimeMs: call.setupTimeMs || 0,
+              connection: call.connection,
+              supportReason: cleanReason,
+            }
+          : this.toDto(call, auth.userId),
+      samples: samples.map((s) => ({
+        id: s._id.toString(),
+        sampledAt: s.sampledAt.toISOString(),
+        reporterUserId:
+          auth.role === 'super_admin'
+            ? `u_***${s.reporterUserId.toString().slice(-2)}`
+            : s.reporterUserId.toString(),
+        icePath: s.icePath,
+        turnUsed: s.turnUsed,
+        localCandidateType: s.localCandidateType,
+        remoteCandidateType: s.remoteCandidateType,
+        relayProtocol: s.relayProtocol,
+        rttMs: s.rttMs,
+        jitterMs: s.jitterMs,
+        packetsLost: s.packetsLost,
+        bytesSent: s.bytesSent,
+        bytesReceived: s.bytesReceived,
+        iceConnectionState: s.iceConnectionState,
+      })),
+    };
+  }
+
+  async requestCallSupportReveal(
+    auth: CallAuthContext,
+    callId: string,
+    reason: string,
+    reqMeta?: { ip?: string; userAgent?: string; requestId?: string },
+  ) {
+    if (auth.role !== 'super_admin') {
+      throw new ForbiddenException(
+        'Only Super Admin operators can request audited support reveal.',
+      );
+    }
+    const cleanReason = String(reason || '').trim();
+    if (cleanReason.length < 5) {
+      throw new BadRequestException(
+        'A valid ticket number or support reason (min 5 characters) is required.',
+      );
+    }
+    if (!Types.ObjectId.isValid(callId)) {
+      throw new NotFoundException('Call record not found.');
+    }
+    const call = await this.callLogModel.findById(callId).exec();
+    if (!call) {
+      throw new NotFoundException('Call record not found.');
+    }
+
+    const targetTenant = await this.tenantModel
+      .findById(call.tenantId)
+      .select('name accountId securityPolicy')
+      .lean()
+      .exec();
+    if (targetTenant?.securityPolicy?.allowImpersonation === false) {
+      throw new ForbiddenException(
+        'This customer workspace has disabled external Support Access.',
+      );
+    }
+
+    const callRef = `call_${call._id.toString().slice(-6)}`;
+    await this.auditService?.record({
+      tenantId: call.tenantId.toString(),
+      actorId: auth.userId,
+      actorName: auth.name,
+      actorEmail: auth.email,
+      actorRole: auth.role,
+      action: 'support.call_identity_revealed',
+      entityType: 'security',
+      entityId: call._id.toString(),
+      entityLabel: `${callRef} (Audited Support Access)`,
+      resourceType: 'call_log',
+      resourceId: call._id.toString(),
+      summary: `Support operator ${auth.email} revealed participant identities for ${callRef}. Ticket/Reason: ${cleanReason}`,
+      severity: 'critical',
+      visibility: 'platform',
+      ip: reqMeta?.ip || '',
+      userAgent: reqMeta?.userAgent || '',
+      requestId: reqMeta?.requestId || '',
+      metadata: { supportReason: cleanReason, callRef },
+    });
+
+    const samples = await this.telemetryModel
+      .find({ callId: call._id })
+      .sort({ sampledAt: 1 })
+      .exec();
+
+    return {
+      callId: call._id.toString(),
+      callRef,
+      tenantName: targetTenant?.name || 'Workspace',
+      accountId: targetTenant?.accountId || '',
+      callerName: call.callerName,
+      calleeName: call.calleeName,
+      startedAt: call.startedAt.toISOString(),
+      durationSeconds: call.durationSeconds || 0,
+      status: call.status,
+      setupTimeMs: call.setupTimeMs || 0,
+      supportReason: cleanReason,
+      connection: call.connection,
       samples: samples.map((s) => ({
         id: s._id.toString(),
         sampledAt: s.sampledAt.toISOString(),
