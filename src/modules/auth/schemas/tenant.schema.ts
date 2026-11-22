@@ -413,6 +413,50 @@ export class MetaCapiConfig {
 
 export const MetaCapiConfigSchema = SchemaFactory.createForClass(MetaCapiConfig);
 
+/** Per-tenant IndiaMART Pull API (CRM Key v2) + <10s Auto-WhatsApp Speed-to-Lead config. */
+@Schema({ _id: false })
+export class IndiaMartPullConfig {
+  @Prop({ type: Boolean, default: false })
+  enabled!: boolean;
+
+  @Prop({ trim: true, default: '' })
+  glusrCrmKeyEncrypted!: string;
+
+  @Prop({ trim: true, default: '' })
+  glusrCrmKeyMask!: string;
+
+  @Prop({ trim: true, default: '' })
+  registeredMobile!: string;
+
+  @Prop({ type: Number, default: 5 })
+  pollIntervalMinutes!: number;
+
+  @Prop({ type: Boolean, default: true })
+  autoWhatsAppSpeedToLead!: boolean;
+
+  @Prop({
+    trim: true,
+    default:
+      'Namaste {{buyer_name}} ji! Thanks for your inquiry regarding {{product}}. Our specialist {{rep_name}} from {{company}} is sharing quotation & availability right away.',
+  })
+  greetingTemplate!: string;
+
+  @Prop({ type: Number, default: 10 })
+  slaThresholdMinutes!: number;
+
+  @Prop({ trim: true, default: '' })
+  lastSyncedAt!: string;
+
+  @Prop({ trim: true, default: '' })
+  lastSyncStatus!: string;
+
+  @Prop({ trim: true, default: '' })
+  lastSyncSummary!: string;
+}
+
+export const IndiaMartPullConfigSchema =
+  SchemaFactory.createForClass(IndiaMartPullConfig);
+
 @Schema({ timestamps: true, collection: 'tenants' })
 export class Tenant {
   @Prop({ required: true, trim: true })
@@ -511,6 +555,63 @@ export class Tenant {
   /** Per-tenant Meta Ads Click-to-WhatsApp & Conversions API (CAPI) config. */
   @Prop({ type: MetaCapiConfigSchema, default: () => ({}) })
   metaCapi?: MetaCapiConfig;
+
+  /** Per-tenant IndiaMART Pull API (CRM Key v2) & Speed-to-Lead SLA config. */
+  @Prop({ type: IndiaMartPullConfigSchema, default: () => ({}) })
+  indiamartPull?: IndiaMartPullConfig;
+
+  /** Omnichannel Capture Connectors: Meta Lead Ads, Justdial, TradeIndia & Embeddable Booking Scheduler. */
+  @Prop({ type: Object, default: () => ({}) })
+  leadConnectors?: {
+    metaLeadAds?: {
+      enabled?: boolean;
+      verifyToken?: string;
+      appSecretEncrypted?: string;
+      appSecretMask?: string;
+      pageAccessTokenEncrypted?: string;
+      pageAccessTokenMask?: string;
+      pageId?: string;
+      pageName?: string;
+      formId?: string;
+      autoWhatsAppWelcome?: boolean;
+      lastReceivedAt?: string;
+      lastLeadSummary?: string;
+    };
+    justdialWebhook?: {
+      enabled?: boolean;
+      secretToken?: string;
+      categoryFilter?: string;
+      autoWhatsAppWelcome?: boolean;
+      lastReceivedAt?: string;
+      lastLeadSummary?: string;
+    };
+    tradeindiaWebhook?: {
+      enabled?: boolean;
+      secretToken?: string;
+      apiUserId?: string;
+      profileId?: string;
+      keyEncrypted?: string;
+      keyMask?: string;
+      autoWhatsAppWelcome?: boolean;
+      lastReceivedAt?: string;
+      lastLeadSummary?: string;
+    };
+    bookingScheduler?: {
+      enabled?: boolean;
+      slug?: string;
+      title?: string;
+      subtitle?: string;
+      durationMinutes?: number;
+      bufferMinutes?: number;
+      workingDays?: number[];
+      startHour?: string;
+      endHour?: string;
+      meetingType?: 'video_call' | 'phone_call' | 'in_person';
+      confirmationWhatsappEnabled?: boolean;
+      reminder1HrEnabled?: boolean;
+      totalBookingsCount?: number;
+    };
+  };
 
   /** Custom seat cap override set by Super Admin (null = use plan default). */
   @Prop({ type: Number, default: null })

@@ -316,6 +316,34 @@ export const DEFAULT_PLATFORM_WHATSAPP_PROVIDER: PlatformWhatsAppProviderConfig 
   updatedAt: '',
 };
 
+export interface PlatformRazorpayGatewayConfig {
+  enabled: boolean;
+  keyIdEncrypted: string;
+  keyIdMask: string;
+  keySecretEncrypted: string;
+  keySecretMask: string;
+  webhookSecretEncrypted: string;
+  webhookSecretMask: string;
+  lastTestedAt: string;
+  lastTestStatus: 'untested' | 'connected' | 'error';
+  lastError: string;
+  updatedAt: string;
+}
+
+export const DEFAULT_PLATFORM_RAZORPAY_GATEWAY: PlatformRazorpayGatewayConfig = {
+  enabled: true,
+  keyIdEncrypted: '',
+  keyIdMask: '',
+  keySecretEncrypted: '',
+  keySecretMask: '',
+  webhookSecretEncrypted: '',
+  webhookSecretMask: '',
+  lastTestedAt: '',
+  lastTestStatus: 'untested',
+  lastError: '',
+  updatedAt: '',
+};
+
 @Schema({ timestamps: true, collection: 'platform_configs' })
 export class PlatformConfig {
   @Prop({ required: true, unique: true, default: 'global' })
@@ -350,6 +378,9 @@ export class PlatformConfig {
 
   @Prop({ type: Object, default: () => DEFAULT_PLATFORM_WHATSAPP_PROVIDER })
   whatsappProvider?: PlatformWhatsAppProviderConfig;
+
+  @Prop({ type: Object, default: () => DEFAULT_PLATFORM_RAZORPAY_GATEWAY })
+  razorpayGateway?: PlatformRazorpayGatewayConfig;
 
   @Prop({ trim: true, default: '' })
   updatedByEmail?: string;

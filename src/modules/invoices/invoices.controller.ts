@@ -28,10 +28,12 @@ import {
   ApplyBankMatchDto,
   BankStatementReconcileDto,
   CreateInvoiceDto,
+  CreateWhatsappCartCheckoutDto,
   MarkInvoicePaidDto,
   RecordInvoicePaymentDto,
   RecordPromiseToPayDto,
   SendRecoveryChaserDto,
+  UpdateInvoiceDispatchDto,
   UpdateInvoiceDto,
   UpdateRecoveryConfigDto,
   UpdateSellerGstProfileDto,
@@ -478,6 +480,59 @@ export class InvoicesController {
   ) {
     const auth = await this.invoicesService.verifyAuth(authorization);
     return this.invoicesService.sendOnWhatsApp(auth, id, dto);
+  }
+
+  @Post('whatsapp-cart')
+  @ApiOperation({
+    summary:
+      'WhatsApp Interactive Catalog Cart Checkout: creates Invoice + Scannable UPI QR & sends straight into WhatsApp Inbox chat',
+  })
+  async createWhatsappCartCheckout(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: CreateWhatsappCartCheckoutDto,
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.createWhatsappCartCheckout(auth, dto);
+  }
+
+  @Get(':id/upi-qr')
+  @ApiOperation({
+    summary: 'Generate or retrieve scannable UPI QR PNG Data URL & payment deep link for an Invoice',
+  })
+  async getInvoiceUpiQr(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.getInvoiceUpiQr(auth, id);
+  }
+
+  @Patch(':id/dispatch')
+  @ApiOperation({
+    summary:
+      'Attach Courier Partner + AWB Tracking (Shiprocket/Delhivery/BlueDart/DTDC) & optionally send WhatsApp AWB Alert',
+  })
+  async updateDispatch(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() dto: UpdateInvoiceDispatchDto,
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.updateDispatchAndNotify(auth, id, dto);
+  }
+
+  @Post(':id/simulate-webhook-paid')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Simulate Razorpay/UPI Webhook Paid reconciliation (auto-flips PAID, clears Credit Hold, fires Meta CAPI Purchase & sends WhatsApp receipt)',
+  })
+  async simulateWebhookPaid(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.simulateWebhookPaid(auth, id);
   }
 
   @Delete(':id')

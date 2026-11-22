@@ -54,9 +54,13 @@ async function run() {
     process.exit(1);
   }
 
-  const uri =
-    process.env.MONGODB_URI ||
-    'mongodb+srv://anujalitechnologiespvtltd_db_user:kYZywctMdeib6Yaw@anujalitechno.xxdbeke.mongodb.net/leadsetu?retryWrites=true&w=majority&appName=leadsetu';
+  const uri = process.env.MONGODB_URI?.trim();
+  if (!uri) {
+    console.error(
+      'MONGODB_URI environment variable is required. Set it in .env or environment before running.',
+    );
+    process.exit(1);
+  }
 
   await mongoose.connect(uri);
 

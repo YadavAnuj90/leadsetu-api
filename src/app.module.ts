@@ -27,6 +27,7 @@ import { LeadRoutingModule } from './modules/lead-routing/lead-routing.module';
 import { EmailCrmModule } from './modules/email-crm/email-crm.module';
 import { PortalModule } from './modules/portal/portal.module';
 import { MetaCapiModule } from './modules/meta-capi/meta-capi.module';
+import { MarketplaceSyncModule } from './modules/marketplace-sync/marketplace-sync.module';
 
 @Module({
   imports: [
@@ -38,9 +39,12 @@ import { MetaCapiModule } from './modules/meta-capi/meta-capi.module';
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => {
-        const uri =
-          configService.get<string>('MONGODB_URI') ||
-          'mongodb+srv://anujalitechnologiespvtltd_db_user:kYZywctMdeib6Yaw@anujalitechno.xxdbeke.mongodb.net/leadsetu?retryWrites=true&w=majority&appName=leadsetu';
+        const uri = configService.get<string>('MONGODB_URI')?.trim();
+        if (!uri) {
+          throw new Error(
+            'MONGODB_URI environment variable is required. Set it in .env or host environment before starting leadsetu-api.',
+          );
+        }
         return {
           uri,
         };
@@ -72,6 +76,7 @@ import { MetaCapiModule } from './modules/meta-capi/meta-capi.module';
     EmailCrmModule,
     PortalModule,
     MetaCapiModule,
+    MarketplaceSyncModule,
   ],
 })
 export class AppModule {}

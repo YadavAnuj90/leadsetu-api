@@ -8,6 +8,7 @@ export interface AiSalesAgentPolicy {
   handoffScoreThreshold: number;
   autoSendCatalogPricing: boolean;
   autoUpdateLeadFields: boolean;
+  autoShareBookingLink: boolean;
   businessHoursOnly: boolean;
   escalationKeywords: string[];
 }
@@ -24,6 +25,8 @@ export interface AiQualifiedData {
   gstin?: string;
   estimatedTotal?: number;
   requestedDiscountPct?: number;
+  matchedKbTitles?: string[];
+  bookingLinkShared?: string;
 }
 
 export interface AiActionLogItem {
@@ -41,6 +44,22 @@ export interface AiActionLogItem {
   createdAt: string;
 }
 
+export interface KnowledgeDocBrief {
+  id: string;
+  title: string;
+  category: string;
+  content: string;
+  tags?: string[];
+}
+
+export interface MatchedKbSnippet {
+  id: string;
+  title: string;
+  category: string;
+  snippet: string;
+  score: number;
+}
+
 export const DEFAULT_AI_AGENT_POLICY: AiSalesAgentPolicy = {
   mode: 'draft_only',
   language: 'auto',
@@ -48,6 +67,7 @@ export const DEFAULT_AI_AGENT_POLICY: AiSalesAgentPolicy = {
   handoffScoreThreshold: 80,
   autoSendCatalogPricing: true,
   autoUpdateLeadFields: true,
+  autoShareBookingLink: true,
   businessHoursOnly: false,
   escalationKeywords: [
     'human',
@@ -108,6 +128,7 @@ export function normalizeAiAgentPolicy(raw?: unknown): AiSalesAgentPolicy {
     ),
     autoSendCatalogPricing: obj.autoSendCatalogPricing !== false,
     autoUpdateLeadFields: obj.autoUpdateLeadFields !== false,
+    autoShareBookingLink: obj.autoShareBookingLink !== false,
     businessHoursOnly: Boolean(obj.businessHoursOnly),
     escalationKeywords:
       keywords.length > 0
@@ -166,7 +187,7 @@ export function detectReplyLanguage(
   if (configured !== 'auto') return configured;
   if (/[\u0900-\u097F]/.test(message)) return 'hindi';
   if (
-    /\b(kya|hai|hain|bhai|ji|kitna|rate|bhej|bhejo|chahiye|kab|ka|ke|ki|kripya|karo|dena|lena|milega|hoga)\b/i.test(
+    /\b(kya|hai|hain|bhai|bhaiya|ji|kitna|rate|bhej|bhejo|chahiye|kab|ka|ke|ki|kripya|karo|dena|lena|milega|hoga|bakwas|bekar|karni|saal|tak)\b/i.test(
       message,
     )
   ) {
@@ -175,13 +196,113 @@ export function detectReplyLanguage(
   return 'english';
 }
 
+const HINGLISH_SYNONYM_GROUPS: Array<{ triggers: RegExp; expand: string[] }> = [
+  {
+    triggers: /\b(warranty|guarantee|garanti|kharab|faulty|repair|replace|replacement|service)\b/i,
+    expand: ['warranty', 'replacement', 'service', 'defective', 'guarantee'],
+  },
+  {
+    triggers: /\b(dispatch|delivery|shipping|courier|awb|transport|bilty|kab|aayega|pahunchega|time)\b/i,
+    expand: ['dispatch', 'delivery', 'shipping', 'transport', 'days', 'hours', 'eway'],
+  },
+  {
+    triggers: /\b(gst|tax|bill|invoice|itc|hsn|sac|b2b)\b/i,
+    expand: ['gst', 'invoice', 'tax', 'itc', 'hsn', 'moq'],
+  },
+  {
+    triggers: /\b(pay|payment|upi|qr|razorpay|neft|rtgs|udhaar|credit|advance)\b/i,
+    expand: ['payment', 'upi', 'razorpay', 'neft', 'rtgs', 'credit', 'terms'],
+  },
+  {
+    triggers: /\b(demo|sample|trial|meeting|call|book|visit)\b/i,
+    expand: ['demo', 'sample', 'trial', 'consultation', 'booking'],
+  },
+];
+
+export function retrieveTopKbMatches(
+  message: string,
+  kbDocs: KnowledgeDocBrief[],
+  limit = 2,
+): MatchedKbSnippet[] {
+  const cleanMsg = String(message || '').trim().toLowerCase();
+  if (!cleanMsg || !Array.isArray(kbDocs) || kbDocs.length === 0) return [];
+
+  const queryTokens = new Set(
+    cleanMsg
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length >= 2),
+  );
+  for (const grp of HINGLISH_SYNONYM_GROUPS) {
+    if (grp.triggers.test(cleanMsg)) {
+      for (const word of grp.expand) queryTokens.add(word);
+    }
+  }
+
+  const scored: MatchedKbSnippet[] = [];
+  for (const doc of kbDocs) {
+    const titleLower = String(doc.title || '').toLowerCase();
+    const contentLower = String(doc.content || '').toLowerCase();
+    const tagStr = (doc.tags || []).join(' ').toLowerCase();
+    let score = 0;
+
+    for (const tok of queryTokens) {
+      if (titleLower.includes(tok)) score += 6;
+      if (tagStr.includes(tok)) score += 5;
+      if (contentLower.includes(tok)) score += 2;
+    }
+
+    if (score >= 4) {
+      const compact = String(doc.content || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const snippet = compact.length > 260 ? `${compact.slice(0, 257)}...` : compact;
+      scored.push({
+        id: doc.id,
+        title: doc.title,
+        category: doc.category,
+        snippet,
+        score,
+      });
+    }
+  }
+
+  return scored.sort((a, b) => b.score - a.score).slice(0, limit);
+}
+
+export function detectBuyerFrustration(text: string): {
+  frustrationDetected: boolean;
+  phrase: string;
+} {
+  const patterns: Array<[RegExp, string]> = [
+    [/\b(bakwas|bekar|third\s*class|ghatiya|fhaltu)\b/i, 'dissatisfaction'],
+    [/\b(fraud|scam|cheat|cheating|dhokha)\b/i, 'trust concern'],
+    [/\b(pathetic|useless|worst|horrible|terrible|ridiculous)\b/i, 'negative complaint'],
+    [/\b(consumer\s*court|legal|police|complaint)\b/i, 'escalation threat'],
+    [/\b(kab\s*se|2\s*din\s*se|still\s*waiting|koi\s*reply\s*nahi|no\s*response|pareshan)\b/i, 'delay frustration'],
+    [/\b(refund|cancel\s*order|galat\s*maal|damaged)\b/i, 'refund/defect issue'],
+  ];
+  for (const [re, label] of patterns) {
+    if (re.test(text)) {
+      return { frustrationDetected: true, phrase: label };
+    }
+  }
+  return { frustrationDetected: false, phrase: '' };
+}
+
+export function detectBookingIntent(text: string): boolean {
+  return /\b(book\s*(?:a\s*)?(?:demo|call|slot|meeting)|schedule\s*(?:a\s*)?(?:call|demo|meeting)|demo\s*dikha|demo\s*chahiye|appointment|video\s*call|zoom\s*call|call\s*book|kal\s*(?:call|demo|meeting))\b/i.test(
+    text,
+  );
+}
+
 export function extractBuyerSignals(params: {
   message: string;
   productsCatalog: CatalogProductBrief[];
+  kbDocs?: KnowledgeDocBrief[];
   existingData?: AiQualifiedData;
   policy: AiSalesAgentPolicy;
 }) {
-  const { message, productsCatalog, existingData, policy } = params;
+  const { message, productsCatalog, kbDocs = [], existingData, policy } = params;
   const text = String(message || '').trim();
   const lower = text.toLowerCase();
 
@@ -223,7 +344,11 @@ export function extractBuyerSignals(params: {
       bestProduct = prod;
     }
   }
-  if (!bestProduct && productsCatalog.length > 0 && /price|rate|quote|moq|catalog|product/i.test(lower)) {
+  if (
+    !bestProduct &&
+    productsCatalog.length > 0 &&
+    /\b(price|rate|quote|moq|catalog|product|pcs|units|mcb|switch)\b/i.test(lower)
+  ) {
     bestProduct = productsCatalog[0];
   }
   if (bestProduct) {
@@ -268,10 +393,17 @@ export function extractBuyerSignals(params: {
   const discountExceedsCap =
     requestedDiscountPct !== undefined && requestedDiscountPct > policy.maxDiscountPct;
 
-  // 7) Keyword Escalation Check
+  // 7) Keyword Escalation, Frustration, Booking Intent & Grounded KB Retrieval
   const matchedKeyword = policy.escalationKeywords.find((kw) =>
     lower.includes(kw.toLowerCase()),
   );
+  const frustration = detectBuyerFrustration(text);
+  const bookingIntent = detectBookingIntent(text);
+  const matchedKb = retrieveTopKbMatches(text, kbDocs, 2);
+  if (matchedKb.length > 0) {
+    data.matchedKbTitles = matchedKb.map((k) => k.title);
+  }
+
   const quoteConfirmIntent = /\b(send\s*quote|bhej(?:o)?\s*proforma|confirm\s*order|place\s*order|pi\s*bhej)\b/i.test(
     lower,
   );
@@ -282,13 +414,15 @@ export function extractBuyerSignals(params: {
   if (data.quantity && data.quantity >= (data.moq || 1)) score += 12;
   if (data.city) score += 10;
   if (data.gstin) score += 12;
-  if (quoteConfirmIntent) score += 8;
+  if (quoteConfirmIntent || bookingIntent) score += 8;
   const aiScore = Math.max(40, Math.min(98, score));
   const aiLabel: 'Hot' | 'Warm' | 'Cold' =
     aiScore >= 80 ? 'Hot' : aiScore >= 55 ? 'Warm' : 'Cold';
 
   let handoffReason = '';
-  if (discountExceedsCap) {
+  if (frustration.frustrationDetected) {
+    handoffReason = `Buyer frustration detected (${frustration.phrase}) — paused AI & alerted Human Manager.`;
+  } else if (discountExceedsCap) {
     handoffReason = `Requested ${requestedDiscountPct}% discount exceeds AI guardrail cap (${policy.maxDiscountPct}% max).`;
   } else if (matchedKeyword) {
     handoffReason = `Buyer triggered escalation keyword "${matchedKeyword}".`;
@@ -299,6 +433,10 @@ export function extractBuyerSignals(params: {
   return {
     data,
     matchedProduct: bestProduct,
+    matchedKb,
+    bookingIntent,
+    frustrationDetected: frustration.frustrationDetected,
+    frustrationPhrase: frustration.phrase,
     detectedLanguage: detectReplyLanguage(text, policy.language),
     discountExceedsCap,
     requestedDiscountPct,
@@ -311,16 +449,39 @@ export function extractBuyerSignals(params: {
   };
 }
 
+export function isWithinIstBusinessHours(now = new Date()): boolean {
+  const ist = new Date(now.getTime() + 5.5 * 3600_000);
+  const day = ist.getUTCDay(); // 0=Sun..6=Sat
+  const hour = ist.getUTCHours();
+  if (day === 0) return false;
+  return hour >= 9 && hour < 20;
+}
+
 export function buildConciergeFallbackReply(params: {
   buyerName: string;
   language: 'hinglish' | 'english' | 'hindi';
   signals: ReturnType<typeof extractBuyerSignals>;
   policy: AiSalesAgentPolicy;
+  bookingPublicUrl?: string;
 }): string {
-  const { buyerName, language, signals, policy } = params;
-  const { data, discountExceedsCap, requestedDiscountPct, escalationKeyword, handoffTriggered } =
-    signals;
+  const { buyerName, language, signals, policy, bookingPublicUrl } = params;
+  const {
+    data,
+    discountExceedsCap,
+    requestedDiscountPct,
+    escalationKeyword,
+    frustrationDetected,
+    matchedKb,
+    bookingIntent,
+    handoffTriggered,
+  } = signals;
   const isEng = language === 'english';
+
+  if (frustrationDetected) {
+    return isEng
+      ? `Sincere apologies ${buyerName} for any delay or inconvenience! I have paused automated replies and immediately escalated your thread on high priority to our Senior Support Manager, who will call you right away.`
+      : `Maafi chahte hain ${buyerName} ji delay aur pareshani ke liye! Maine automated replies pause karke aapka case turant hamare Senior Manager ko high-priority par escalate kar diya hai — woh abhi aapko direct call karenge.`;
+  }
 
   if (discountExceedsCap) {
     return isEng
@@ -337,18 +498,19 @@ export function buildConciergeFallbackReply(params: {
   }
 
   const lines: string[] = [];
-  lines.push(
-    isEng
-      ? `Hello ${buyerName}!`
-      : `Namaste ${buyerName} ji!`,
-  );
+  lines.push(isEng ? `Hello ${buyerName}!` : `Namaste ${buyerName} ji!`);
+
+  if (matchedKb.length > 0) {
+    for (const kb of matchedKb) {
+      lines.push(`📌 *${kb.title}:* ${kb.snippet}`);
+    }
+  }
 
   if (policy.autoSendCatalogPricing && data.productName && data.quotedUnitPrice) {
     const gstText = `${data.gstRate ?? 18}% GST`;
-    const priceLine = isEng
-      ? `• *${data.productName}* (SKU: ${data.sku} | HSN: ${data.hsnSac}): ₹${data.quotedUnitPrice.toLocaleString('en-IN')} + ${gstText} | MOQ: ${data.moq || 1}`
-      : `• *${data.productName}* (SKU: ${data.sku} | HSN: ${data.hsnSac}): ₹${data.quotedUnitPrice.toLocaleString('en-IN')} + ${gstText} | MOQ: ${data.moq || 1}`;
-    lines.push(priceLine);
+    lines.push(
+      `• *${data.productName}* (SKU: ${data.sku} | HSN: ${data.hsnSac}): ₹${data.quotedUnitPrice.toLocaleString('en-IN')} + ${gstText} | MOQ: ${data.moq || 1}`,
+    );
 
     if (data.quantity && data.estimatedTotal) {
       lines.push(
@@ -359,10 +521,18 @@ export function buildConciergeFallbackReply(params: {
     }
   }
 
+  if (bookingIntent && policy.autoShareBookingLink && bookingPublicUrl) {
+    lines.push(
+      isEng
+        ? `📅 Pick a convenient demo/call slot directly here: ${bookingPublicUrl}`
+        : `📅 Apni suvidha ke hisaab se demo/call slot yahan book karein: ${bookingPublicUrl}`,
+    );
+  }
+
   const missing: string[] = [];
-  if (!data.quantity) missing.push(isEng ? 'required quantity' : 'required quantity');
-  if (!data.city) missing.push(isEng ? 'delivery city' : 'delivery city');
-  if (!data.gstin) missing.push(isEng ? '15-digit GSTIN (optional)' : '15-digit GSTIN (optional)');
+  if (!data.quantity) missing.push('required quantity');
+  if (!data.city) missing.push('delivery city');
+  if (!data.gstin) missing.push('15-digit GSTIN (optional)');
 
   if (handoffTriggered) {
     lines.push(
@@ -370,7 +540,7 @@ export function buildConciergeFallbackReply(params: {
         ? `Your inquiry is fully qualified! I have assigned our specialist to issue your formal Proforma Quotation & dispatch timeline right away.`
         : `Aapki requirement qualify ho gayi hai! Maine hamare Sales Specialist ko assign kar diya hai jo abhi aapko formal GST Proforma Quote bhejenge.`,
     );
-  } else if (missing.length > 0) {
+  } else if (missing.length > 0 && matchedKb.length === 0 && !bookingIntent) {
     lines.push(
       isEng
         ? `Could you share your ${missing.join(', ')} so I can prepare your instant GST quote?`

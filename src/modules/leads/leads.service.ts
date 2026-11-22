@@ -29,6 +29,7 @@ import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 import { CustomFieldsService } from '../custom-fields/custom-fields.service';
 import { LeadRoutingService } from '../lead-routing/lead-routing.service';
 import { MetaCapiService } from '../meta-capi/meta-capi.service';
+import { MarketplaceSyncService } from '../marketplace-sync/marketplace-sync.service';
 
 export interface CreateLeadDto {
   name: string;
@@ -86,6 +87,7 @@ export class LeadsService {
     @Optional() private readonly customFieldsService?: CustomFieldsService,
     @Optional() private readonly leadRoutingService?: LeadRoutingService,
     @Optional() private readonly metaCapiService?: MetaCapiService,
+    @Optional() private readonly marketplaceSyncService?: MarketplaceSyncService,
   ) {}
 
   async verifyAuth(authHeader?: string): Promise<AuthContext> {
@@ -554,6 +556,11 @@ export class LeadsService {
       adId: doc.adId || '',
       adHeadline: doc.adHeadline || '',
       adSourceUrl: doc.adSourceUrl || '',
+      externalQueryId: doc.externalQueryId || '',
+      firstContactedAt: doc.firstContactedAt || '',
+      speedToLeadSeconds:
+        typeof doc.speedToLeadSeconds === 'number' ? doc.speedToLeadSeconds : -1,
+      autoWhatsAppWelcomeSent: Boolean(doc.autoWhatsAppWelcomeSent),
       customFields: doc.customFields || {},
       activities: doc.activities || [],
       createdAt: raw.createdAt ? new Date(raw.createdAt).toISOString() : new Date().toISOString(),
@@ -973,6 +980,17 @@ export class LeadsService {
     }
 
     if (dto.status && dto.status !== prevStatus) {
+      if (dto.status !== 'new' && !doc.firstContactedAt) {
+        const now = new Date();
+        doc.firstContactedAt = now.toISOString();
+        const createdMs = new Date(
+          ((doc as unknown as { createdAt?: Date }).createdAt as Date) || now,
+        ).getTime();
+        doc.speedToLeadSeconds = Math.max(
+          1,
+          Math.round((now.getTime() - createdMs) / 1000),
+        );
+      }
       const activity: LeadActivity = {
         id: randomBytes(6).toString('hex'),
         type: 'status_change',
@@ -1550,6 +1568,26 @@ export class LeadsService {
       entityLabel: created.name,
       summary: `Captured ${inferredSource} webhook lead ${created.name} -> ${repName} (${routingReason})`,
     });
+
+    if (this.marketplaceSyncService && formattedPhone && Types.ObjectId.isValid(created.id)) {
+      const createdDoc = await this.leadModel.findById(created.id).exec();
+      if (createdDoc) {
+        await this.marketplaceSyncService
+          .dispatchInstantWelcomeForLead({
+            tenantId: tenantIdStr,
+            leadDoc: createdDoc,
+            repAuth: {
+              userId: repAuth.userId,
+              tenantId: tenantIdStr,
+              email: repAuth.email,
+              name: repName,
+              role: 'sales',
+            },
+            productHint: String(payload?.QUERY_PRODUCT_NAME || rawNotes || '').trim(),
+          })
+          .catch(() => {});
+      }
+    }
 
     return {
       status: 'created' as const,

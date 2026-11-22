@@ -15,6 +15,7 @@ export type LeadSource =
   | 'whatsapp'
   | 'indiamart'
   | 'justdial'
+  | 'tradeindia'
   | 'meta_ads'
   | 'google_ads'
   | 'website'
@@ -65,6 +66,7 @@ export class Lead {
       'whatsapp',
       'indiamart',
       'justdial',
+      'tradeindia',
       'meta_ads',
       'google_ads',
       'website',
@@ -143,6 +145,18 @@ export class Lead {
 
   @Prop({ trim: true, default: '' })
   adSourceUrl?: string;
+
+  @Prop({ trim: true, default: '', index: true })
+  externalQueryId?: string;
+
+  @Prop({ trim: true, default: '' })
+  firstContactedAt?: string;
+
+  @Prop({ type: Number, default: -1 })
+  speedToLeadSeconds?: number;
+
+  @Prop({ type: Boolean, default: false })
+  autoWhatsAppWelcomeSent?: boolean;
 
   @Prop({ type: Array, default: [] })
   activities!: LeadActivity[];

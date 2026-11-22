@@ -33,10 +33,16 @@ import {
 } from '../auth/identity.util';
 import { PLAN_CATALOG } from '../tenants/tenants.service';
 import {
+  DEFAULT_HIDDEN_MODULES_BY_MODE,
+  normalizeAccountKind,
+  normalizeBusinessMode,
+} from '../auth/business-mode.util';
+import {
   AI_PILLAR_FEATURE_KEYS,
   DEFAULT_DUNNING_POLICY,
   DEFAULT_GLOBAL_KILL_SWITCHES,
   DEFAULT_PLAN_MATRIX,
+  DEFAULT_PLATFORM_RAZORPAY_GATEWAY,
   DEFAULT_PLATFORM_WHATSAPP_PROVIDER,
   DEFAULT_SECURITY_POLICIES,
   FeatureKey,
@@ -45,6 +51,7 @@ import {
   PlatformAuditLogDocument,
   PlatformConfig,
   PlatformConfigDocument,
+  PlatformRazorpayGatewayConfig,
   PlatformWhatsAppProviderConfig,
   SaasCoupon,
   SaasCouponDocument,
@@ -52,7 +59,12 @@ import {
   SaasPartnerDocument,
 } from './schemas/platform-config.schema';
 import {
+  detectRazorpayMode,
+  resolveEffectiveRazorpayConfig,
+} from './razorpay-config.util';
+import {
   BulkManageAiAuthorityDto,
+  ChurnRescueActionDto,
   CreateSaasCouponDto,
   CreateSaasPartnerDto,
   CreateSuperAdminOperatorDto,
@@ -62,8 +74,10 @@ import {
   IssueTenantSubscriptionDto,
   ManageTenantAiAuthorityDto,
   PartnerPayoutDto,
+  ProvisionWorkspaceDto,
   ResolveTopupRequestDto,
   RevokeTenantSessionsDto,
+  RunIntegrationProbeDto,
   SuperAdminActor,
   UpdateDunningPolicyDto,
   UpdatePlatformPoliciesDto,
@@ -3931,6 +3945,1422 @@ export class SuperAdminService implements OnModuleInit {
         qualityRating: '',
         error: msg,
         config: this.sanitizeProviderResponse(updated),
+      };
+    }
+  }
+
+  /**
+   * White-Glove 1-Click Client Workspace Provisioning + Optional Segment Demo Seed
+   */
+  async provisionWorkspace(
+    actor: SuperAdminActor,
+    dto: ProvisionWorkspaceDto,
+    ipAddress = '',
+  ) {
+    const companyName = String(dto.companyName || '').trim();
+    const ownerName = String(dto.ownerName || '').trim();
+    const ownerEmail = String(dto.ownerEmail || '').trim().toLowerCase();
+
+    if (!companyName || !ownerName || !ownerEmail || !ownerEmail.includes('@')) {
+      throw new BadRequestException(
+        'Company name, owner name, and valid owner email are required.',
+      );
+    }
+
+    const existingUser = await this.userModel.findOne({ email: ownerEmail }).exec();
+    if (existingUser) {
+      throw new ConflictException(
+        `A Leadsetu user already exists for ${ownerEmail}.`,
+      );
+    }
+
+    const rawPassword =
+      String(dto.ownerPassword || '').trim() ||
+      `Ls@${randomBytes(4).toString('hex')}9`;
+    if (rawPassword.length < 6) {
+      throw new BadRequestException(
+        'Owner initial password must be at least 6 characters long.',
+      );
+    }
+
+    const businessMode = normalizeBusinessMode(dto.businessMode);
+    const plan = VALID_PLANS.includes(dto.plan as (typeof VALID_PLANS)[number])
+      ? (dto.plan as 'starter' | 'growth' | 'enterprise')
+      : 'growth';
+    const status = dto.status === 'active' ? 'active' : 'trial';
+    const trialDays = Math.max(1, Math.min(90, Number(dto.trialDays || 14)));
+    const trialEndsAt =
+      status === 'trial'
+        ? new Date(Date.now() + trialDays * 86_400_000).toISOString()
+        : '';
+    const city = String(dto.city || '').trim() || 'Delhi-NCR';
+    const gstin = String(dto.gstin || '').trim().toUpperCase();
+    const slugBase = companyName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/(^-|-$)/g, '')
+      .slice(0, 28);
+    const slug = `${slugBase || 'workspace'}-${randomBytes(2).toString('hex')}`;
+
+    const tenant = await this.tenantModel.create({
+      name: companyName,
+      companyName,
+      slug,
+      accountId: await generateAccountId(this.tenantModel),
+      plan,
+      status,
+      trialEndsAt,
+      city,
+      gstin,
+      businessMode,
+      hiddenNavModules: DEFAULT_HIDDEN_MODULES_BY_MODE[businessMode] || [],
+      seatLimitOverride:
+        dto.seatLimitOverride && Number(dto.seatLimitOverride) > 0
+          ? Number(dto.seatLimitOverride)
+          : null,
+      assignedManagerNote:
+        String(dto.assignedManagerNote || '').trim() ||
+        `Provisioned white-glove by HQ (${actor.name})`,
+    });
+
+    const owner = await this.userModel.create({
+      tenantId: tenant._id,
+      userCode: await generateUserCode(this.userModel),
+      name: ownerName,
+      email: ownerEmail,
+      phone: String(dto.ownerPhone || '').trim(),
+      passwordHash: hashSecret(rawPassword),
+      role: 'owner',
+      departmentPreset: 'executive',
+      permissions: ['*'],
+      isActive: true,
+    });
+
+    const seededCounts = { pipelines: 0, leads: 0, deals: 0, invoices: 0 };
+    if (dto.seedDemoData !== false) {
+      const stagePresets: Record<
+        string,
+        Array<{
+          id: string;
+          name: string;
+          probability: number;
+          color: string;
+          category: 'open' | 'won' | 'lost';
+        }>
+      > = {
+        b2c: [
+          { id: 'new_inquiry', name: 'New Inquiry', probability: 20, color: '#3978EA', category: 'open' },
+          { id: 'order_confirmed', name: 'Order Confirmed', probability: 55, color: '#8B5CF6', category: 'open' },
+          { id: 'dispatched', name: 'Packed & Dispatched', probability: 80, color: '#F59E0B', category: 'open' },
+          { id: 'won', name: 'Delivered / COD Settled', probability: 100, color: '#10B981', category: 'won' },
+          { id: 'lost', name: 'Cancelled / RTO', probability: 0, color: '#EF4444', category: 'lost' },
+        ],
+        education: [
+          { id: 'inquiry', name: 'Inquiry', probability: 20, color: '#3978EA', category: 'open' },
+          { id: 'counseling_done', name: 'Counseling Done', probability: 45, color: '#8B5CF6', category: 'open' },
+          { id: 'demo_attended', name: 'Demo Attended', probability: 75, color: '#F59E0B', category: 'open' },
+          { id: 'won', name: 'Fee Settled / Enrolled', probability: 100, color: '#10B981', category: 'won' },
+          { id: 'lost', name: 'Dropped', probability: 0, color: '#EF4444', category: 'lost' },
+        ],
+        bpo: [
+          { id: 'fresh_queue', name: 'Fresh Queue', probability: 20, color: '#3978EA', category: 'open' },
+          { id: 'contacted', name: 'Contacted', probability: 45, color: '#8B5CF6', category: 'open' },
+          { id: 'callback', name: 'Callback Scheduled', probability: 70, color: '#F59E0B', category: 'open' },
+          { id: 'won', name: 'Closed Converted', probability: 100, color: '#10B981', category: 'won' },
+          { id: 'lost', name: 'Not Interested / DND', probability: 0, color: '#EF4444', category: 'lost' },
+        ],
+        b2b: [
+          { id: 'qualified', name: 'Qualified Inquiry', probability: 25, color: '#3978EA', category: 'open' },
+          { id: 'discovery', name: 'Discovery & Sample', probability: 45, color: '#8B5CF6', category: 'open' },
+          { id: 'proposal', name: 'GST Proposal Sent', probability: 65, color: '#F59E0B', category: 'open' },
+          { id: 'negotiation', name: 'Negotiation', probability: 85, color: '#06B6D4', category: 'open' },
+          { id: 'won', name: 'Closed Won', probability: 100, color: '#10B981', category: 'won' },
+          { id: 'lost', name: 'Closed Lost', probability: 0, color: '#EF4444', category: 'lost' },
+        ],
+      };
+
+      const chosenStages = stagePresets[businessMode] || stagePresets.b2b;
+      const pipelineDoc = await this.connection.collection('pipelines').insertOne({
+        tenantId: tenant._id,
+        name: `${businessMode.toUpperCase()} Primary Pipeline`,
+        isDefault: true,
+        stages: chosenStages,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      seededCounts.pipelines = 1;
+
+      const kind = normalizeAccountKind(undefined, businessMode);
+      const now = new Date();
+      await this.connection.collection('leads').insertMany([
+        {
+          tenantId: tenant._id,
+          ownerId: owner._id,
+          name: kind === 'consumer' ? 'Aarav Mehta' : 'Ramesh Verma',
+          accountKind: kind,
+          company: kind === 'consumer' ? '' : 'Verma Industrial Controls',
+          phone: '+91 98111 40201',
+          email: 'buyer1@example.in',
+          city,
+          source: 'indiamart',
+          status: 'qualified',
+          estimatedValue: 185000,
+          aiScore: 89,
+          aiLabel: 'Hot',
+          aiInsight: 'Starter sample high-intent inquiry ready for WhatsApp quotation.',
+          tags: ['HQ Seeded'],
+          activities: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          tenantId: tenant._id,
+          ownerId: owner._id,
+          name: kind === 'consumer' ? 'Neha Kapoor' : 'Sunita Nair',
+          accountKind: kind,
+          company: kind === 'consumer' ? '' : 'Nair Precision Works',
+          phone: '+91 98111 40202',
+          email: 'buyer2@example.in',
+          city,
+          source: 'whatsapp',
+          status: 'new',
+          estimatedValue: 92000,
+          aiScore: 76,
+          aiLabel: 'Warm',
+          aiInsight: 'Fresh inbound WhatsApp lead queued for <10s response.',
+          tags: ['HQ Seeded'],
+          activities: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      ]);
+      seededCounts.leads = 2;
+
+      const firstOpenStage = chosenStages[0];
+      const wonStage = chosenStages.find((s) => s.category === 'won') || chosenStages[0];
+      await this.connection.collection('deals').insertMany([
+        {
+          tenantId: tenant._id,
+          ownerId: owner._id,
+          pipelineId: pipelineDoc.insertedId,
+          title:
+            kind === 'consumer'
+              ? `Priority Package - ${city}`
+              : `Annual Supply Deal - ${city}`,
+          company: kind === 'consumer' ? '' : 'Verma Industrial Controls',
+          contactName: kind === 'consumer' ? 'Aarav Mehta' : 'Ramesh Verma',
+          contactPhone: '+91 98111 40201',
+          contactEmail: 'buyer1@example.in',
+          city,
+          value: 185000,
+          stage: firstOpenStage.id,
+          stageCategory: firstOpenStage.category,
+          probability: firstOpenStage.probability,
+          source: 'indiamart',
+          gstApplicable: true,
+          aiScore: 86,
+          aiLabel: 'Hot',
+          tags: ['Sample'],
+          activities: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          tenantId: tenant._id,
+          ownerId: owner._id,
+          pipelineId: pipelineDoc.insertedId,
+          title: `Onboarding Reference Order`,
+          company: kind === 'consumer' ? '' : 'Apex Partner Corp',
+          contactName: 'Starter Customer',
+          contactPhone: '+91 98111 40203',
+          contactEmail: 'accounts@example.in',
+          city,
+          value: 118000,
+          stage: wonStage.id,
+          stageCategory: 'won',
+          probability: 100,
+          source: 'referral',
+          gstApplicable: true,
+          aiScore: 95,
+          aiLabel: 'Hot',
+          tags: ['Sample'],
+          activities: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      ]);
+      seededCounts.deals = 2;
+
+      await this.connection.collection('invoices').insertOne({
+        tenantId: tenant._id,
+        ownerId: owner._id,
+        invoiceNumber: `INV-${new Date().getFullYear()}-0001`,
+        docType: 'tax_invoice',
+        clientName: kind === 'consumer' ? 'Aarav Mehta' : 'Verma Industrial Controls',
+        phone: '+91 98111 40201',
+        email: 'buyer1@example.in',
+        gstin: kind === 'consumer' ? '' : '07AABCR1234F1Z5',
+        placeOfSupply: '09 - Uttar Pradesh',
+        taxType: 'cgst_sgst',
+        gstRate: 18,
+        items: [
+          {
+            description: 'Starter Solution Package (Sample)',
+            hsnSac: '998314',
+            quantity: 1,
+            unitPrice: 100000,
+            amount: 100000,
+          },
+        ],
+        subTotal: 100000,
+        discount: 0,
+        taxableAmount: 100000,
+        cgstAmount: 9000,
+        sgstAmount: 9000,
+        igstAmount: 0,
+        gstAmount: 18000,
+        grandTotal: 118000,
+        amountPaid: 0,
+        tdsDeducted: 0,
+        balanceDue: 118000,
+        payments: [],
+        status: 'sent',
+        paymentMethod: 'unpaid',
+        dueDate: new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10),
+        createdAt: now,
+        updatedAt: now,
+      });
+      seededCounts.invoices = 1;
+    }
+
+    await this.recordAudit(actor, {
+      action: 'superadmin.workspace_provisioned',
+      severity: 'info',
+      summary: `Provisioned workspace "${tenant.companyName || tenant.name}" (#${tenant.accountId}) on ${plan.toUpperCase()} (${status}) for ${owner.email}`,
+      ipAddress,
+      targetTenant: tenant,
+      metadata: {
+        businessMode,
+        plan,
+        status,
+        seededCounts,
+      },
+    });
+
+    const checklist = [
+      `1. Sign in at Leadsetu using ${owner.email} (Workspace #${tenant.accountId})`,
+      `2. Configure WhatsApp Cloud & IndiaMART Pull Key inside Settings → Integrations`,
+      `3. Set Seller 15-digit GSTIN in Invoices → CA GSTR-1 & TallyPrime Compliance`,
+      `4. Add sales reps & territory routing rules in Settings → Lead Routing`,
+    ];
+
+    return {
+      tenantId: String(tenant._id),
+      accountId: tenant.accountId,
+      companyName: tenant.companyName || tenant.name,
+      slug: tenant.slug,
+      businessMode,
+      plan,
+      status,
+      trialEndsAt,
+      city,
+      gstin,
+      owner: {
+        id: String(owner._id),
+        name: owner.name,
+        email: owner.email,
+        tempPassword: rawPassword,
+      },
+      seededCounts,
+      onboardingChecklist: checklist,
+    };
+  }
+
+  /**
+   * Trial Expiry & Dormancy Churn Rescue Funnel across non-HQ customer workspaces
+   */
+  async getOnboardingFunnel(params?: {
+    expiringWithinDays?: number;
+    dormantDays?: number;
+  }) {
+    const expiringDaysThreshold = Math.max(
+      1,
+      Math.min(30, Number(params?.expiringWithinDays || 3)),
+    );
+    const dormantDaysThreshold = Math.max(
+      2,
+      Math.min(60, Number(params?.dormantDays || 7)),
+    );
+
+    const tenants = await this.tenantModel
+      .find({ isPlatformHq: { $ne: true }, slug: { $ne: 'leadsetu-platform-hq' } })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const tenantIds = tenants.map((t) => t._id);
+    const [owners, leadCounts, dealCounts, userCounts] = await Promise.all([
+      this.userModel
+        .find({ tenantId: { $in: tenantIds }, role: 'owner' })
+        .select('tenantId name email phone lastLoginAt updatedAt')
+        .lean(),
+      this.connection
+        .collection('leads')
+        .aggregate([
+          { $match: { tenantId: { $in: tenantIds } } },
+          {
+            $group: {
+              _id: '$tenantId',
+              count: { $sum: 1 },
+              lastAt: { $max: '$updatedAt' },
+            },
+          },
+        ])
+        .toArray(),
+      this.connection
+        .collection('deals')
+        .aggregate([
+          { $match: { tenantId: { $in: tenantIds } } },
+          {
+            $group: {
+              _id: '$tenantId',
+              count: { $sum: 1 },
+              lastAt: { $max: '$updatedAt' },
+            },
+          },
+        ])
+        .toArray(),
+      this.userModel
+        .aggregate<{ _id: Types.ObjectId; count: number }>([
+          { $match: { tenantId: { $in: tenantIds } } },
+          { $group: { _id: '$tenantId', count: { $sum: 1 } } },
+        ])
+        .exec(),
+    ]);
+
+    const ownerMap = new Map<
+      string,
+      {
+        tenantId: Types.ObjectId;
+        name?: string;
+        email?: string;
+        phone?: string;
+        updatedAt?: Date;
+      }
+    >(owners.map((o) => [String(o.tenantId), o]));
+    const leadsMap = new Map<string, { count: number; lastAt?: unknown }>(
+      leadCounts.map((r) => [
+        String(r._id),
+        { count: Number(r.count || 0), lastAt: r.lastAt },
+      ]),
+    );
+    const dealsMap = new Map<string, { count: number; lastAt?: unknown }>(
+      dealCounts.map((r) => [
+        String(r._id),
+        { count: Number(r.count || 0), lastAt: r.lastAt },
+      ]),
+    );
+    const usersMap = new Map<string, number>(
+      userCounts.map((r) => [String(r._id), Number(r.count || 0)]),
+    );
+
+    const nowMs = Date.now();
+    const enriched = tenants.map((t) => {
+      const tid = String(t._id);
+      const owner = ownerMap.get(tid);
+      const lInfo = leadsMap.get(tid);
+      const dInfo = dealsMap.get(tid);
+      const usersCount = Number(usersMap.get(tid) || 1);
+      const leadsCount = Number(lInfo?.count || 0);
+      const dealsCount = Number(dInfo?.count || 0);
+
+      const createdAtMs = new Date(
+        ((t as unknown as { createdAt?: Date }).createdAt as Date) || nowMs,
+      ).getTime();
+      const lastDates = [
+        createdAtMs,
+        lInfo?.lastAt ? new Date(lInfo.lastAt as Date).getTime() : 0,
+        dInfo?.lastAt ? new Date(dInfo.lastAt as Date).getTime() : 0,
+        owner?.updatedAt
+          ? new Date(
+              (owner as unknown as { updatedAt?: Date }).updatedAt as Date,
+            ).getTime()
+          : 0,
+      ].filter((n) => Number.isFinite(n) && n > 0);
+      const lastActivityMs = Math.max(...lastDates, createdAtMs);
+      const daysInactive = Math.max(0, Math.floor((nowMs - lastActivityMs) / 86_400_000));
+
+      const trialEndMs = t.trialEndsAt ? new Date(t.trialEndsAt).getTime() : 0;
+      const daysRemaining =
+        t.status === 'trial' && trialEndMs > 0
+          ? Math.ceil((trialEndMs - nowMs) / 86_400_000)
+          : null;
+      const isExpired =
+        t.status === 'trial' && daysRemaining !== null && daysRemaining <= 0;
+      const planSpec = PLAN_CATALOG[t.plan || 'growth'];
+      const mrrInr = t.status === 'active' ? planSpec?.monthlyPrice || 2399 : 0;
+
+      const onboardingScore = Math.min(
+        100,
+        (usersCount > 1 ? 25 : 10) +
+          (leadsCount > 0 ? 30 : 0) +
+          (dealsCount > 0 ? 25 : 0) +
+          (t.gstin ? 20 : 0),
+      );
+
+      return {
+        tenantId: tid,
+        accountId: t.accountId || '',
+        companyName: t.companyName || t.name,
+        businessMode: t.businessMode || 'b2b',
+        plan: t.plan || 'growth',
+        status: t.status || 'trial',
+        city: t.city || 'Delhi-NCR',
+        trialEndsAt: t.trialEndsAt || '',
+        daysRemaining,
+        isExpired,
+        daysInactive,
+        usersCount,
+        leadsCount,
+        dealsCount,
+        onboardingScore,
+        mrrInr,
+        assignedManagerNote: t.assignedManagerNote || '',
+        ownerName: owner?.name || 'Workspace Owner',
+        ownerEmail: owner?.email || '',
+        ownerPhone: owner?.phone || '',
+        lastActivityAt: new Date(lastActivityMs).toISOString(),
+        createdAt: new Date(createdAtMs).toISOString(),
+      };
+    });
+
+    const expiringTrials = enriched
+      .filter(
+        (r) =>
+          r.status === 'trial' &&
+          (r.isExpired ||
+            (r.daysRemaining !== null && r.daysRemaining <= expiringDaysThreshold)),
+      )
+      .sort((a, b) => (a.daysRemaining ?? 999) - (b.daysRemaining ?? 999));
+
+    const dormantWorkspaces = enriched
+      .filter(
+        (r) =>
+          r.status !== 'suspended' &&
+          (r.daysInactive >= dormantDaysThreshold || r.leadsCount === 0),
+      )
+      .sort((a, b) => b.daysInactive - a.daysInactive || a.onboardingScore - b.onboardingScore);
+
+    const totalAtRiskMrrInr = dormantWorkspaces.reduce(
+      (acc, w) => acc + (w.mrrInr || PLAN_CATALOG[w.plan]?.monthlyPrice || 0),
+      0,
+    );
+
+    return {
+      summary: {
+        totalWorkspaces: enriched.length,
+        trialCount: enriched.filter((r) => r.status === 'trial').length,
+        expiringSoonCount: expiringTrials.filter((r) => !r.isExpired).length,
+        expiredTrialsCount: expiringTrials.filter((r) => r.isExpired).length,
+        activePaidCount: enriched.filter((r) => r.status === 'active').length,
+        dormantActiveCount: dormantWorkspaces.length,
+        totalAtRiskMrrInr,
+      },
+      expiringTrials: expiringTrials.slice(0, 30),
+      dormantWorkspaces: dormantWorkspaces.slice(0, 30),
+      recentProvisioned: enriched.slice(0, 20),
+    };
+  }
+
+  async executeChurnRescue(
+    actor: SuperAdminActor,
+    tenantId: string,
+    dto: ChurnRescueActionDto,
+    ipAddress = '',
+  ) {
+    if (!Types.ObjectId.isValid(tenantId)) {
+      throw new BadRequestException('Invalid workspace ID.');
+    }
+    const tenant = await this.tenantModel.findById(tenantId);
+    if (!tenant) throw new NotFoundException('Workspace not found.');
+
+    const notePrefix = new Date().toISOString().slice(0, 10);
+    let summary = '';
+
+    if (dto.action === 'extend_trial_7d' || dto.action === 'extend_trial_14d') {
+      const addDays = dto.action === 'extend_trial_14d' ? 14 : 7;
+      const existingEnd = tenant.trialEndsAt
+        ? new Date(tenant.trialEndsAt).getTime()
+        : 0;
+      const baseMs = Math.max(Date.now(), existingEnd);
+      tenant.trialEndsAt = new Date(baseMs + addDays * 86_400_000).toISOString();
+      if (tenant.status === 'suspended') {
+        tenant.status = 'trial';
+      }
+      tenant.assignedManagerNote =
+        dto.note?.trim() ||
+        `[${notePrefix}] Trial extended +${addDays}d by HQ Churn Rescue (${actor.name})`;
+      summary = `Extended trial +${addDays}d for "${tenant.companyName || tenant.name}" (#${tenant.accountId})`;
+    } else if (dto.action === 'activate_promo_growth') {
+      tenant.plan = 'growth';
+      tenant.status = 'active';
+      tenant.trialEndsAt = '';
+      tenant.assignedManagerNote =
+        dto.note?.trim() ||
+        `[${notePrefix}] Activated promo Growth plan via HQ Rescue (${actor.name})`;
+      summary = `Activated Growth plan for "${tenant.companyName || tenant.name}" (#${tenant.accountId})`;
+    } else {
+      tenant.assignedManagerNote =
+        dto.note?.trim() ||
+        `[${notePrefix}] Churn rescue outreach logged by ${actor.name}`;
+      summary = `Logged HQ rescue outreach note for "${tenant.companyName || tenant.name}" (#${tenant.accountId})`;
+    }
+
+    await tenant.save();
+
+    await this.recordAudit(actor, {
+      action: 'superadmin.churn_rescue_executed',
+      severity: 'info',
+      summary,
+      reason: dto.note,
+      ipAddress,
+      targetTenant: tenant,
+      metadata: { action: dto.action, trialEndsAt: tenant.trialEndsAt, status: tenant.status },
+    });
+
+    return {
+      ok: true,
+      tenantId: String(tenant._id),
+      status: tenant.status,
+      plan: tenant.plan,
+      trialEndsAt: tenant.trialEndsAt || '',
+      assignedManagerNote: tenant.assignedManagerNote || '',
+      summary,
+    };
+  }
+
+  /**
+   * Cross-Tenant Integration & Webhook Health Watchdog
+   * (WhatsApp Cloud + Meta CAPI + IndiaMART Pull v2)
+   */
+  async getIntegrationsWatchdog() {
+    const tenants = await this.tenantModel
+      .find({ isPlatformHq: { $ne: true }, slug: { $ne: 'leadsetu-platform-hq' } })
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    const tenantIds = tenants.map((t) => t._id);
+    const tenantNameMap = new Map<string, { name: string; accountId: string }>(
+      tenants.map((t) => [
+        String(t._id),
+        { name: t.companyName || t.name, accountId: t.accountId || '' },
+      ]),
+    );
+
+    const [capiStats, syncStats, waMsgStats, recentCapiFails, recentSyncFails, recentWaFails] =
+      await Promise.all([
+        this.connection
+          .collection('meta_capi_events')
+          .aggregate([
+            { $match: { tenantId: { $in: tenantIds } } },
+            {
+              $group: {
+                _id: '$tenantId',
+                total: { $sum: 1 },
+                sent: {
+                  $sum: { $cond: [{ $eq: ['$status', 'sent'] }, 1, 0] },
+                },
+                simulated: {
+                  $sum: { $cond: [{ $eq: ['$status', 'local_simulated'] }, 1, 0] },
+                },
+                failed: {
+                  $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] },
+                },
+                lastAt: { $max: '$createdAt' },
+              },
+            },
+          ])
+          .toArray(),
+        this.connection
+          .collection('marketplace_sync_logs')
+          .aggregate([
+            { $match: { tenantId: { $in: tenantIds } } },
+            {
+              $group: {
+                _id: '$tenantId',
+                total: { $sum: 1 },
+                success: {
+                  $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] },
+                },
+                error: {
+                  $sum: { $cond: [{ $eq: ['$status', 'error'] }, 1, 0] },
+                },
+                lastAt: { $max: '$syncedAt' },
+              },
+            },
+          ])
+          .toArray(),
+        this.connection
+          .collection('conversations')
+          .aggregate([
+            { $match: { tenantId: { $in: tenantIds } } },
+            { $unwind: '$messages' },
+            {
+              $match: {
+                'messages.direction': 'outbound',
+                'messages.deliveryProvider': 'meta_cloud',
+              },
+            },
+            {
+              $group: {
+                _id: '$tenantId',
+                total: { $sum: 1 },
+                failed: {
+                  $sum: { $cond: [{ $eq: ['$messages.status', 'failed'] }, 1, 0] },
+                },
+              },
+            },
+          ])
+          .toArray(),
+        this.connection
+          .collection('meta_capi_events')
+          .find({ tenantId: { $in: tenantIds }, status: 'failed' })
+          .sort({ createdAt: -1 })
+          .limit(20)
+          .toArray(),
+        this.connection
+          .collection('marketplace_sync_logs')
+          .find({ tenantId: { $in: tenantIds }, status: 'error' })
+          .sort({ createdAt: -1 })
+          .limit(20)
+          .toArray(),
+        this.connection
+          .collection('conversations')
+          .aggregate([
+            { $match: { tenantId: { $in: tenantIds } } },
+            { $unwind: '$messages' },
+            { $match: { 'messages.status': 'failed' } },
+            { $sort: { 'messages.createdAt': -1 } },
+            { $limit: 20 },
+            {
+              $project: {
+                tenantId: 1,
+                contactName: 1,
+                phone: 1,
+                deliveryError: '$messages.deliveryError',
+                createdAt: '$messages.createdAt',
+              },
+            },
+          ])
+          .toArray(),
+      ]);
+
+    const capiMap = new Map<
+      string,
+      { total: number; sent: number; simulated: number; failed: number; lastAt?: unknown }
+    >(
+      capiStats.map((r) => [
+        String(r._id),
+        {
+          total: Number(r.total || 0),
+          sent: Number(r.sent || 0),
+          simulated: Number(r.simulated || 0),
+          failed: Number(r.failed || 0),
+          lastAt: r.lastAt,
+        },
+      ]),
+    );
+    const syncMap = new Map<
+      string,
+      { total: number; success: number; error: number; lastAt?: unknown }
+    >(
+      syncStats.map((r) => [
+        String(r._id),
+        {
+          total: Number(r.total || 0),
+          success: Number(r.success || 0),
+          error: Number(r.error || 0),
+          lastAt: r.lastAt,
+        },
+      ]),
+    );
+    const waMap = new Map<string, { total: number; failed: number }>(
+      waMsgStats.map((r) => [
+        String(r._id),
+        { total: Number(r.total || 0), failed: Number(r.failed || 0) },
+      ]),
+    );
+
+    const tenantRows = tenants.map((t) => {
+      const tid = String(t._id);
+      const waCfg = t.whatsappCloud;
+      const capiCfg = t.metaCapi;
+      const imCfg = t.indiamartPull;
+
+      const capi = capiMap.get(tid) || { total: 0, sent: 0, simulated: 0, failed: 0 };
+      const im = syncMap.get(tid) || { total: 0, success: 0, error: 0 };
+      const waMsgs = waMap.get(tid) || { total: 0, failed: 0 };
+
+      const waConfigured = Boolean(
+        waCfg?.enabled ||
+          waCfg?.phoneNumberId ||
+          (waCfg?.connectionMode && waCfg.connectionMode !== 'not_connected'),
+      );
+      const waFailRate =
+        waMsgs.total > 0 ? Math.round((waMsgs.failed / waMsgs.total) * 100) : 0;
+      const waStatus: 'error' | 'warning' | 'healthy' | 'unconfigured' =
+        waCfg?.lastTestStatus === 'error'
+          ? 'error'
+          : waMsgs.failed > 0 && waFailRate >= 20
+            ? 'error'
+            : waMsgs.failed > 0
+              ? 'warning'
+              : waConfigured
+                ? 'healthy'
+                : 'unconfigured';
+
+      const capiConfigured = Boolean(capiCfg?.enabled || capiCfg?.pixelId || capi.total > 0);
+      const capiFailRate =
+        capi.total > 0 ? Math.round((capi.failed / capi.total) * 100) : 0;
+      const capiStatus: 'error' | 'warning' | 'healthy' | 'unconfigured' =
+        capiCfg?.lastStatus === 'failed' || (capi.failed > 0 && capiFailRate >= 25)
+          ? 'error'
+          : capi.failed > 0
+            ? 'warning'
+            : capiConfigured
+              ? 'healthy'
+              : 'unconfigured';
+
+      const imConfigured = Boolean(
+        imCfg?.enabled || imCfg?.glusrCrmKeyEncrypted || im.total > 0,
+      );
+      const imFailRate =
+        im.total > 0 ? Math.round((im.error / im.total) * 100) : 0;
+      const imStatus: 'error' | 'warning' | 'healthy' | 'unconfigured' =
+        imCfg?.lastSyncStatus === 'error' || (im.error > 0 && imFailRate >= 25)
+          ? 'error'
+          : im.error > 0
+            ? 'warning'
+            : imConfigured
+              ? 'healthy'
+              : 'unconfigured';
+
+      const statuses = [waStatus, capiStatus, imStatus];
+      const overallHealth: 'critical' | 'warning' | 'healthy' | 'idle' = statuses.includes(
+        'error',
+      )
+        ? 'critical'
+        : statuses.includes('warning')
+          ? 'warning'
+          : statuses.includes('healthy')
+            ? 'healthy'
+            : 'idle';
+
+      return {
+        tenantId: tid,
+        accountId: t.accountId || '',
+        companyName: t.companyName || t.name,
+        plan: t.plan || 'growth',
+        city: t.city || 'Delhi-NCR',
+        overallHealth,
+        whatsappCloud: {
+          status: waStatus,
+          enabled: Boolean(waCfg?.enabled),
+          mode: waCfg?.connectionMode || 'not_connected',
+          totalOutbound: waMsgs.total,
+          failedOutbound: waMsgs.failed,
+          failureRatePct: waFailRate,
+          lastTestedAt: waCfg?.lastTestedAt || '',
+          lastError: waCfg?.lastError || '',
+        },
+        metaCapi: {
+          status: capiStatus,
+          enabled: Boolean(capiCfg?.enabled),
+          pixelId: capiCfg?.pixelId || '',
+          totalEvents: capi.total,
+          sentEvents: capi.sent,
+          simulatedEvents: capi.simulated,
+          failedEvents: capi.failed,
+          failureRatePct: capiFailRate,
+          lastFiredAt: capiCfg?.lastFiredAt || '',
+          lastError: capiCfg?.lastError || '',
+        },
+        indiamartPull: {
+          status: imStatus,
+          enabled: Boolean(imCfg?.enabled),
+          hasKey: Boolean(imCfg?.glusrCrmKeyEncrypted),
+          totalRuns: im.total,
+          successRuns: im.success,
+          errorRuns: im.error,
+          failureRatePct: imFailRate,
+          lastSyncedAt: imCfg?.lastSyncedAt || '',
+          lastError:
+            imCfg?.lastSyncStatus === 'error' ? imCfg?.lastSyncSummary || '' : '',
+        },
+      };
+    });
+
+    const priorityRank = { critical: 0, warning: 1, healthy: 2, idle: 3 };
+    tenantRows.sort(
+      (a, b) =>
+        priorityRank[a.overallHealth] - priorityRank[b.overallHealth] ||
+        a.companyName.localeCompare(b.companyName),
+    );
+
+    const recentFailures = [
+      ...recentCapiFails.map((e) => {
+        const meta = tenantNameMap.get(String(e.tenantId));
+        return {
+          id: `capi-${String(e._id)}`,
+          tenantId: String(e.tenantId),
+          companyName: meta?.name || 'Workspace',
+          accountId: meta?.accountId || '',
+          connector: 'meta_capi' as const,
+          summary: `${String(e.eventName || 'Conversion')} failed (${String(e.entityLabel || '')})`,
+          errorMessage: String(e.errorMessage || `HTTP ${e.httpStatus || 400}`),
+          occurredAt:
+            e.createdAt instanceof Date
+              ? e.createdAt.toISOString()
+              : String(e.firedAt || new Date().toISOString()),
+        };
+      }),
+      ...recentSyncFails.map((s) => {
+        const meta = tenantNameMap.get(String(s.tenantId));
+        return {
+          id: `im-${String(s._id)}`,
+          tenantId: String(s.tenantId),
+          companyName: meta?.name || 'Workspace',
+          accountId: meta?.accountId || '',
+          connector: 'indiamart_pull' as const,
+          summary: `${String(s.channel || 'indiamart_pull').toUpperCase()} sync error`,
+          errorMessage: String(s.errorMessage || 'IndiaMART Pull API returned an error'),
+          occurredAt: String(s.syncedAt || new Date().toISOString()),
+        };
+      }),
+      ...recentWaFails.map((w, idx) => {
+        const meta = tenantNameMap.get(String(w.tenantId));
+        return {
+          id: `wa-${String(w.tenantId)}-${idx}`,
+          tenantId: String(w.tenantId),
+          companyName: meta?.name || 'Workspace',
+          accountId: meta?.accountId || '',
+          connector: 'whatsapp_cloud' as const,
+          summary: `WhatsApp delivery failed to ${String(w.contactName || w.phone || 'Buyer')}`,
+          errorMessage: String(w.deliveryError || 'Meta Cloud API delivery rejected'),
+          occurredAt: String(w.createdAt || new Date().toISOString()),
+        };
+      }),
+    ]
+      .sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime())
+      .slice(0, 30);
+
+    const summary = {
+      totalWorkspaces: tenantRows.length,
+      criticalTenants: tenantRows.filter((r) => r.overallHealth === 'critical').length,
+      warningTenants: tenantRows.filter((r) => r.overallHealth === 'warning').length,
+      healthyTenants: tenantRows.filter((r) => r.overallHealth === 'healthy').length,
+      totalCapiFailures: tenantRows.reduce((a, r) => a + r.metaCapi.failedEvents, 0),
+      totalIndiaMartErrors: tenantRows.reduce((a, r) => a + r.indiamartPull.errorRuns, 0),
+      totalWhatsappFailures: tenantRows.reduce(
+        (a, r) => a + r.whatsappCloud.failedOutbound,
+        0,
+      ),
+    };
+
+    return {
+      summary,
+      tenants: tenantRows,
+      recentFailures,
+    };
+  }
+
+  /**
+   * 1-Click Safe Proactive Integration Diagnostic Probe for a Tenant
+   */
+  async probeTenantIntegrationHealth(
+    actor: SuperAdminActor,
+    tenantId: string,
+    dto: RunIntegrationProbeDto,
+    ipAddress = '',
+  ) {
+    if (!Types.ObjectId.isValid(tenantId)) {
+      throw new BadRequestException('Invalid workspace ID.');
+    }
+    const tenant = await this.tenantModel.findById(tenantId);
+    if (!tenant) throw new NotFoundException('Workspace not found.');
+
+    const targetConnector = dto?.connector || 'all';
+    const probes: Array<{
+      connector: 'whatsapp_cloud' | 'meta_capi' | 'indiamart_pull';
+      status: 'healthy' | 'warning' | 'error' | 'unconfigured';
+      detail: string;
+      checkedAt: string;
+    }> = [];
+    const nowIso = new Date().toISOString();
+
+    // 1) WhatsApp Cloud Probe
+    if (targetConnector === 'all' || targetConnector === 'whatsapp_cloud') {
+      const wa = tenant.whatsappCloud;
+      if (!wa?.phoneNumberId && wa?.connectionMode !== 'leadsetu_managed') {
+        probes.push({
+          connector: 'whatsapp_cloud',
+          status: 'unconfigured',
+          detail: 'Tenant has not connected a WhatsApp Cloud Phone Number ID yet.',
+          checkedAt: nowIso,
+        });
+      } else if (wa.connectionMode === 'leadsetu_managed') {
+        probes.push({
+          connector: 'whatsapp_cloud',
+          status: 'healthy',
+          detail: 'Using Leadsetu Managed Central WhatsApp Gateway.',
+          checkedAt: nowIso,
+        });
+      } else {
+        const token = decryptSecret(wa.accessTokenEncrypted || '', String(tenant._id));
+        if (!token) {
+          probes.push({
+            connector: 'whatsapp_cloud',
+            status: 'error',
+            detail: 'WhatsApp Access Token missing or failed AES-256 decryption.',
+            checkedAt: nowIso,
+          });
+        } else {
+          try {
+            const { data } = await axios.get<{
+              display_phone_number?: string;
+              verified_name?: string;
+              quality_rating?: string;
+            }>(
+              `https://graph.facebook.com/v21.0/${encodeURIComponent(wa.phoneNumberId)}?fields=display_phone_number,verified_name,quality_rating`,
+              {
+                headers: { Authorization: `Bearer ${token}` },
+                timeout: 8000,
+              },
+            );
+            await this.tenantModel.updateOne(
+              { _id: tenant._id },
+              {
+                $set: {
+                  'whatsappCloud.lastTestedAt': nowIso,
+                  'whatsappCloud.lastTestStatus': 'connected',
+                  'whatsappCloud.lastError': '',
+                },
+              },
+            );
+            probes.push({
+              connector: 'whatsapp_cloud',
+              status: 'healthy',
+              detail: `Graph v21.0 OK (${data?.display_phone_number || wa.phoneNumberId} · Quality: ${data?.quality_rating || 'GREEN'})`,
+              checkedAt: nowIso,
+            });
+          } catch (err) {
+            const msg = axios.isAxiosError(err)
+              ? String(err.response?.data?.error?.message || err.message)
+              : 'Graph API probe failed';
+            await this.tenantModel.updateOne(
+              { _id: tenant._id },
+              {
+                $set: {
+                  'whatsappCloud.lastTestedAt': nowIso,
+                  'whatsappCloud.lastTestStatus': 'error',
+                  'whatsappCloud.lastError': msg,
+                },
+              },
+            );
+            probes.push({
+              connector: 'whatsapp_cloud',
+              status: 'error',
+              detail: msg,
+              checkedAt: nowIso,
+            });
+          }
+        }
+      }
+    }
+
+    // 2) Meta CAPI Token & Pixel Probe (safe read-only inspection, zero synthetic purchase fired)
+    if (targetConnector === 'all' || targetConnector === 'meta_capi') {
+      const capi = tenant.metaCapi;
+      if (!capi?.pixelId && !capi?.accessTokenEncrypted) {
+        probes.push({
+          connector: 'meta_capi',
+          status: 'unconfigured',
+          detail: 'Meta Pixel / Dataset ID not configured in Integrations.',
+          checkedAt: nowIso,
+        });
+      } else {
+        const token = decryptSecret(capi.accessTokenEncrypted || '', String(tenant._id));
+        if (!capi.pixelId || !token) {
+          probes.push({
+            connector: 'meta_capi',
+            status: 'warning',
+            detail: 'Pixel ID or CAPI System User Access Token is incomplete.',
+            checkedAt: nowIso,
+          });
+        } else if (capi.enabled === false) {
+          probes.push({
+            connector: 'meta_capi',
+            status: 'healthy',
+            detail: `Sandbox simulation mode active (Pixel ${capi.pixelId} & encrypted token verified).`,
+            checkedAt: nowIso,
+          });
+        } else {
+          try {
+            const { data } = await axios.get<{ id?: string; name?: string }>(
+              `https://graph.facebook.com/v21.0/${encodeURIComponent(capi.pixelId)}?fields=id,name&access_token=${encodeURIComponent(token)}`,
+              { timeout: 8000 },
+            );
+            probes.push({
+              connector: 'meta_capi',
+              status: 'healthy',
+              detail: `Meta Pixel verified (${data?.name || data?.id || capi.pixelId}).`,
+              checkedAt: nowIso,
+            });
+          } catch (err) {
+            const msg = axios.isAxiosError(err)
+              ? String(err.response?.data?.error?.message || err.message)
+              : 'Meta CAPI Graph API check failed';
+            await this.tenantModel.updateOne(
+              { _id: tenant._id },
+              {
+                $set: {
+                  'metaCapi.lastStatus': 'failed',
+                  'metaCapi.lastError': msg,
+                },
+              },
+            );
+            probes.push({
+              connector: 'meta_capi',
+              status: 'error',
+              detail: msg,
+              checkedAt: nowIso,
+            });
+          }
+        }
+      }
+    }
+
+    // 3) IndiaMART Pull API v2 Credential & Freshness Probe (rate-limit safe)
+    if (targetConnector === 'all' || targetConnector === 'indiamart_pull') {
+      const im = tenant.indiamartPull;
+      if (!im?.glusrCrmKeyEncrypted) {
+        probes.push({
+          connector: 'indiamart_pull',
+          status: 'unconfigured',
+          detail: 'IndiaMART glusr_crm_key v2 not configured.',
+          checkedAt: nowIso,
+        });
+      } else {
+        const key = decryptSecret(im.glusrCrmKeyEncrypted, String(tenant._id));
+        if (!key) {
+          probes.push({
+            connector: 'indiamart_pull',
+            status: 'error',
+            detail: 'Stored IndiaMART CRM key could not be decrypted.',
+            checkedAt: nowIso,
+          });
+        } else if (im.lastSyncStatus === 'error') {
+          probes.push({
+            connector: 'indiamart_pull',
+            status: 'error',
+            detail: `Last sync failed: ${im.lastSyncSummary || 'Check IndiaMART CRM key validity.'}`,
+            checkedAt: nowIso,
+          });
+        } else {
+          const minsAgo = im.lastSyncedAt
+            ? Math.round((Date.now() - new Date(im.lastSyncedAt).getTime()) / 60_000)
+            : null;
+          const stale =
+            im.enabled &&
+            minsAgo !== null &&
+            minsAgo > Math.max(15, (im.pollIntervalMinutes || 5) * 3);
+          probes.push({
+            connector: 'indiamart_pull',
+            status: stale ? 'warning' : 'healthy',
+            detail: stale
+              ? `Poller enabled but last sync was ${minsAgo}m ago (${im.lastSyncSummary || 'overdue'}).`
+              : `Encrypted CRM key verified${minsAgo !== null ? ` · Last synced ${minsAgo}m ago` : ' · Ready for Pull sync'}.`,
+            checkedAt: nowIso,
+          });
+        }
+      }
+    }
+
+    await this.recordAudit(actor, {
+      action: 'superadmin.integration_probe',
+      severity: probes.some((p) => p.status === 'error') ? 'warning' : 'info',
+      summary: `Ran proactive ${targetConnector.toUpperCase()} health probe for "${tenant.companyName || tenant.name}" (#${tenant.accountId})`,
+      reason: dto?.reason,
+      ipAddress,
+      targetTenant: tenant,
+      metadata: { probes },
+    });
+
+    return {
+      tenantId: String(tenant._id),
+      accountId: tenant.accountId || '',
+      companyName: tenant.companyName || tenant.name,
+      probes,
+    };
+  }
+
+  private async buildSanitizedRazorpayGateway(doc: PlatformConfigDocument) {
+    const raw: PlatformRazorpayGatewayConfig = {
+      ...DEFAULT_PLATFORM_RAZORPAY_GATEWAY,
+      ...((doc.razorpayGateway || {}) as Partial<PlatformRazorpayGatewayConfig>),
+    };
+    const eff = await resolveEffectiveRazorpayConfig(
+      this.connection,
+      this.configService,
+    );
+
+    const vaultHasKeyId = Boolean(raw.keyIdEncrypted);
+    const vaultHasKeySecret = Boolean(raw.keySecretEncrypted);
+    const vaultHasWebhook = Boolean(raw.webhookSecretEncrypted);
+    const envHasKeyId = Boolean(
+      (
+        this.configService.get<string>('RAZORPAY_KEY_ID') ||
+        process.env.RAZORPAY_KEY_ID ||
+        ''
+      ).trim(),
+    );
+    const envHasKeySecret = Boolean(
+      (
+        this.configService.get<string>('RAZORPAY_KEY_SECRET') ||
+        process.env.RAZORPAY_KEY_SECRET ||
+        ''
+      ).trim(),
+    );
+    const envHasWebhook = Boolean(
+      (
+        this.configService.get<string>('RAZORPAY_WEBHOOK_SECRET') ||
+        process.env.RAZORPAY_WEBHOOK_SECRET ||
+        ''
+      ).trim(),
+    );
+
+    const effectiveKeyIdPlain =
+      eff.keyId && eff.keyId !== 'rzp_test_leadsetu_sandbox' ? eff.keyId : '';
+
+    return {
+      enabled: raw.enabled !== false,
+      hasKeyId: Boolean(vaultHasKeyId || (raw.enabled !== false && envHasKeyId)),
+      vaultHasKeyId,
+      keyIdMask:
+        raw.keyIdMask ||
+        (effectiveKeyIdPlain ? maskSecret(effectiveKeyIdPlain) : ''),
+      hasKeySecret: Boolean(
+        vaultHasKeySecret || (raw.enabled !== false && envHasKeySecret),
+      ),
+      vaultHasKeySecret,
+      keySecretMask:
+        raw.keySecretMask ||
+        (eff.keySecret ? maskSecret(eff.keySecret) : ''),
+      hasWebhookSecret: Boolean(
+        vaultHasWebhook || (raw.enabled !== false && envHasWebhook),
+      ),
+      vaultHasWebhook,
+      webhookSecretMask:
+        raw.webhookSecretMask ||
+        (envHasWebhook
+          ? maskSecret(
+              (
+                this.configService.get<string>('RAZORPAY_WEBHOOK_SECRET') ||
+                process.env.RAZORPAY_WEBHOOK_SECRET ||
+                ''
+              ).trim(),
+            )
+          : ''),
+      mode: eff.mode,
+      source: eff.source,
+      gatewayReady: eff.isLiveConfigured,
+      invoiceWebhookPath: '/v1/invoices/webhooks/razorpay',
+      billingWebhookPath: '/v1/billing/webhooks/razorpay',
+      lastTestedAt: raw.lastTestedAt || '',
+      lastTestStatus: raw.lastTestStatus || 'untested',
+      lastError: raw.lastError || '',
+      updatedAt: raw.updatedAt || '',
+    };
+  }
+
+  async getRazorpayGateway() {
+    const doc = await this.ensureGlobalConfig();
+    return this.buildSanitizedRazorpayGateway(doc);
+  }
+
+  async updateRazorpayGateway(
+    actor: SuperAdminActor,
+    dto: {
+      enabled?: boolean;
+      keyId?: string;
+      keySecret?: string;
+      webhookSecret?: string;
+      clearKeyId?: boolean;
+      clearKeySecret?: boolean;
+      clearWebhookSecret?: boolean;
+    },
+    ipAddress?: string,
+  ) {
+    const doc = await this.ensureGlobalConfig();
+    const prev: PlatformRazorpayGatewayConfig = {
+      ...DEFAULT_PLATFORM_RAZORPAY_GATEWAY,
+      ...((doc.razorpayGateway || {}) as Partial<PlatformRazorpayGatewayConfig>),
+    };
+
+    const next: PlatformRazorpayGatewayConfig = {
+      ...prev,
+      enabled:
+        dto.enabled !== undefined ? Boolean(dto.enabled) : prev.enabled !== false,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (dto.clearKeyId) {
+      next.keyIdEncrypted = '';
+      next.keyIdMask = '';
+      next.lastTestStatus = 'untested';
+      next.lastError = '';
+    } else if (dto.keyId?.trim()) {
+      const k = dto.keyId.trim();
+      if (!/^rzp_(test|live)_[A-Za-z0-9]{6,}$/.test(k)) {
+        throw new BadRequestException(
+          'Razorpay Key ID must start with rzp_test_ or rzp_live_.',
+        );
+      }
+      next.keyIdEncrypted = encryptSecret(k);
+      next.keyIdMask = maskSecret(k);
+      next.lastTestStatus = 'untested';
+      next.lastError = '';
+    }
+
+    if (dto.clearKeySecret) {
+      next.keySecretEncrypted = '';
+      next.keySecretMask = '';
+      next.lastTestStatus = 'untested';
+      next.lastError = '';
+    } else if (dto.keySecret?.trim()) {
+      const s = dto.keySecret.trim();
+      next.keySecretEncrypted = encryptSecret(s);
+      next.keySecretMask = maskSecret(s);
+      next.lastTestStatus = 'untested';
+      next.lastError = '';
+    }
+
+    if (dto.clearWebhookSecret) {
+      next.webhookSecretEncrypted = '';
+      next.webhookSecretMask = '';
+    } else if (dto.webhookSecret?.trim()) {
+      const w = dto.webhookSecret.trim();
+      next.webhookSecretEncrypted = encryptSecret(w);
+      next.webhookSecretMask = maskSecret(w);
+    }
+
+    doc.razorpayGateway = next;
+    doc.updatedByEmail = actor.email;
+    doc.markModified('razorpayGateway');
+    await doc.save();
+
+    const sanitized = await this.buildSanitizedRazorpayGateway(doc);
+
+    await this.recordAudit(actor, {
+      action: 'platform.razorpay_gateway_updated',
+      severity: sanitized.mode === 'live' ? 'warning' : 'info',
+      summary: `Updated Central Razorpay Gateway (mode=${sanitized.mode}, source=${sanitized.source}, enabled=${sanitized.enabled})`,
+      ipAddress,
+    });
+
+    return sanitized;
+  }
+
+  async testRazorpayGateway(dto?: { keyId?: string; keySecret?: string }) {
+    const doc = await this.ensureGlobalConfig();
+    const eff = await resolveEffectiveRazorpayConfig(
+      this.connection,
+      this.configService,
+    );
+
+    const suppliedKeyId = String(dto?.keyId || '').trim();
+    const suppliedSecret = String(dto?.keySecret || '').trim();
+    const testKeyId =
+      suppliedKeyId ||
+      (eff.keyId !== 'rzp_test_leadsetu_sandbox' ? eff.keyId : '');
+    const testKeySecret = suppliedSecret || eff.keySecret;
+
+    if (!testKeyId || !testKeySecret) {
+      throw new BadRequestException(
+        'Razorpay Key ID and Key Secret are required (either save them in Super Admin or set RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET in .env).',
+      );
+    }
+
+    const mode = detectRazorpayMode(testKeyId);
+    const basicAuth = Buffer.from(`${testKeyId}:${testKeySecret}`).toString(
+      'base64',
+    );
+    const nowIso = new Date().toISOString();
+    const prev: PlatformRazorpayGatewayConfig = {
+      ...DEFAULT_PLATFORM_RAZORPAY_GATEWAY,
+      ...((doc.razorpayGateway || {}) as Partial<PlatformRazorpayGatewayConfig>),
+    };
+
+    try {
+      const { data } = await axios.get<{
+        payment_links?: Array<Record<string, unknown>>;
+      }>(`${eff.apiBase}/payment_links`, {
+        params: { count: 1 },
+        headers: { Authorization: `Basic ${basicAuth}` },
+        timeout: 12000,
+      });
+
+      const updated: PlatformRazorpayGatewayConfig = {
+        ...prev,
+        lastTestedAt: nowIso,
+        lastTestStatus: 'connected',
+        lastError: '',
+      };
+      if (!suppliedKeyId && !suppliedSecret) {
+        doc.razorpayGateway = updated;
+        doc.markModified('razorpayGateway');
+        await doc.save();
+      }
+
+      return {
+        ok: true,
+        mode,
+        source: suppliedKeyId || suppliedSecret ? 'supplied' : eff.source,
+        paymentLinksSampled: Array.isArray(data?.payment_links)
+          ? data.payment_links.length
+          : 0,
+        error: '',
+        config: await this.buildSanitizedRazorpayGateway(doc),
+      };
+    } catch (err) {
+      const msg = axios.isAxiosError(err)
+        ? String(
+            err.response?.data?.error?.description ||
+              err.response?.data?.error?.reason ||
+              err.message,
+          )
+        : err instanceof Error
+          ? err.message
+          : 'Razorpay API authentication failed';
+
+      const updated: PlatformRazorpayGatewayConfig = {
+        ...prev,
+        lastTestedAt: nowIso,
+        lastTestStatus: 'error',
+        lastError: msg,
+      };
+      if (!suppliedKeyId && !suppliedSecret) {
+        doc.razorpayGateway = updated;
+        doc.markModified('razorpayGateway');
+        await doc.save();
+      }
+
+      return {
+        ok: false,
+        mode,
+        source: suppliedKeyId || suppliedSecret ? 'supplied' : eff.source,
+        paymentLinksSampled: 0,
+        error: msg,
+        config: await this.buildSanitizedRazorpayGateway(doc),
       };
     }
   }

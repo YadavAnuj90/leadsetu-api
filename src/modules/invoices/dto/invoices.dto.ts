@@ -337,3 +337,84 @@ export class UpdateSellerGstProfileDto {
   @ApiPropertyOptional({ example: 'Plot 42, Sector 63, Noida, UP 201301' })
   address?: string;
 }
+
+export class WhatsappCartLineDto {
+  @ApiPropertyOptional({ description: 'Optional Product ID from /products catalog' })
+  productId?: string;
+
+  @ApiPropertyOptional({ example: 'IND-STAB-150' })
+  sku?: string;
+
+  @ApiProperty({ example: '150 KVA Servo Voltage Stabilizer' })
+  description!: string;
+
+  @ApiPropertyOptional({ example: '850440', default: '850440' })
+  hsnSac?: string;
+
+  @ApiProperty({ example: 2, default: 1 })
+  quantity!: number;
+
+  @ApiProperty({ example: 45000 })
+  unitPrice!: number;
+}
+
+export class CreateWhatsappCartCheckoutDto {
+  @ApiPropertyOptional({ description: 'Active WhatsApp Inbox conversation ID' })
+  conversationId?: string;
+
+  @ApiProperty({ example: 'Rohan Malhotra' })
+  clientName!: string;
+
+  @ApiProperty({ example: '+91 98114 77210' })
+  phone!: string;
+
+  @ApiPropertyOptional({ example: 'rohan@malhotraindustries.in' })
+  email?: string;
+
+  @ApiPropertyOptional({ example: '09 - Uttar Pradesh' })
+  placeOfSupply?: string;
+
+  @ApiPropertyOptional({ example: 18, default: 18 })
+  gstRate?: number;
+
+  @ApiPropertyOptional({ example: 0, default: 0 })
+  discount?: number;
+
+  @ApiPropertyOptional({ enum: ['tax_invoice', 'proforma_quote'], default: 'tax_invoice' })
+  docType?: 'tax_invoice' | 'proforma_quote';
+
+  @ApiProperty({ type: [WhatsappCartLineDto] })
+  items!: WhatsappCartLineDto[];
+
+  @ApiPropertyOptional({ default: true })
+  sendWhatsappNow?: boolean;
+
+  @ApiPropertyOptional()
+  customMessage?: string;
+}
+
+export class UpdateInvoiceDispatchDto {
+  @ApiProperty({
+    enum: ['Shiprocket', 'Delhivery', 'BlueDart', 'DTDC', 'Self-Dispatch'],
+    example: 'Shiprocket',
+  })
+  courier!: 'Shiprocket' | 'Delhivery' | 'BlueDart' | 'DTDC' | 'Self-Dispatch';
+
+  @ApiProperty({ example: 'SR9981273645IN' })
+  awbNumber!: string;
+
+  @ApiPropertyOptional({ example: 'https://shiprocket.co/tracking/SR9981273645IN' })
+  trackingUrl?: string;
+
+  @ApiPropertyOptional({
+    enum: ['pending', 'packed', 'in_transit', 'out_for_delivery', 'delivered'],
+    default: 'in_transit',
+  })
+  dispatchStatus?: 'pending' | 'packed' | 'in_transit' | 'out_for_delivery' | 'delivered';
+
+  @ApiPropertyOptional({ example: 'Dispatched from Noida Warehouse Gate-2' })
+  notes?: string;
+
+  @ApiPropertyOptional({ default: true })
+  sendWhatsAppAlert?: boolean;
+}

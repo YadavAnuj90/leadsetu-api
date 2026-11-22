@@ -2,6 +2,7 @@
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   Optional,
   UnauthorizedException,
@@ -16,6 +17,8 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { HydratedDocument, Model, Types } from 'mongoose';
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import axios from 'axios';
+import * as QRCode from 'qrcode';
 import { AuditService } from '../audit/audit.service';
 import {
   maskPhoneNumber,
@@ -23,6 +26,7 @@ import {
   resolveOwnerScopeFilter,
 } from '../auth/identity.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
+import { resolveEffectiveRazorpayConfig } from '../super-admin/razorpay-config.util';
 import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 import { InboxService, extractLast10Digits } from '../inbox/inbox.service';
 import { MetaCapiService } from '../meta-capi/meta-capi.service';
@@ -30,11 +34,13 @@ import {
   ApplyBankMatchDto,
   BankStatementReconcileDto,
   CreateInvoiceDto,
+  CreateWhatsappCartCheckoutDto,
   InvoiceLineItemDto,
   MarkInvoicePaidDto,
   RecordInvoicePaymentDto,
   RecordPromiseToPayDto,
   SendRecoveryChaserDto,
+  UpdateInvoiceDispatchDto,
   UpdateRecoveryConfigDto,
   UpdateSellerGstProfileDto,
 } from './dto/invoices.dto';
@@ -288,6 +294,36 @@ export class Invoice {
 
   @Prop({ trim: true, default: '' })
   creditOverrideReason!: string;
+
+  @Prop({ trim: true, default: '' })
+  upiPaymentUri!: string;
+
+  @Prop({ default: '' })
+  upiQrDataUrl!: string;
+
+  @Prop({ trim: true, default: '' })
+  dispatchCourier!: string;
+
+  @Prop({ trim: true, default: '' })
+  dispatchAwbNumber!: string;
+
+  @Prop({ trim: true, default: '' })
+  dispatchTrackingUrl!: string;
+
+  @Prop({
+    default: 'pending',
+    enum: ['pending', 'packed', 'in_transit', 'out_for_delivery', 'delivered'],
+  })
+  dispatchStatus!: 'pending' | 'packed' | 'in_transit' | 'out_for_delivery' | 'delivered';
+
+  @Prop({ trim: true, default: '' })
+  dispatchedAt!: string;
+
+  @Prop({ trim: true, default: '' })
+  dispatchNotes!: string;
+
+  @Prop({ trim: true, default: '' })
+  dispatchNotifiedAt!: string;
 }
 
 export const InvoiceSchema = SchemaFactory.createForClass(Invoice);
@@ -554,6 +590,15 @@ export class InvoicesService {
       isPtpBroken,
       creditOverrideBy: doc.creditOverrideBy || '',
       creditOverrideReason: doc.creditOverrideReason || '',
+      upiPaymentUri: doc.upiPaymentUri || '',
+      upiQrDataUrl: doc.upiQrDataUrl || '',
+      dispatchCourier: doc.dispatchCourier || '',
+      dispatchAwbNumber: doc.dispatchAwbNumber || '',
+      dispatchTrackingUrl: doc.dispatchTrackingUrl || '',
+      dispatchStatus: doc.dispatchStatus || 'pending',
+      dispatchedAt: doc.dispatchedAt || '',
+      dispatchNotes: doc.dispatchNotes || '',
+      dispatchNotifiedAt: doc.dispatchNotifiedAt || '',
       createdAt: raw.createdAt
         ? new Date(raw.createdAt).toISOString()
         : new Date().toISOString(),
@@ -1500,6 +1545,13 @@ export class InvoicesService {
     return this.buildUpiLink(upiId, merchantName, invoiceNumber, amountInr);
   }
 
+  private isUsableUpiId(upiId?: string | null): boolean {
+    const clean = String(upiId || '').trim();
+    if (!clean) return false;
+    if (clean.toLowerCase() === 'leadsetu.b2b@icici') return false;
+    return /^[a-zA-Z0-9._-]{2,}@[a-zA-Z0-9.-]{2,}$/.test(clean);
+  }
+
   private async getTenantRecoveryConfig(tenantId: string) {
     const tenant = Types.ObjectId.isValid(tenantId)
       ? await this.invoiceModel.db
@@ -1507,8 +1559,11 @@ export class InvoicesService {
           .findOne({ _id: new Types.ObjectId(tenantId) })
       : null;
     const saved = (tenant?.creditRecoveryConfig || {}) as Record<string, unknown>;
+    const rawUpi = String(saved.upiId || '').trim();
+    const upiConfigured = this.isUsableUpiId(rawUpi);
     return {
-      upiId: String(saved.upiId || 'leadsetu.b2b@icici'),
+      upiId: upiConfigured ? rawUpi : rawUpi || 'leadsetu.b2b@icici',
+      upiConfigured,
       merchantName: String(
         saved.merchantName || tenant?.name || 'Leadsetu Technologies Pvt. Ltd.',
       ),
@@ -1527,11 +1582,130 @@ export class InvoicesService {
     invoiceNumber: string,
     amountInr: number,
   ) {
-    const pa = encodeURIComponent(upiId.trim() || 'leadsetu.b2b@icici');
-    const pn = encodeURIComponent(merchantName.trim() || 'Leadsetu B2B');
-    const tn = encodeURIComponent(`Invoice ${invoiceNumber}`);
-    const am = Math.max(1, Math.round(amountInr)).toFixed(2);
-    return `upi://pay?pa=${pa}&pn=${pn}&tn=${tn}&am=${am}&cu=INR`;
+    const cleanPa = upiId.trim();
+    if (!cleanPa || !cleanPa.includes('@')) return '';
+    // Keep literal '@' in `pa` — NPCI / PhonePe / Paytm reject percent-encoded `%40`
+    const pa = encodeURIComponent(cleanPa).replace(/%40/g, '@');
+    const cleanName =
+      merchantName
+        .replace(/[^a-zA-Z0-9 ]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 50) || 'Leadsetu Business';
+    const pn = encodeURIComponent(cleanName);
+    const cleanRef =
+      invoiceNumber.replace(/[^a-zA-Z0-9]+/g, '').slice(0, 35) || 'INV';
+    const tn = encodeURIComponent(`Invoice ${cleanRef}`);
+    const numericAmt = Number(amountInr);
+    const am = Math.max(1, Number.isFinite(numericAmt) ? numericAmt : 1).toFixed(2);
+    return `upi://pay?pa=${pa}&pn=${pn}&tr=${cleanRef}&tn=${tn}&am=${am}&cu=INR`;
+  }
+
+  private isPlaceholderPaymentLink(link?: string | null): boolean {
+    const clean = String(link || '').trim();
+    return !clean || clean.startsWith('https://rzp.io/i/leadsetu-');
+  }
+
+  private async createRazorpayPaymentLink(params: {
+    tenantId: string;
+    invoiceId?: string;
+    invoiceNumber: string;
+    amountInr: number;
+    clientName: string;
+    phone?: string;
+    email?: string;
+    docType?: string;
+  }): Promise<{ paymentLink: string; gatewayMode: 'test' | 'live' | 'sandbox' }> {
+    const slugCode = params.invoiceNumber
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-');
+    const fallbackUrl = `https://rzp.io/i/leadsetu-${slugCode}`;
+
+    const amountPaise = Math.round(Number(params.amountInr || 0) * 100);
+    if (amountPaise < 100) {
+      return { paymentLink: fallbackUrl, gatewayMode: 'sandbox' };
+    }
+
+    const rzp = await resolveEffectiveRazorpayConfig(
+      this.invoiceModel.db,
+      this.configService,
+    );
+    if (!rzp.isLiveConfigured) {
+      return { paymentLink: fallbackUrl, gatewayMode: 'sandbox' };
+    }
+
+    const basicAuth = Buffer.from(`${rzp.keyId}:${rzp.keySecret}`).toString(
+      'base64',
+    );
+    const digits = extractLast10Digits(params.phone || '');
+    const customerPayload: Record<string, string> = {
+      name: params.clientName.trim().slice(0, 80) || 'Customer',
+    };
+    if (params.email?.trim()) {
+      customerPayload.email = params.email.trim().toLowerCase();
+    }
+    if (digits.length === 10) {
+      customerPayload.contact = `+91${digits}`;
+    }
+
+    const cleanRefBase =
+      params.invoiceNumber.replace(/[^a-zA-Z0-9-_]+/g, '').slice(0, 32) || 'INV';
+    const referenceId = `${cleanRefBase}-${randomBytes(2).toString('hex')}`;
+
+    try {
+      const payload: Record<string, unknown> = {
+        amount: amountPaise,
+        currency: 'INR',
+        accept_partial: amountPaise >= 200,
+        ...(amountPaise >= 200 ? { first_min_partial_amount: 100 } : {}),
+        reference_id: referenceId,
+        description: `${params.docType === 'proforma_quote' ? 'Quotation' : 'GST Invoice'} ${params.invoiceNumber} — ${params.clientName}`,
+        customer: customerPayload,
+        notify: { sms: false, email: false },
+        reminder_enable: false,
+        notes: {
+          ...(params.invoiceId ? { invoiceId: params.invoiceId } : {}),
+          invoiceNumber: params.invoiceNumber,
+          tenantId: params.tenantId,
+          clientName: params.clientName.trim().slice(0, 100),
+        },
+      };
+
+      const { data } = await axios.post<{
+        id?: string;
+        short_url?: string;
+      }>(`${rzp.apiBase}/payment_links`, payload, {
+        headers: {
+          Authorization: `Basic ${basicAuth}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 12000,
+      });
+
+      const shortUrl = String(data?.short_url || '').trim();
+      if (shortUrl) {
+        return {
+          paymentLink: shortUrl,
+          gatewayMode: rzp.mode === 'live' ? 'live' : 'test',
+        };
+      }
+    } catch (err) {
+      const msg = axios.isAxiosError(err)
+        ? String(
+            err.response?.data?.error?.description ||
+              err.response?.data?.error?.reason ||
+              err.message,
+          )
+        : err instanceof Error
+          ? err.message
+          : 'Razorpay payment_links failed';
+      Logger.warn(
+        `Razorpay Payment Link fallback for ${params.invoiceNumber}: ${msg}`,
+        'InvoicesService',
+      );
+    }
+
+    return { paymentLink: fallbackUrl, gatewayMode: 'sandbox' };
   }
 
   private async findMatchingBuyerContact(
@@ -1750,8 +1924,41 @@ export class InvoicesService {
     const initialAmountPaid = status === 'paid' ? computed.grandTotal : 0;
     const initialBalanceDue = status === 'paid' ? 0 : computed.grandTotal;
 
-    const slugCode = generatedNumber.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const paymentLink = `https://rzp.io/i/leadsetu-${slugCode}`;
+    const rzpLink =
+      status !== 'paid'
+        ? await this.createRazorpayPaymentLink({
+            tenantId: auth.tenantId,
+            invoiceNumber: generatedNumber,
+            amountInr:
+              initialBalanceDue > 0 ? initialBalanceDue : computed.grandTotal,
+            clientName: dto.clientName.trim(),
+            phone: dto.phone?.trim(),
+            email: dto.email?.trim(),
+            docType,
+          })
+        : {
+            paymentLink: `https://rzp.io/i/leadsetu-${generatedNumber
+              .toLowerCase()
+              .replace(/[^a-z0-9]/g, '')}`,
+            gatewayMode: 'sandbox' as const,
+          };
+    const paymentLink = rzpLink.paymentLink;
+
+    const recoveryCfg = await this.getTenantRecoveryConfig(auth.tenantId);
+    const upiPaymentUri = recoveryCfg.upiConfigured
+      ? this.buildUpiLink(
+          recoveryCfg.upiId,
+          recoveryCfg.merchantName,
+          generatedNumber,
+          initialBalanceDue > 0 ? initialBalanceDue : computed.grandTotal,
+        )
+      : '';
+    const upiQrDataUrl =
+      recoveryCfg.upiConfigured && upiPaymentUri && computed.grandTotal > 0
+        ? await QRCode.toDataURL(upiPaymentUri, { width: 320, margin: 2 }).catch(
+            () => '',
+          )
+        : '';
 
     let creditCheck = { creditTermDays: 15, overrideActorName: '' };
     if (!options?.skipCreditGuardrail) {
@@ -1800,6 +2007,9 @@ export class InvoicesService {
       status,
       paymentMethod,
       paymentLink,
+      upiPaymentUri,
+      upiQrDataUrl,
+      dispatchStatus: 'pending',
       dueDate: dto.dueDate?.trim() || defaultDue,
       notes:
         dto.notes?.trim() ||
@@ -2803,8 +3013,21 @@ export class InvoicesService {
     }
 
     const current = await this.getTenantRecoveryConfig(auth.tenantId);
+    const submittedUpi =
+      dto.upiId !== undefined ? dto.upiId.trim() : current.upiId;
+    if (
+      dto.upiId !== undefined &&
+      submittedUpi &&
+      !/^[a-zA-Z0-9._-]{2,}@[a-zA-Z0-9.-]{2,}$/.test(submittedUpi)
+    ) {
+      throw new BadRequestException(
+        'Invalid UPI ID format. Enter a valid VPA like yourbusiness@okicici or yourstore@ybl.',
+      );
+    }
+
     const nextConfig = {
-      upiId: dto.upiId !== undefined ? dto.upiId.trim() : current.upiId,
+      upiId: submittedUpi,
+      upiConfigured: this.isUsableUpiId(submittedUpi),
       merchantName:
         dto.merchantName !== undefined
           ? dto.merchantName.trim()
@@ -3741,12 +3964,23 @@ export class InvoicesService {
       doc.publicToken = `lsq_${randomBytes(10).toString('hex')}`;
       docChanged = true;
     }
-    if (!doc.paymentLink) {
-      const slugCode = doc.invoiceNumber
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-');
-      doc.paymentLink = `https://rzp.io/i/leadsetu-${slugCode}`;
-      docChanged = true;
+    if (this.isPlaceholderPaymentLink(doc.paymentLink) && doc.status !== 'paid') {
+      const settle = this.computeSettlement(doc);
+      const createdLink = await this.createRazorpayPaymentLink({
+        tenantId: auth.tenantId,
+        invoiceId: doc._id.toString(),
+        invoiceNumber: doc.invoiceNumber,
+        amountInr:
+          settle.balanceDue > 0 ? settle.balanceDue : settle.grandTotal,
+        clientName: doc.clientName,
+        phone: doc.phone,
+        email: doc.email,
+        docType: doc.docType,
+      });
+      if (doc.paymentLink !== createdLink.paymentLink) {
+        doc.paymentLink = createdLink.paymentLink;
+        docChanged = true;
+      }
     }
 
     const db = this.invoiceModel.db;
@@ -3956,17 +4190,11 @@ export class InvoicesService {
     signatureHeader: string | undefined,
     payload: Record<string, unknown>,
   ) {
-    const keySecret = (
-      this.configService.get<string>('RAZORPAY_KEY_SECRET') ||
-      process.env.RAZORPAY_KEY_SECRET ||
-      ''
-    ).trim();
-    const webhookSecret = (
-      this.configService.get<string>('RAZORPAY_WEBHOOK_SECRET') ||
-      process.env.RAZORPAY_WEBHOOK_SECRET ||
-      keySecret ||
-      'leadsetu_razorpay_default_secret_2026'
-    ).trim();
+    const rzp = await resolveEffectiveRazorpayConfig(
+      this.invoiceModel.db,
+      this.configService,
+    );
+    const webhookSecret = rzp.webhookSecret;
 
     const rawBuf = Buffer.isBuffer(rawBody)
       ? rawBody
@@ -4118,6 +4346,23 @@ export class InvoicesService {
       doc.paymentMethod = 'razorpay';
       doc.markModified('payments');
       await doc.save();
+
+      if (doc.status === 'paid' && this.metaCapiService) {
+        await this.metaCapiService
+          .fireConversionEvent({
+            tenantId: doc.tenantId.toString(),
+            eventName: 'Purchase',
+            entityType: 'invoice',
+            entityId: doc._id.toString(),
+            entityLabel: `${doc.invoiceNumber} · ${doc.clientName}`,
+            phone: doc.phone,
+            email: doc.email,
+            valueInr: Number(doc.grandTotal || 0),
+            triggeredBy: 'auto_razorpay_webhook_paid',
+            respectAutoToggle: true,
+          })
+          .catch(() => {});
+      }
     }
 
     const tenantIdStr = doc.tenantId.toString();
@@ -4256,5 +4501,441 @@ export class InvoicesService {
       whatsappReceiptSent,
       action: doc.status === 'paid' ? 'invoice_paid' : 'partial_payment_recorded',
     };
+  }
+
+  private buildCourierTrackingUrl(courier: string, awbNumber: string): string {
+    const cleanAwb = encodeURIComponent(awbNumber.trim());
+    if (courier === 'Shiprocket') {
+      return `https://shiprocket.co/tracking/${cleanAwb}`;
+    }
+    if (courier === 'Delhivery') {
+      return `https://www.delhivery.com/track/package/${cleanAwb}`;
+    }
+    if (courier === 'BlueDart') {
+      return `https://www.bluedart.com/tracking?trackFor=0&trackNo=${cleanAwb}`;
+    }
+    if (courier === 'DTDC') {
+      return `https://www.dtdc.in/tracking/shipment-tracking.asp?strCnno=${cleanAwb}`;
+    }
+    return `https://leadsetu.in/track/${cleanAwb}`;
+  }
+
+  /**
+   * 1-Click WhatsApp Catalog Cart Checkout + Scannable UPI QR Generation + Chat Dispatch
+   */
+  async createWhatsappCartCheckout(
+    auth: { userId: string; tenantId: string; email?: string; name?: string },
+    dto: CreateWhatsappCartCheckoutDto,
+  ) {
+    if (!Array.isArray(dto.items) || dto.items.length === 0) {
+      throw new BadRequestException('Select at least one SKU to build a WhatsApp cart.');
+    }
+
+    const db = this.invoiceModel.db;
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+
+    // Enrich missing SKU details from /products catalog when productId is supplied
+    const productIds = dto.items
+      .map((i) => i.productId)
+      .filter((id): id is string => Boolean(id && Types.ObjectId.isValid(id)))
+      .map((id) => new Types.ObjectId(id));
+
+    const catalogDocs =
+      productIds.length > 0
+        ? await db
+            .collection('products')
+            .find({ tenantId: tenantOid, _id: { $in: productIds } })
+            .toArray()
+        : [];
+    const catalogMap = new Map(catalogDocs.map((p) => [String(p._id), p]));
+
+    const resolvedItems: InvoiceLineItemDto[] = dto.items.map((line) => {
+      const cat = line.productId ? catalogMap.get(line.productId) : undefined;
+      return {
+        description:
+          String(line.description || '').trim() ||
+          String(cat?.name || 'Catalog Item'),
+        hsnSac:
+          String(line.hsnSac || '').trim() ||
+          String(cat?.hsnSac || '850440'),
+        quantity: Math.max(1, Number(line.quantity || 1)),
+        unitPrice: Math.max(
+          0,
+          Number(line.unitPrice ?? cat?.unitPrice ?? 0),
+        ),
+      };
+    });
+
+    const createdInv = await this.create(
+      auth,
+      {
+        docType: dto.docType || 'tax_invoice',
+        clientName: dto.clientName.trim(),
+        contactPerson: dto.clientName.trim(),
+        phone: dto.phone.trim(),
+        email: dto.email?.trim(),
+        placeOfSupply: dto.placeOfSupply || '09 - Uttar Pradesh',
+        gstRate: dto.gstRate ?? 18,
+        discount: dto.discount ?? 0,
+        items: resolvedItems,
+        notes: 'WhatsApp Interactive Catalog Cart Checkout',
+      },
+      { skipCreditGuardrail: true },
+    );
+
+    const recoveryCfg = await this.getTenantRecoveryConfig(auth.tenantId);
+    const upiConfigured = recoveryCfg.upiConfigured;
+    const upiPaymentUri = upiConfigured
+      ? createdInv.upiPaymentUri ||
+        this.buildUpiLink(
+          recoveryCfg.upiId,
+          recoveryCfg.merchantName,
+          createdInv.invoiceNumber,
+          createdInv.grandTotal,
+        )
+      : '';
+    const upiQrDataUrl =
+      upiConfigured && upiPaymentUri
+        ? createdInv.upiQrDataUrl ||
+          (await QRCode.toDataURL(upiPaymentUri, {
+            width: 320,
+            margin: 2,
+          }).catch(() => ''))
+        : '';
+
+    const linesPreview = resolvedItems
+      .map(
+        (it, idx) =>
+          `${idx + 1}. ${it.description} × ${it.quantity} = ₹${(it.quantity * it.unitPrice).toLocaleString('en-IN')}`,
+      )
+      .join('\n');
+
+    const paymentLines = upiConfigured && upiPaymentUri
+      ? `Scan the attached UPI QR code or pay directly via:\n• UPI Link: ${upiPaymentUri}\n• Razorpay Link: ${createdInv.paymentLink}`
+      : `Pay securely via payment link:\n• Payment Link: ${createdInv.paymentLink}`;
+
+    const cartMsg =
+      dto.customMessage?.trim() ||
+      `Namaste ${dto.clientName} ji! Here is your order summary (*${createdInv.invoiceNumber}*):\n\n${linesPreview}\n\n${
+        createdInv.gstAmount > 0
+          ? `Taxable: ₹${createdInv.taxableAmount.toLocaleString('en-IN')} + GST (${createdInv.gstRate}%): ₹${createdInv.gstAmount.toLocaleString('en-IN')}\n`
+          : ''
+      }*Payable Total: ₹${createdInv.grandTotal.toLocaleString('en-IN')}*\n\n${paymentLines}`;
+
+    let whatsappDispatched = false;
+    let resolvedConvId = dto.conversationId || '';
+
+    if (dto.sendWhatsappNow !== false && this.inboxService) {
+      const qrAttachment = upiQrDataUrl
+        ? {
+            type: 'image' as const,
+            url: upiQrDataUrl,
+            filename: `UPI-QR-${createdInv.invoiceNumber}.png`,
+            mimeType: 'image/png',
+          }
+        : undefined;
+
+      if (resolvedConvId && Types.ObjectId.isValid(resolvedConvId)) {
+        try {
+          await this.inboxService.sendMessage(
+            {
+              userId: auth.userId,
+              tenantId: auth.tenantId,
+              email: auth.email || 'team@leadsetu.in',
+              name: auth.name || 'Sales Team',
+              role: 'admin',
+            },
+            resolvedConvId,
+            {
+              content: cartMsg,
+              via: 'inbox',
+              logToTimeline: true,
+              ...(qrAttachment ? { attachment: qrAttachment } : {}),
+            },
+          );
+          whatsappDispatched = true;
+        } catch {
+          whatsappDispatched = false;
+        }
+      } else if (dto.phone) {
+        try {
+          const dispatch = await this.inboxService.dispatchAutomatedWhatsApp({
+            tenantId: auth.tenantId,
+            userId: auth.userId,
+            actorName: auth.name || 'WhatsApp Cart Checkout',
+            linkedEntityType: 'contact',
+            linkedEntityId: createdInv.id,
+            contactName: dto.clientName,
+            company: dto.clientName,
+            phone: dto.phone,
+            estimatedValue: createdInv.grandTotal,
+            messageBody: cartMsg,
+            sendMode: 'text',
+            ...(qrAttachment ? { attachment: qrAttachment } : {}),
+            timelineMarker: `WhatsApp Catalog Cart ${createdInv.invoiceNumber} (₹${createdInv.grandTotal.toLocaleString('en-IN')}) sent with UPI QR`,
+          });
+          whatsappDispatched = !dispatch.skippedDnd && dispatch.status !== 'failed';
+          resolvedConvId = dispatch.conversationId || '';
+        } catch {
+          whatsappDispatched = false;
+        }
+      }
+    }
+
+    return {
+      invoice: { ...createdInv, upiPaymentUri, upiQrDataUrl },
+      upiId: recoveryCfg.upiId,
+      upiConfigured,
+      upiPaymentUri,
+      upiQrDataUrl,
+      paymentLink: createdInv.paymentLink,
+      whatsappDispatched,
+      conversationId: resolvedConvId,
+    };
+  }
+
+  async getInvoiceUpiQr(
+    auth: { userId: string; tenantId: string },
+    id: string,
+  ) {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new NotFoundException('Invoice not found.');
+    }
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
+    const doc = await this.invoiceModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
+      })
+      .exec();
+    if (!doc) throw new NotFoundException('Invoice not found.');
+
+    const cfg = await this.getTenantRecoveryConfig(auth.tenantId);
+    const settle = this.computeSettlement(doc);
+    const targetAmt = settle.balanceDue > 0 ? settle.balanceDue : settle.grandTotal;
+    const upiConfigured = cfg.upiConfigured;
+    const upiPaymentUri = upiConfigured
+      ? this.buildUpiLink(
+          cfg.upiId,
+          cfg.merchantName,
+          doc.invoiceNumber,
+          targetAmt,
+        )
+      : '';
+    const upiQrDataUrl =
+      upiConfigured && upiPaymentUri
+        ? await QRCode.toDataURL(upiPaymentUri, {
+            width: 320,
+            margin: 2,
+          })
+        : '';
+
+    if (
+      this.isPlaceholderPaymentLink(doc.paymentLink) &&
+      doc.status !== 'paid'
+    ) {
+      const upgraded = await this.createRazorpayPaymentLink({
+        tenantId: auth.tenantId,
+        invoiceId: doc._id.toString(),
+        invoiceNumber: doc.invoiceNumber,
+        amountInr: targetAmt,
+        clientName: doc.clientName,
+        phone: doc.phone,
+        email: doc.email,
+        docType: doc.docType,
+      });
+      if (upgraded.paymentLink && upgraded.paymentLink !== doc.paymentLink) {
+        doc.paymentLink = upgraded.paymentLink;
+      }
+    }
+
+    if (
+      doc.upiPaymentUri !== upiPaymentUri ||
+      doc.upiQrDataUrl !== upiQrDataUrl ||
+      doc.isModified('paymentLink')
+    ) {
+      doc.upiPaymentUri = upiPaymentUri;
+      doc.upiQrDataUrl = upiQrDataUrl;
+      await doc.save();
+    }
+
+    return {
+      invoiceId: doc._id.toString(),
+      invoiceNumber: doc.invoiceNumber,
+      clientName: doc.clientName,
+      grandTotal: settle.grandTotal,
+      balanceDue: settle.balanceDue,
+      upiId: cfg.upiId,
+      merchantName: cfg.merchantName,
+      upiConfigured,
+      upiPaymentUri,
+      upiQrDataUrl,
+      paymentLink: doc.paymentLink,
+      status: doc.status,
+    };
+  }
+
+  /**
+   * Courier & AWB Dispatch Tracking Update + 1-Click WhatsApp Shipment Alert
+   */
+  async updateDispatchAndNotify(
+    auth: { userId: string; tenantId: string },
+    id: string,
+    dto: UpdateInvoiceDispatchDto,
+  ) {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new NotFoundException('Invoice not found.');
+    }
+    if (!dto.awbNumber?.trim()) {
+      throw new BadRequestException('AWB / Tracking number is required.');
+    }
+
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
+    const doc = await this.invoiceModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
+      })
+      .exec();
+    if (!doc) throw new NotFoundException('Invoice not found.');
+
+    const awb = dto.awbNumber.trim().toUpperCase();
+    const courier = dto.courier || 'Shiprocket';
+    const trackingUrl =
+      dto.trackingUrl?.trim() || this.buildCourierTrackingUrl(courier, awb);
+    const dispatchStatus = dto.dispatchStatus || 'in_transit';
+    const nowIso = new Date().toISOString();
+
+    doc.dispatchCourier = courier;
+    doc.dispatchAwbNumber = awb;
+    doc.dispatchTrackingUrl = trackingUrl;
+    doc.dispatchStatus = dispatchStatus;
+    if (!doc.dispatchedAt) doc.dispatchedAt = nowIso;
+    doc.dispatchNotes = String(dto.notes || '').trim();
+
+    let whatsappNotified = false;
+    const formattedPhone = doc.phone
+      ? normalizeIndianPhone(doc.phone) || doc.phone
+      : '';
+    if (
+      dto.sendWhatsAppAlert !== false &&
+      this.inboxService &&
+      formattedPhone &&
+      extractLast10Digits(formattedPhone).length >= 10
+    ) {
+      const stageLabel = dispatchStatus.replace(/_/g, ' ').toUpperCase();
+      const alertMsg = `Namaste ${doc.contactPerson || doc.clientName} ji! 📦\n\nYour order against *${doc.invoiceNumber}* has been updated to *${stageLabel}*.\n\n• Courier Partner: *${courier}*\n• AWB Tracking #: \`${awb}\`\n• Live Tracking Link: ${trackingUrl}${
+        doc.dispatchNotes ? `\n• Dispatch Note: ${doc.dispatchNotes}` : ''
+      }\n\nThank you for shopping with us!`;
+
+      const entityType: 'deal' | 'lead' | 'contact' =
+        doc.linkedDealId && Types.ObjectId.isValid(doc.linkedDealId)
+          ? 'deal'
+          : doc.linkedLeadId && Types.ObjectId.isValid(doc.linkedLeadId)
+            ? 'lead'
+            : 'contact';
+      const entityId =
+        entityType === 'deal'
+          ? doc.linkedDealId
+          : entityType === 'lead'
+            ? doc.linkedLeadId
+            : doc._id.toString();
+
+      try {
+        const dispatch = await this.inboxService.dispatchAutomatedWhatsApp({
+          tenantId: auth.tenantId,
+          userId: auth.userId,
+          actorName: 'Dispatch Tracker',
+          linkedEntityType: entityType,
+          linkedEntityId: entityId,
+          contactName: doc.contactPerson || doc.clientName,
+          company: doc.clientName,
+          phone: formattedPhone,
+          estimatedValue: doc.grandTotal,
+          messageBody: alertMsg,
+          sendMode: 'text',
+          timelineMarker: `Dispatched via ${courier} (AWB ${awb}) · ${stageLabel}`,
+        });
+        whatsappNotified = !dispatch.skippedDnd && dispatch.status !== 'failed';
+        if (whatsappNotified) {
+          doc.dispatchNotifiedAt = nowIso;
+        }
+      } catch {
+        whatsappNotified = false;
+      }
+    }
+
+    await doc.save();
+
+    await this.auditService?.record({
+      tenantId: auth.tenantId,
+      actorId: auth.userId,
+      action: 'invoice.dispatch_updated',
+      entityType: 'invoice',
+      entityId: doc._id.toString(),
+      entityLabel: `${doc.invoiceNumber} · ${courier} (${awb})`,
+      summary: `Updated courier dispatch ${courier} AWB ${awb} (${dispatchStatus}) on ${doc.invoiceNumber}${whatsappNotified ? ' · WhatsApp Alert Sent' : ''}`,
+    });
+
+    return {
+      invoice: this.toDto(doc, false),
+      whatsappNotified,
+      trackingUrl,
+    };
+  }
+
+  /**
+   * Sandbox 1-Click Payment Webhook Simulation for testing Auto-Reconciliation end-to-end
+   */
+  async simulateWebhookPaid(
+    auth: { userId: string; tenantId: string },
+    id: string,
+  ) {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new NotFoundException('Invoice not found.');
+    }
+    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
+    const doc = await this.invoiceModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
+      })
+      .exec();
+    if (!doc) throw new NotFoundException('Invoice not found.');
+
+    const settle = this.computeSettlement(doc);
+    const payPaise = Math.max(100, Math.round((settle.balanceDue || settle.grandTotal) * 100));
+    const rzp = await resolveEffectiveRazorpayConfig(
+      this.invoiceModel.db,
+      this.configService,
+    );
+    const secret = rzp.webhookSecret;
+
+    const syntheticPayload = {
+      event: 'payment_link.paid',
+      payload: {
+        payment: {
+          entity: {
+            id: `pay_sim_${Date.now()}`,
+            amount: payPaise,
+            description: `Payment for ${doc.invoiceNumber}`,
+          },
+        },
+        payment_link: {
+          entity: {
+            short_url: doc.paymentLink,
+            reference_id: doc.invoiceNumber,
+            notes: { invoiceId: doc._id.toString(), invoiceNumber: doc.invoiceNumber },
+          },
+        },
+      },
+    };
+    const rawStr = JSON.stringify(syntheticPayload);
+    const sig = createHmac('sha256', secret).update(rawStr).digest('hex');
+
+    return this.handleCustomerRazorpayWebhook(rawStr, sig, syntheticPayload);
   }
 }

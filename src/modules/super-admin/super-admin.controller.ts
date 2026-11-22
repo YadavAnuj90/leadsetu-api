@@ -22,6 +22,7 @@ import type { Request, Response } from 'express';
 import { SuperAdminService } from './super-admin.service';
 import {
   BulkManageAiAuthorityDto,
+  ChurnRescueActionDto,
   CreateSaasCouponDto,
   CreateSaasPartnerDto,
   CreateSuperAdminOperatorDto,
@@ -31,8 +32,10 @@ import {
   IssueTenantSubscriptionDto,
   ManageTenantAiAuthorityDto,
   PartnerPayoutDto,
+  ProvisionWorkspaceDto,
   ResolveTopupRequestDto,
   RevokeTenantSessionsDto,
+  RunIntegrationProbeDto,
   ToggleOperatorStatusDto,
   UpdateDunningPolicyDto,
   UpdatePlatformPoliciesDto,
@@ -704,5 +707,166 @@ export class SuperAdminController {
   ) {
     await this.superAdminService.verifySuperAdmin(authorization);
     return this.superAdminService.testWhatsAppProvider(body);
+  }
+
+  @Get('razorpay-gateway')
+  @ApiOperation({
+    summary:
+      'Get central Super Admin Razorpay Gateway config (encrypted vault + .env fallback + Test/Live mode)',
+  })
+  async getRazorpayGateway(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.getRazorpayGateway();
+  }
+
+  @Patch('razorpay-gateway')
+  @ApiOperation({
+    summary:
+      'Update central Super Admin Razorpay Key ID, Key Secret & Webhook Secret (encrypted override over .env)',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        enabled: { type: 'boolean', example: true },
+        keyId: { type: 'string', example: 'rzp_test_xxxxxxxxxxxxx' },
+        keySecret: { type: 'string' },
+        webhookSecret: { type: 'string' },
+        clearKeyId: { type: 'boolean', example: false },
+        clearKeySecret: { type: 'boolean', example: false },
+        clearWebhookSecret: { type: 'boolean', example: false },
+      },
+    },
+  })
+  async updateRazorpayGateway(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    body: {
+      enabled?: boolean;
+      keyId?: string;
+      keySecret?: string;
+      webhookSecret?: string;
+      clearKeyId?: boolean;
+      clearKeySecret?: boolean;
+      clearWebhookSecret?: boolean;
+    },
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.updateRazorpayGateway(
+      actor,
+      body,
+      clientIp(req),
+    );
+  }
+
+  @Post('razorpay-gateway/test')
+  @ApiOperation({
+    summary:
+      'Verify Razorpay Key ID & Key Secret against api.razorpay.com/v1/payment_links',
+  })
+  @ApiBody({
+    required: false,
+    schema: {
+      type: 'object',
+      properties: {
+        keyId: { type: 'string', example: 'rzp_test_xxxxxxxxxxxxx' },
+        keySecret: { type: 'string' },
+      },
+    },
+  })
+  async testRazorpayGateway(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body?: { keyId?: string; keySecret?: string },
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.testRazorpayGateway(body);
+  }
+
+  @Post('workspaces/provision')
+  @ApiOperation({
+    summary:
+      'White-glove 1-click provision a new Client Tenant + Owner Account (with optional segment pipeline & demo data)',
+  })
+  async provisionWorkspace(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: ProvisionWorkspaceDto,
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.provisionWorkspace(actor, dto, clientIp(req));
+  }
+
+  @Get('onboarding/funnel')
+  @ApiQuery({ name: 'expiringWithinDays', required: false, example: 3 })
+  @ApiQuery({ name: 'dormantDays', required: false, example: 7 })
+  @ApiOperation({
+    summary:
+      'Trial expiry & workspace dormancy churn rescue funnel across customer tenants',
+  })
+  async getOnboardingFunnel(
+    @Headers('authorization') authorization: string | undefined,
+    @Query('expiringWithinDays') expiringWithinDays?: string,
+    @Query('dormantDays') dormantDays?: string,
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.getOnboardingFunnel({
+      expiringWithinDays: expiringWithinDays ? Number(expiringWithinDays) : undefined,
+      dormantDays: dormantDays ? Number(dormantDays) : undefined,
+    });
+  }
+
+  @Post('onboarding/rescue/:tenantId')
+  @ApiOperation({
+    summary:
+      'Execute 1-click churn rescue (extend trial +7d/+14d, activate promo Growth plan, or log HQ rescue outreach)',
+  })
+  async executeChurnRescue(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('tenantId') tenantId: string,
+    @Body() dto: ChurnRescueActionDto,
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.executeChurnRescue(
+      actor,
+      tenantId,
+      dto,
+      clientIp(req),
+    );
+  }
+
+  @Get('integrations/watchdog')
+  @ApiOperation({
+    summary:
+      'Cross-Tenant Integration & Webhook Health Watchdog (WhatsApp Cloud + Meta CAPI + IndiaMART Pull v2)',
+  })
+  async getIntegrationsWatchdog(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.getIntegrationsWatchdog();
+  }
+
+  @Post('integrations/probe/:tenantId')
+  @ApiOperation({
+    summary:
+      'Run safe 1-click diagnostic probe on a tenant WhatsApp Cloud, Meta CAPI, or IndiaMART Pull integration',
+  })
+  async probeTenantIntegrationHealth(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('tenantId') tenantId: string,
+    @Body() dto: RunIntegrationProbeDto,
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.probeTenantIntegrationHealth(
+      actor,
+      tenantId,
+      dto,
+      clientIp(req),
+    );
   }
 }

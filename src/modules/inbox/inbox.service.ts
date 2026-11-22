@@ -44,11 +44,18 @@ import { MetaWhatsAppService } from './meta-whatsapp.service';
 import {
   buildConciergeFallbackReply,
   extractBuyerSignals,
+  isWithinIstBusinessHours,
   normalizeAiAgentPolicy,
   type AiActionLogItem,
   type AiQualifiedData,
   type AiSalesAgentPolicy,
+  type KnowledgeDocBrief,
 } from './ai-concierge.util';
+import {
+  AiKnowledgeCategory,
+  AiKnowledgeEntry,
+  AiKnowledgeEntryDocument,
+} from './schemas/ai-knowledge-entry.schema';
 import {
   ChatAttachment,
   ChatMessage,
@@ -274,6 +281,8 @@ export class InboxService {
     private readonly contactModel: Model<ContactDocument>,
     @InjectModel(Ticket.name)
     private readonly ticketModel: Model<TicketDocument>,
+    @InjectModel(AiKnowledgeEntry.name)
+    private readonly kbModel: Model<AiKnowledgeEntryDocument>,
     private readonly metaWhatsAppService: MetaWhatsAppService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
@@ -3170,6 +3179,285 @@ export class InboxService {
     return merged;
   }
 
+  private toKbDto(doc: Record<string, unknown>) {
+    return {
+      id: String(doc._id),
+      title: String(doc.title || ''),
+      category: String(doc.category || 'company_faq') as AiKnowledgeCategory,
+      content: String(doc.content || ''),
+      tags: Array.isArray(doc.tags) ? (doc.tags as string[]) : [],
+      sourceType: String(doc.sourceType || 'manual') as
+        | 'manual'
+        | 'catalog_sync'
+        | 'faq_preset',
+      isActive: doc.isActive !== false,
+      hitCount: Number(doc.hitCount || 0),
+      updatedAt: doc.updatedAt
+        ? new Date(doc.updatedAt as string | Date).toISOString()
+        : new Date().toISOString(),
+    };
+  }
+
+  async listKnowledgeBase(
+    auth: InboxAuthContext,
+    query?: { search?: string; category?: string },
+  ) {
+    const filter: Record<string, unknown> = {
+      tenantId: new Types.ObjectId(auth.tenantId),
+    };
+    if (query?.category && query.category !== 'all') {
+      filter.category = query.category;
+    }
+    if (query?.search?.trim()) {
+      const rx = new RegExp(
+        query.search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+        'i',
+      );
+      filter.$or = [{ title: rx }, { content: rx }, { tags: rx }];
+    }
+
+    const docs = await this.kbModel
+      .find(filter)
+      .sort({ hitCount: -1, updatedAt: -1 })
+      .limit(100)
+      .lean()
+      .exec();
+
+    const items = docs.map((d) => this.toKbDto(d as Record<string, unknown>));
+    return {
+      items,
+      stats: {
+        total: items.length,
+        active: items.filter((i) => i.isActive).length,
+        totalHits: items.reduce((acc, i) => acc + i.hitCount, 0),
+      },
+    };
+  }
+
+  async createKnowledgeEntry(
+    auth: InboxAuthContext,
+    dto: {
+      title: string;
+      category?: AiKnowledgeCategory;
+      content: string;
+      tags?: string[];
+      isActive?: boolean;
+    },
+  ) {
+    if (!['owner', 'admin', 'manager'].includes(auth.role)) {
+      throw new ForbiddenException(
+        'Only Owners, Admins, or Managers can edit the AI Knowledge Base.',
+      );
+    }
+    const title = String(dto.title || '').trim();
+    const content = String(dto.content || '').trim();
+    if (!title || !content) {
+      throw new BadRequestException('Title and Knowledge Content are required.');
+    }
+
+    const doc = await this.kbModel.create({
+      tenantId: new Types.ObjectId(auth.tenantId),
+      title,
+      category: dto.category || 'company_faq',
+      content,
+      tags: Array.isArray(dto.tags)
+        ? dto.tags.map((t) => String(t).trim()).filter(Boolean)
+        : [],
+      sourceType: 'manual',
+      isActive: dto.isActive !== false,
+    });
+
+    return this.toKbDto(doc.toObject() as unknown as Record<string, unknown>);
+  }
+
+  async updateKnowledgeEntry(
+    auth: InboxAuthContext,
+    entryId: string,
+    dto: Partial<{
+      title: string;
+      category: AiKnowledgeCategory;
+      content: string;
+      tags: string[];
+      isActive: boolean;
+    }>,
+  ) {
+    if (!['owner', 'admin', 'manager'].includes(auth.role)) {
+      throw new ForbiddenException(
+        'Only Owners, Admins, or Managers can edit the AI Knowledge Base.',
+      );
+    }
+    if (!Types.ObjectId.isValid(entryId)) {
+      throw new NotFoundException('Knowledge entry not found.');
+    }
+    const doc = await this.kbModel
+      .findOne({
+        _id: new Types.ObjectId(entryId),
+        tenantId: new Types.ObjectId(auth.tenantId),
+      })
+      .exec();
+    if (!doc) throw new NotFoundException('Knowledge entry not found.');
+
+    if (dto.title !== undefined && dto.title.trim()) {
+      doc.title = dto.title.trim();
+    }
+    if (dto.category !== undefined) {
+      doc.category = dto.category;
+    }
+    if (dto.content !== undefined && dto.content.trim()) {
+      doc.content = dto.content.trim();
+    }
+    if (dto.tags !== undefined) {
+      doc.tags = dto.tags.map((t) => String(t).trim()).filter(Boolean);
+    }
+    if (dto.isActive !== undefined) {
+      doc.isActive = Boolean(dto.isActive);
+    }
+
+    await doc.save();
+    return this.toKbDto(doc.toObject() as unknown as Record<string, unknown>);
+  }
+
+  async deleteKnowledgeEntry(auth: InboxAuthContext, entryId: string) {
+    if (!['owner', 'admin', 'manager'].includes(auth.role)) {
+      throw new ForbiddenException(
+        'Only Owners, Admins, or Managers can delete KB entries.',
+      );
+    }
+    if (!Types.ObjectId.isValid(entryId)) {
+      throw new NotFoundException('Knowledge entry not found.');
+    }
+    await this.kbModel
+      .deleteOne({
+        _id: new Types.ObjectId(entryId),
+        tenantId: new Types.ObjectId(auth.tenantId),
+      })
+      .exec();
+    return { deleted: true, id: entryId };
+  }
+
+  async seedStarterKnowledgeBase(auth: InboxAuthContext) {
+    const tenant = await this.tenantModel.findById(auth.tenantId).lean().exec();
+    const company = String(tenant?.companyName || tenant?.name || 'our company').trim();
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+
+    const presets: Array<{
+      refId: string;
+      title: string;
+      category: AiKnowledgeCategory;
+      content: string;
+      tags: string[];
+    }> = [
+      {
+        refId: 'preset_warranty_replacement',
+        title: 'Warranty, Service & Replacement Guarantee',
+        category: 'warranty_returns',
+        content: `All ${company} industrial & commercial products carry 18 Months standard replacement warranty against manufacturing defects. Defective units are replaced within 48 hours after photo/video inspection on WhatsApp.`,
+        tags: ['warranty', 'guarantee', 'garanti', 'replacement', 'repair', 'defective'],
+      },
+      {
+        refId: 'preset_dispatch_delivery',
+        title: 'PAN-India Dispatch, Courier & E-Way Bill Timeline',
+        category: 'shipping_dispatch',
+        content: `In-stock SKUs dispatch same-day (orders before 4 PM) via Shiprocket, Delhivery Surface, or BlueDart Air with live AWB tracking sent automatically on WhatsApp. Delivery takes 24–48h in Delhi-NCR and 3–5 business days PAN-India; E-Way Bill issued for orders >= ₹50,000.`,
+        tags: ['dispatch', 'delivery', 'shipping', 'courier', 'awb', 'transport', 'eway'],
+      },
+      {
+        refId: 'preset_gst_moq_pricing',
+        title: '18% GST Input Tax Credit, MOQ & Bulk Slabs',
+        category: 'pricing_terms',
+        content: `Every order includes Rule-46 Tax Invoice with HSN/SAC codes for 100% GST Input Tax Credit (ITC). Extra bulk slabs are auto-eligible on 50+ units; mention your 15-digit GSTIN on WhatsApp for instant Proforma Quote.`,
+        tags: ['gst', 'itc', 'invoice', 'moq', 'bulk', 'rate', 'discount'],
+      },
+      {
+        refId: 'preset_payment_upi_razorpay',
+        title: 'Payment Options: Instant UPI QR, Razorpay & NEFT/RTGS',
+        category: 'pricing_terms',
+        content: `Pay instantly using Dynamic UPI QR / Razorpay Payment Link (UPI, Cards, NetBanking) or Company Current Account NEFT/RTGS. Payment receipts and order tracking links unlock automatically on WhatsApp once settled.`,
+        tags: ['payment', 'upi', 'qr', 'razorpay', 'neft', 'rtgs', 'advance'],
+      },
+      {
+        refId: 'preset_demo_consultation',
+        title: 'Live Product Demo & Engineering Consultation',
+        category: 'company_faq',
+        content: `Need a live video walkthrough, technical spec sizing, or bulk dealer quote? Book a 30-minute consultation slot directly via our Leadsetu Booking Calendar and receive instant WhatsApp confirmation + 1-hour reminder.`,
+        tags: ['demo', 'sample', 'call', 'book', 'meeting', 'consultation'],
+      },
+    ];
+
+    let created = 0;
+    for (const p of presets) {
+      const existing = await this.kbModel
+        .findOne({ tenantId: tenantOid, sourceRefId: p.refId })
+        .exec();
+      if (!existing) {
+        await this.kbModel.create({
+          tenantId: tenantOid,
+          title: p.title,
+          category: p.category,
+          content: p.content,
+          tags: p.tags,
+          sourceType: 'faq_preset',
+          sourceRefId: p.refId,
+          isActive: true,
+        });
+        created += 1;
+      }
+    }
+
+    const overview = await this.listKnowledgeBase(auth);
+    return { ...overview, newlyAdded: created };
+  }
+
+  async syncCatalogToKnowledgeBase(auth: InboxAuthContext) {
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+    const products = await this.convModel.db
+      .collection('products')
+      .find({ tenantId: tenantOid, isActive: { $ne: false } })
+      .limit(40)
+      .toArray();
+
+    let syncedCount = 0;
+    for (const p of products) {
+      const pid = String(p._id);
+      const name = String(p.name || 'SKU').trim();
+      const sku = String(p.sku || '').trim();
+      const hsn = String(p.hsnSac || '850440').trim();
+      const price = Number(p.unitPrice || 0);
+      const gst = Number(p.gstRate ?? 18);
+      const moq = Number(p.moq || 1);
+      const desc = String(p.description || '').trim();
+
+      const content = `${name} (${sku ? `SKU: ${sku}, ` : ''}HSN: ${hsn}) — Base Rate ₹${price.toLocaleString('en-IN')} + ${gst}% GST per ${String(p.unit || 'unit')}, MOQ ${moq}.${desc ? ` ${desc}` : ''}`;
+
+      await this.kbModel.updateOne(
+        { tenantId: tenantOid, sourceRefId: `product_${pid}` },
+        {
+          $set: {
+            tenantId: tenantOid,
+            title: `${name} (${sku || 'Catalog Spec'})`,
+            category: 'product_spec',
+            content,
+            tags: [
+              name.toLowerCase(),
+              sku.toLowerCase(),
+              hsn.toLowerCase(),
+              'catalog',
+              'price',
+            ].filter(Boolean),
+            sourceType: 'catalog_sync',
+            sourceRefId: `product_${pid}`,
+            isActive: true,
+          },
+        },
+        { upsert: true },
+      );
+      syncedCount += 1;
+    }
+
+    const overview = await this.listKnowledgeBase(auth);
+    return { ...overview, syncedProducts: syncedCount };
+  }
+
   async toggleConversationAutopilot(
     auth: InboxAuthContext,
     id: string,
@@ -3270,23 +3558,67 @@ export class InboxService {
         [...(conv.messages || [])].reverse().find((m) => m.direction === 'inbound')
           ?.content ||
         '';
-      const ctx = await this.buildConversationAiContext(tenantId, conv, {
-        language: policy.language === 'auto' ? 'hinglish' : policy.language,
-        tone: 'helpful',
-      });
+      const [ctx, activeKbDocs] = await Promise.all([
+        this.buildConversationAiContext(tenantId, conv, {
+          language: policy.language === 'auto' ? 'hinglish' : policy.language,
+          tone: 'helpful',
+        }),
+        this.kbModel
+          .find({ tenantId: conv.tenantId, isActive: true })
+          .select('title category content tags')
+          .limit(50)
+          .lean()
+          .exec(),
+      ]);
+
+      const kbBriefs: KnowledgeDocBrief[] = activeKbDocs.map((d) => ({
+        id: String(d._id),
+        title: String(d.title || ''),
+        category: String(d.category || 'company_faq'),
+        content: String(d.content || ''),
+        tags: Array.isArray(d.tags) ? (d.tags as string[]) : [],
+      }));
+
+      const bookingSlug = String(
+        (tenant?.leadConnectors as Record<string, Record<string, unknown>> | undefined)
+          ?.bookingScheduler?.slug || '',
+      ).trim();
+      const bookingEnabled =
+        (tenant?.leadConnectors as Record<string, Record<string, unknown>> | undefined)
+          ?.bookingScheduler?.enabled !== false;
+      const bookingPublicUrl =
+        bookingEnabled && bookingSlug ? `/book/${bookingSlug}` : '';
 
       const signals = extractBuyerSignals({
         message: lastInboundText,
         productsCatalog: ctx.productsCatalog,
+        kbDocs: kbBriefs,
         existingData: (conv.aiQualifiedData || {}) as AiQualifiedData,
         policy,
       });
+
+      if (signals.bookingIntent && bookingPublicUrl && policy.autoShareBookingLink) {
+        signals.data.bookingLinkShared = bookingPublicUrl;
+      }
+
+      if (signals.matchedKb.length > 0) {
+        const hitIds = signals.matchedKb
+          .map((k) => k.id)
+          .filter((id) => Types.ObjectId.isValid(id))
+          .map((id) => new Types.ObjectId(id));
+        if (hitIds.length > 0) {
+          void this.kbModel
+            .updateMany({ _id: { $in: hitIds } }, { $inc: { hitCount: 1 } })
+            .exec();
+        }
+      }
 
       const fallbackReply = buildConciergeFallbackReply({
         buyerName: conv.contactName || 'Sir',
         language: signals.detectedLanguage,
         signals,
         policy,
+        bookingPublicUrl,
       });
       const fallbackSummary = this.buildLocalConversationAiFallback(ctx).summary;
 
@@ -3295,17 +3627,28 @@ export class InboxService {
       if (!signals.data.city) missingFields.push('delivery city');
       if (!signals.data.gstin) missingFields.push('GSTIN (optional)');
 
+      const kbContextText =
+        signals.matchedKb.length > 0
+          ? `Grounded Company Knowledge Base Facts (cite accurately): ${signals.matchedKb
+              .map((k) => `[${k.title}] ${k.snippet}`)
+              .join(' | ')}`
+          : '';
+
       const conciergeInstruction = [
         `You are Leadsetu 24x7 AI Sales Concierge.`,
         `Max discount cap is ${policy.maxDiscountPct}% — NEVER approve any discount above ${policy.maxDiscountPct}%.`,
+        kbContextText,
         signals.data.productName
           ? `Matched Catalog Item: ${signals.data.productName} (SKU ${signals.data.sku}, HSN ${signals.data.hsnSac}), ₹${signals.data.quotedUnitPrice} + ${signals.data.gstRate ?? 18}% GST, MOQ ${signals.data.moq || 1}.`
           : '',
+        signals.bookingIntent && bookingPublicUrl && policy.autoShareBookingLink
+          ? `Share our live booking link cleanly: ${bookingPublicUrl}`
+          : '',
         signals.discountExceedsCap
           ? `Buyer asked for ${signals.requestedDiscountPct}% discount (> ${policy.maxDiscountPct}% cap). Politely decline auto-approval and tell them a Senior Manager will connect.`
-          : missingFields.length > 0
+          : missingFields.length > 0 && signals.matchedKb.length === 0
             ? `Ask briefly for: ${missingFields.join(', ')}.`
-            : `All core specs captured! Confirm handoff to our Sales Specialist for formal Proforma GST Quotation.`,
+            : `Answer clearly and warmly in ${signals.detectedLanguage}.`,
       ]
         .filter(Boolean)
         .join(' ');
@@ -3316,8 +3659,9 @@ export class InboxService {
         customInstruction: conciergeInstruction,
       };
 
+      const skipLlmDraft = signals.discountExceedsCap || signals.frustrationDetected;
       const [replyRes, sumRes] = await Promise.all([
-        this.aiBridge && !signals.discountExceedsCap
+        this.aiBridge && !skipLlmDraft
           ? this.aiBridge
               .draftWhatsAppReply({
                 tenantId,
@@ -3417,7 +3761,13 @@ export class InboxService {
         ? [...(conv.aiActionLogs as AiActionLogItem[])]
         : [];
 
-      if (policy.mode === 'autopilot' && !conv.aiAutopilotPaused && !conv.whatsappOptOut) {
+      const withinHours = !policy.businessHoursOnly || isWithinIstBusinessHours();
+      if (
+        policy.mode === 'autopilot' &&
+        !conv.aiAutopilotPaused &&
+        !conv.whatsappOptOut &&
+        withinHours
+      ) {
         const snapshot =
           conv.linkedEntityType && conv.linkedEntityId
             ? await this.resolveCrmEntitySnapshot(
@@ -3450,16 +3800,21 @@ export class InboxService {
           conv.aiHandedOffAt = nowIso;
         }
 
+        const kbTag =
+          signals.matchedKb.length > 0
+            ? ` · KB Cited: [${signals.matchedKb.map((k) => k.title).join(', ')}]`
+            : '';
         logs.unshift({
           id: randomBytes(5).toString('hex'),
-          action: signals.discountExceedsCap
-            ? 'guardrail_blocked'
-            : signals.handoffTriggered
-              ? 'handoff_triggered'
-              : 'autopilot_replied',
+          action:
+            signals.discountExceedsCap || signals.frustrationDetected
+              ? 'guardrail_blocked'
+              : signals.handoffTriggered
+                ? 'handoff_triggered'
+                : 'autopilot_replied',
           detail: signals.handoffTriggered
-            ? `${signals.handoffReason} Auto-reply sent & paused for Sales Rep takeover.`
-            : `Auto-replied in ${signals.detectedLanguage} with catalog/qualification specs (Score ${signals.aiScore}).`,
+            ? `${signals.handoffReason} Auto-reply sent${kbTag} & paused for Sales Rep takeover.`
+            : `Auto-replied in ${signals.detectedLanguage}${kbTag} (Score ${signals.aiScore}).`,
           replySent: finalReply.slice(0, 220),
           mode: 'autopilot',
           createdAt: nowIso,

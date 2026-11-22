@@ -61,6 +61,11 @@ import {
   WhatsAppTemplateLanguage,
   WhatsAppTemplateSchema,
 } from './schemas/whatsapp-template.schema';
+import {
+  AiKnowledgeCategory,
+  AiKnowledgeEntry,
+  AiKnowledgeEntrySchema,
+} from './schemas/ai-knowledge-entry.schema';
 import { WhatsAppWebhookController } from './webhooks/whatsapp.controller';
 
 export {
@@ -316,6 +321,9 @@ export class UpdateAiAgentConfigSwaggerDto {
   @ApiPropertyOptional({ default: true })
   autoUpdateLeadFields?: boolean;
 
+  @ApiPropertyOptional({ default: true })
+  autoShareBookingLink?: boolean;
+
   @ApiPropertyOptional({ default: false })
   businessHoursOnly?: boolean;
 
@@ -336,6 +344,35 @@ export class SimulateInboundSwaggerDto {
     example: 'Namaste, 500 switch ka rate kya hai Gurugram ke liye? GSTIN 06AABCU9603R1ZM',
   })
   message!: string;
+}
+
+export class UpsertAiKnowledgeSwaggerDto {
+  @ApiProperty({ example: 'Warranty & Replacement Guarantee' })
+  title!: string;
+
+  @ApiPropertyOptional({
+    enum: [
+      'pricing_terms',
+      'product_spec',
+      'warranty_returns',
+      'shipping_dispatch',
+      'company_faq',
+      'custom_sop',
+    ],
+    default: 'company_faq',
+  })
+  category?: AiKnowledgeCategory;
+
+  @ApiProperty({
+    example: '18 Months standard replacement warranty with 48-hour resolution.',
+  })
+  content!: string;
+
+  @ApiPropertyOptional({ type: [String], example: ['warranty', 'replacement'] })
+  tags?: string[];
+
+  @ApiPropertyOptional({ default: true })
+  isActive?: boolean;
 }
 
 @ApiTags('6. Unified WhatsApp & AI Inbox')
@@ -411,6 +448,78 @@ export class InboxController {
   ) {
     const auth = await this.inboxService.verifyAuth(authorization);
     return this.inboxService.updateAiAgentConfig(auth, body);
+  }
+
+  @Get('ai-knowledge')
+  @ApiOperation({
+    summary: 'List workspace AI Knowledge Base (RAG FAQs, policies & synced SKUs)',
+  })
+  async listKnowledgeBase(
+    @Headers('authorization') authorization: string | undefined,
+    @Query('search') search?: string,
+    @Query('category') category?: string,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.listKnowledgeBase(auth, { search, category });
+  }
+
+  @Post('ai-knowledge')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Add a custom FAQ, warranty/shipping policy, or pricing SOP to AI Knowledge Base',
+  })
+  @ApiBody({ type: UpsertAiKnowledgeSwaggerDto })
+  async createKnowledgeEntry(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: UpsertAiKnowledgeSwaggerDto,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.createKnowledgeEntry(auth, body);
+  }
+
+  @Post('ai-knowledge/seed-defaults')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: '1-click seed B2B/D2C Indian Starter FAQs (Warranty, Dispatch, GST, Payments, Demo)',
+  })
+  async seedStarterKnowledge(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.seedStarterKnowledgeBase(auth);
+  }
+
+  @Post('ai-knowledge/sync-catalog')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Sync active /products catalog SKUs cleanly into AI Knowledge Base',
+  })
+  async syncCatalogKnowledge(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.syncCatalogToKnowledgeBase(auth);
+  }
+
+  @Patch('ai-knowledge/:entryId')
+  @ApiOperation({ summary: 'Update an AI Knowledge Base entry' })
+  async updateKnowledgeEntry(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('entryId') entryId: string,
+    @Body() body: Partial<UpsertAiKnowledgeSwaggerDto>,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.updateKnowledgeEntry(auth, entryId, body);
+  }
+
+  @Delete('ai-knowledge/:entryId')
+  @ApiOperation({ summary: 'Delete an AI Knowledge Base entry' })
+  async deleteKnowledgeEntry(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('entryId') entryId: string,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.deleteKnowledgeEntry(auth, entryId);
   }
 
   @Patch('whatsapp-config')
@@ -770,6 +879,7 @@ export class InboxController {
     MongooseModule.forFeature([
       { name: ConversationThread.name, schema: ConversationThreadSchema },
       { name: WhatsAppTemplate.name, schema: WhatsAppTemplateSchema },
+      { name: AiKnowledgeEntry.name, schema: AiKnowledgeEntrySchema },
       { name: Tenant.name, schema: TenantSchema },
       { name: PlatformConfig.name, schema: PlatformConfigSchema },
       { name: User.name, schema: UserSchema },

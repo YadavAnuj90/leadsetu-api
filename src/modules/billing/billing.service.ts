@@ -29,6 +29,7 @@ import {
 } from '../super-admin/schemas/platform-config.schema';
 import { AuditService } from '../audit/audit.module';
 import { SuperAdminService } from '../super-admin/super-admin.service';
+import { resolveEffectiveRazorpayConfig } from '../super-admin/razorpay-config.util';
 import { PLAN_CATALOG } from '../tenants/tenants.service';
 
 export type TopupPackId =
@@ -254,41 +255,11 @@ export class BillingService {
     }
   }
 
-  private getRazorpayConfig() {
-    const keyId = (
-      this.configService.get<string>('RAZORPAY_KEY_ID') ||
-      process.env.RAZORPAY_KEY_ID ||
-      ''
-    ).trim();
-    const keySecret = (
-      this.configService.get<string>('RAZORPAY_KEY_SECRET') ||
-      process.env.RAZORPAY_KEY_SECRET ||
-      ''
-    ).trim();
-    const webhookSecret = (
-      this.configService.get<string>('RAZORPAY_WEBHOOK_SECRET') ||
-      process.env.RAZORPAY_WEBHOOK_SECRET ||
-      keySecret ||
-      'leadsetu_razorpay_default_secret_2026'
-    ).trim();
-    const apiBase = (
-      this.configService.get<string>('RAZORPAY_API_BASE') ||
-      process.env.RAZORPAY_API_BASE ||
-      'https://api.razorpay.com/v1'
-    )
-      .trim()
-      .replace(/\/+$/, '');
-    const signingSecret =
-      keySecret || 'leadsetu_razorpay_default_secret_2026';
-
-    return {
-      keyId: keyId || 'rzp_test_leadsetu_sandbox',
-      keySecret,
-      signingSecret,
-      webhookSecret,
-      apiBase,
-      isLiveConfigured: Boolean(keyId && keySecret),
-    };
+  private async getRazorpayConfig() {
+    return resolveEffectiveRazorpayConfig(
+      this.tenantModel.db,
+      this.configService,
+    );
   }
 
   private computeGstBreakdown(netBaseAmount: number, buyerStateRaw?: string) {
@@ -413,7 +384,7 @@ export class BillingService {
         .exec(),
     ]);
 
-    const rzp = this.getRazorpayConfig();
+    const rzp = await this.getRazorpayConfig();
     const invoices = [...(tenant.subscriptionInvoices || [])].reverse();
 
     return {
@@ -978,7 +949,7 @@ export class BillingService {
       tenant.state || tenant.city || 'Delhi (07)',
     );
     const amountPaise = Math.max(0, gst.totalAmount * 100);
-    const rzp = this.getRazorpayConfig();
+    const rzp = await this.getRazorpayConfig();
     const receipt = `${topupPack ? 'lspack' : 'lssub'}_${
       tenant.accountId || tenant._id.toString().slice(-6)
     }_${Date.now()}`;
@@ -1110,8 +1081,11 @@ export class BillingService {
     };
   }
 
-  public computePaymentSignature(orderId: string, paymentId: string): string {
-    const { signingSecret } = this.getRazorpayConfig();
+  public async computePaymentSignature(
+    orderId: string,
+    paymentId: string,
+  ): Promise<string> {
+    const { signingSecret } = await this.getRazorpayConfig();
     return createHmac('sha256', signingSecret)
       .update(`${orderId}|${paymentId}`)
       .digest('hex');
@@ -1148,7 +1122,7 @@ export class BillingService {
     }
 
     const razorpayPaymentId = `pay_ls_${randomBytes(7).toString('hex')}`;
-    const razorpaySignature = this.computePaymentSignature(
+    const razorpaySignature = await this.computePaymentSignature(
       order.orderId,
       razorpayPaymentId,
     );
@@ -1360,7 +1334,10 @@ export class BillingService {
       throw new NotFoundException('Checkout order not found for this workspace.');
     }
 
-    const expectedSignature = this.computePaymentSignature(orderId, paymentId);
+    const expectedSignature = await this.computePaymentSignature(
+      orderId,
+      paymentId,
+    );
     if (!this.verifyHmacSignature(expectedSignature, signature)) {
       throw new BadRequestException(
         'Razorpay HMAC-SHA256 payment signature verification failed.',
@@ -1390,7 +1367,7 @@ export class BillingService {
     signatureHeader: string | undefined,
     payload: Record<string, unknown>,
   ) {
-    const { webhookSecret } = this.getRazorpayConfig();
+    const { webhookSecret } = await this.getRazorpayConfig();
     const rawPayload =
       Buffer.isBuffer(rawBody)
         ? rawBody

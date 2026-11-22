@@ -403,3 +403,86 @@ export class ResolveTopupRequestDto {
   @ApiPropertyOptional()
   note?: string;
 }
+
+export class ProvisionWorkspaceDto {
+  @ApiProperty({ example: 'Apex Switchgears Pvt. Ltd.' })
+  companyName!: string;
+
+  @ApiProperty({ example: 'Rajesh Sharma' })
+  ownerName!: string;
+
+  @ApiProperty({ example: 'rajesh@apexswitchgears.in' })
+  ownerEmail!: string;
+
+  @ApiPropertyOptional({
+    description: 'Optional initial password (auto-generated securely if omitted)',
+    example: 'Leadsetu@2026',
+  })
+  ownerPassword?: string;
+
+  @ApiPropertyOptional({ example: '+91 98112 45678' })
+  ownerPhone?: string;
+
+  @ApiPropertyOptional({
+    enum: ['b2b', 'msme', 'b2c', 'hybrid', 'bpo', 'education'],
+    default: 'b2b',
+  })
+  businessMode?: 'b2b' | 'msme' | 'b2c' | 'hybrid' | 'bpo' | 'education';
+
+  @ApiPropertyOptional({
+    enum: ['starter', 'growth', 'enterprise'],
+    default: 'growth',
+  })
+  plan?: 'starter' | 'growth' | 'enterprise';
+
+  @ApiPropertyOptional({ enum: ['trial', 'active'], default: 'trial' })
+  status?: 'trial' | 'active';
+
+  @ApiPropertyOptional({ default: 14, example: 14 })
+  trialDays?: number;
+
+  @ApiPropertyOptional({ example: 'Noida' })
+  city?: string;
+
+  @ApiPropertyOptional({ example: '09AAACA1234A1Z5' })
+  gstin?: string;
+
+  @ApiPropertyOptional({ nullable: true, example: 15 })
+  seatLimitOverride?: number | null;
+
+  @ApiPropertyOptional({ default: true })
+  seedDemoData?: boolean;
+
+  @ApiPropertyOptional({ example: 'Enterprise pilot closed by HQ Onboarding Desk' })
+  assignedManagerNote?: string;
+}
+
+export class ChurnRescueActionDto {
+  @ApiProperty({
+    enum: [
+      'extend_trial_7d',
+      'extend_trial_14d',
+      'activate_promo_growth',
+      'mark_outreach_sent',
+    ],
+  })
+  action!:
+    | 'extend_trial_7d'
+    | 'extend_trial_14d'
+    | 'activate_promo_growth'
+    | 'mark_outreach_sent';
+
+  @ApiPropertyOptional({ example: 'Extended trial +7d after founder demo call' })
+  note?: string;
+}
+
+export class RunIntegrationProbeDto {
+  @ApiPropertyOptional({
+    enum: ['whatsapp_cloud', 'meta_capi', 'indiamart_pull', 'all'],
+    default: 'all',
+  })
+  connector?: 'whatsapp_cloud' | 'meta_capi' | 'indiamart_pull' | 'all';
+
+  @ApiPropertyOptional({ example: 'Proactive HQ diagnostic check' })
+  reason?: string;
+}

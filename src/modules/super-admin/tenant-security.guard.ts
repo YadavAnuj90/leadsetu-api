@@ -114,6 +114,7 @@ export class TenantSecurityGuard implements CanActivate {
       path.includes('/auth/refresh') ||
       path.includes('/auth/logout') ||
       path.includes('/webhooks/') ||
+      path.includes('/public/') ||
       path.includes('/docs')
     ) {
       return true;
