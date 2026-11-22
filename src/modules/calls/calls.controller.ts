@@ -25,6 +25,7 @@ import {
   CallTelemetrySnapshotDto,
   CreateCallShareLinkDto,
   LogSimCallDto,
+  PowerDialOutcomeDto,
   PublicCallCallbackDto,
   SaveCallDispositionDto,
   UploadCallRecordingDto,
@@ -154,6 +155,36 @@ export class CallsController {
   ) {
     const auth = await this.callsService.verifyAuthHeader(authorization);
     return this.callsService.logSimCall(auth, dto);
+  }
+
+  @Get('power-queue')
+  @ApiOperation({
+    summary:
+      'Fetch prioritized BPO Power Dialer queue (due RNR/Callback retries first, then AI-sorted fresh leads)',
+  })
+  @ApiQuery({ name: 'onlyDue', required: false, enum: ['true', 'false'] })
+  @ApiQuery({ name: 'limit', required: false, example: 50 })
+  async getPowerQueue(
+    @Headers('authorization') authorization: string | undefined,
+    @Query() query: { onlyDue?: string; limit?: string },
+  ) {
+    const auth = await this.callsService.verifyAuthHeader(authorization);
+    return this.callsService.getPowerQueue(auth, query);
+  }
+
+  @Post('power-dial-outcome')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      '1-Tap Power Dialer disposition (RNR / Busy / Callback / Interested / Not Interested / DND) with smart retry cadence & RNR #2 auto-WhatsApp',
+  })
+  @ApiBody({ type: PowerDialOutcomeDto })
+  async recordPowerDialOutcome(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: PowerDialOutcomeDto,
+  ) {
+    const auth = await this.callsService.verifyAuthHeader(authorization);
+    return this.callsService.recordPowerDialOutcome(auth, dto);
   }
 
   @Get('public/link/:token')

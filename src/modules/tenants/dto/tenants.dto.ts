@@ -34,6 +34,18 @@ export class UpdateTenantProfileDto {
     example: 'B-42, Okhla Industrial Area Phase-II, New Delhi - 110020',
   })
   address?: string;
+
+  @ApiPropertyOptional({
+    enum: ['b2b', 'msme', 'b2c', 'hybrid', 'bpo', 'education'],
+    example: 'hybrid',
+  })
+  businessMode?: 'b2b' | 'msme' | 'b2c' | 'hybrid' | 'bpo' | 'education';
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['gstBilling', 'slaTickets'],
+  })
+  hiddenNavModules?: string[];
 }
 
 export class SubscribePlanDto {

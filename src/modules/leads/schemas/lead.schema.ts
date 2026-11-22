@@ -43,6 +43,13 @@ export class Lead {
   @Prop({ trim: true, default: '' })
   company!: string;
 
+  @Prop({
+    default: 'business',
+    enum: ['business', 'consumer'],
+    index: true,
+  })
+  accountKind!: 'business' | 'consumer';
+
   @Prop({ trim: true, default: '' })
   phone!: string;
 
@@ -106,6 +113,21 @@ export class Lead {
 
   @Prop({ type: Object, default: {} })
   customFields!: Record<string, unknown>;
+
+  @Prop({ type: Number, default: 0 })
+  rnrRetryCount?: number;
+
+  @Prop({ default: '' })
+  nextCallRetryAt?: string;
+
+  @Prop({ default: '' })
+  lastCalledAt?: string;
+
+  @Prop({ default: '' })
+  lastCallOutcome?: string;
+
+  @Prop({ type: Boolean, default: false, index: true })
+  doNotCall?: boolean;
 
   @Prop({ type: Array, default: [] })
   activities!: LeadActivity[];

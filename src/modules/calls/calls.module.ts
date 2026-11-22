@@ -10,6 +10,7 @@ import { Deal, DealSchema } from '../deals/schemas/deal.schema';
 import { Lead, LeadSchema } from '../leads/schemas/lead.schema';
 import { TaskItem, TaskItemSchema } from '../tasks/tasks.service';
 import { Ticket, TicketSchema } from '../tickets/tickets.service';
+import { InboxModule } from '../inbox/inbox.module';
 import { CallsController } from './calls.controller';
 import { CallsGateway } from './calls.gateway';
 import { CallsService } from './calls.service';
@@ -23,6 +24,7 @@ import {
   imports: [
     ConfigModule,
     AuditModule,
+    InboxModule,
     MongooseModule.forFeature([
       { name: CallLog.name, schema: CallLogSchema },
       { name: CallTelemetrySample.name, schema: CallTelemetrySampleSchema },

@@ -439,6 +439,25 @@ export class Tenant {
   @Prop({ type: Number, default: 0 })
   roundRobinIndex?: number;
 
+  /** Workspace commission slabs & quota accelerator settings. */
+  @Prop({ type: Object, default: () => ({}) })
+  commissionPolicy?: Record<string, unknown>;
+
+  /** Autonomous 24x7 AI WhatsApp Sales Concierge & Discount Guardrails. */
+  @Prop({ type: Object, default: () => ({}) })
+  aiSalesAgentPolicy?: Record<string, unknown>;
+
+  /** Workspace industry segment preset driving labels, default modules & workflows. */
+  @Prop({
+    default: 'b2b',
+    enum: ['b2b', 'msme', 'b2c', 'hybrid', 'bpo', 'education'],
+  })
+  businessMode?: 'b2b' | 'msme' | 'b2c' | 'hybrid' | 'bpo' | 'education';
+
+  /** Sidebar module keys hidden for this workspace segment unless re-enabled. */
+  @Prop({ type: [String], default: [] })
+  hiddenNavModules?: string[];
+
   /** Per-tenant Super Admin module feature overrides (true=force ON, false=force OFF). */
   @Prop({ type: Object, default: {} })
   featureOverrides?: Record<string, boolean>;

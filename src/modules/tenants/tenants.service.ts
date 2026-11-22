@@ -21,6 +21,10 @@ import { User, UserDocument } from '../auth/schemas/user.schema';
 import { AuditService } from '../audit/audit.module';
 import { sanitizeOrganizationLogoUrl } from '../auth/identity.util';
 import { uploadToCloudinary } from '../auth/cloudinary.util';
+import {
+  DEFAULT_HIDDEN_MODULES_BY_MODE,
+  normalizeBusinessMode,
+} from '../auth/business-mode.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import {
   SubscribePlanDto,
@@ -254,6 +258,10 @@ export class TenantsService {
       phone: tenant.phone || '',
       email: tenant.email || '',
       address: tenant.address || '',
+      businessMode: normalizeBusinessMode(tenant.businessMode),
+      hiddenNavModules: Array.isArray(tenant.hiddenNavModules)
+        ? tenant.hiddenNavModules
+        : DEFAULT_HIDDEN_MODULES_BY_MODE[normalizeBusinessMode(tenant.businessMode)] || [],
       maskPhoneForAgents: Boolean(tenant.maskPhoneForAgents),
       blockAgentExport: tenant.blockAgentExport ?? true,
       subscriptionInvoices: Array.isArray(tenant.subscriptionInvoices)
@@ -314,7 +322,18 @@ export class TenantsService {
     auth: TenantAuthContext,
     dto: UpdateTenantProfileDto,
   ) {
-    if (!['owner', 'admin'].includes(auth.role)) {
+    let effectiveRole = auth.role;
+    if (!['owner', 'admin', 'super_admin'].includes(effectiveRole)) {
+      const dbUser = await this.userModel
+        .findById(auth.userId)
+        .select('role')
+        .lean()
+        .exec();
+      if (dbUser?.role) {
+        effectiveRole = dbUser.role;
+      }
+    }
+    if (!['owner', 'admin', 'super_admin'].includes(effectiveRole)) {
       throw new ForbiddenException(
         'Only workspace Owners or Admins can edit organization settings.',
       );
@@ -356,6 +375,26 @@ export class TenantsService {
     if (dto.email !== undefined)
       tenant.email = dto.email.trim().toLowerCase();
     if (dto.address !== undefined) tenant.address = dto.address.trim();
+    if (dto.businessMode !== undefined) {
+      const nextMode = normalizeBusinessMode(dto.businessMode);
+      tenant.businessMode = nextMode;
+      if (dto.hiddenNavModules === undefined) {
+        tenant.hiddenNavModules = [
+          ...(DEFAULT_HIDDEN_MODULES_BY_MODE[nextMode] || []),
+        ];
+      }
+    }
+    if (dto.hiddenNavModules !== undefined) {
+      tenant.hiddenNavModules = Array.isArray(dto.hiddenNavModules)
+        ? Array.from(
+            new Set(
+              dto.hiddenNavModules
+                .map((m) => String(m || '').trim())
+                .filter(Boolean),
+            ),
+          )
+        : [];
+    }
 
     await tenant.save();
 

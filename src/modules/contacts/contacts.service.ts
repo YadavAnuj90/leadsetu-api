@@ -19,7 +19,7 @@ export type ContactDocument = HydratedDocument<Contact>;
 
 export interface ContactActivity {
   id: string;
-  type: 'created' | 'note' | 'call' | 'whatsapp';
+  type: 'created' | 'note' | 'call' | 'whatsapp' | 'portal';
   description: string;
   authorName: string;
   createdAt: string;
@@ -190,6 +190,12 @@ export class Contact {
   gstinVerifiedAt!: string;
 
   @Prop({
+    default: 'business',
+    enum: ['business', 'consumer'],
+  })
+  accountKind!: 'business' | 'consumer';
+
+  @Prop({
     default: 'customer',
     enum: ['customer', 'prospect', 'partner', 'vendor'],
   })
@@ -218,6 +224,15 @@ export class Contact {
 
   @Prop({ type: Object, default: {} })
   customFields!: Record<string, unknown>;
+
+  @Prop({ trim: true, unique: true, sparse: true, index: true })
+  portalToken?: string;
+
+  @Prop({ type: Boolean, default: true })
+  portalEnabled?: boolean;
+
+  @Prop({ trim: true, default: '' })
+  portalLastAccessedAt?: string;
 
   @Prop({ type: Array, default: [] })
   activities!: ContactActivity[];
@@ -360,6 +375,7 @@ export class ContactsService {
           : gstCheck?.status || 'unverified',
       gstinStateName: doc.gstinStateName || gstCheck?.stateName || '',
       gstinVerifiedAt: doc.gstinVerifiedAt || '',
+      accountKind: doc.accountKind === 'consumer' ? 'consumer' : 'business',
       type: doc.type || 'customer',
       lifetimeValue: doc.lifetimeValue || 0,
       creditLimitInr,
@@ -372,6 +388,9 @@ export class ContactsService {
       tags: doc.tags || [],
       notes: doc.notes || '',
       customFields: doc.customFields || {},
+      portalToken: doc.portalToken || '',
+      portalEnabled: doc.portalEnabled !== false,
+      portalLastAccessedAt: doc.portalLastAccessedAt || '',
       activities: doc.activities || [],
       createdAt: raw.createdAt
         ? new Date(raw.createdAt).toISOString()
@@ -384,7 +403,7 @@ export class ContactsService {
 
   async findAll(
     auth: { userId: string; tenantId: string },
-    query: { search?: string; type?: string },
+    query: { search?: string; type?: string; accountKind?: string },
   ) {
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
     const ownerScope = await resolveOwnerScopeFilter(this.contactModel.db, auth);
@@ -396,6 +415,11 @@ export class ContactsService {
 
     if (query.type && query.type !== 'all') {
       filter.type = query.type;
+    }
+    if (query.accountKind === 'consumer') {
+      filter.accountKind = 'consumer';
+    } else if (query.accountKind === 'business') {
+      filter.accountKind = { $ne: 'consumer' };
     }
     if (query.search?.trim()) {
       const regex = new RegExp(query.search.trim(), 'i');
@@ -431,6 +455,8 @@ export class ContactsService {
       data: docs.map((d) => this.toDto(d, maskPhones, resolveRec(d))),
       stats: {
         total: all.length,
+        businessCount: all.filter((c) => c.accountKind !== 'consumer').length,
+        consumerCount: all.filter((c) => c.accountKind === 'consumer').length,
         customers: all.filter((c) => c.type === 'customer').length,
         prospects: all.filter((c) => c.type === 'prospect').length,
         creditHoldCount: all.filter((c) => c.creditHold).length,
@@ -501,6 +527,7 @@ export class ContactsService {
       gstinStatus: gstCheck ? gstCheck.status : 'unverified',
       gstinStateName: gstCheck?.stateName || '',
       gstinVerifiedAt: gstCheck?.valid ? new Date().toISOString() : '',
+      accountKind: dto.accountKind === 'consumer' ? 'consumer' : 'business',
       type: dto.type || 'customer',
       lifetimeValue: Number(dto.lifetimeValue) || 0,
       creditLimitInr: Math.max(0, Number(dto.creditLimitInr) || 0),
@@ -558,6 +585,9 @@ export class ContactsService {
         doc.gstinStateName = '';
         doc.gstinVerifiedAt = '';
       }
+    }
+    if (dto.accountKind !== undefined) {
+      doc.accountKind = dto.accountKind === 'consumer' ? 'consumer' : 'business';
     }
     if (dto.type !== undefined) doc.type = dto.type;
     if (dto.lifetimeValue !== undefined)

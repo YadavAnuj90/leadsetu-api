@@ -9,6 +9,10 @@ import { ConfigService } from '@nestjs/config';
 import { Connection, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.service';
 import { maskPhoneNumber, resolveOwnerScopeFilter } from '../auth/identity.util';
+import {
+  computeCommissionBreakdown,
+  normalizeCommissionPolicy,
+} from '../team/commission.util';
 import { AnalyticsAuthContext } from './dto/analytics.dto';
 
 @Injectable()
@@ -71,6 +75,11 @@ export class AnalyticsService {
       ? new Date(now - daysMap[range] * 24 * 60 * 60 * 1000)
       : null;
 
+    const callFilter =
+      isScopedNonAdmin && auth.userId && Types.ObjectId.isValid(auth.userId)
+        ? { tenantId, callerId: new Types.ObjectId(auth.userId) }
+        : { tenantId };
+
     const [
       rawLeads,
       rawDeals,
@@ -82,6 +91,8 @@ export class AnalyticsService {
       users,
       tickets,
       productsCount,
+      tenantDoc,
+      rawCallLogs,
     ] = await Promise.all([
       db.collection('leads').find(scopedFilter).toArray(),
       db.collection('deals').find(scopedFilter).toArray(),
@@ -93,7 +104,13 @@ export class AnalyticsService {
       db.collection('users').find(usersFilter).toArray(),
       db.collection('tickets').find(scopedFilter).toArray(),
       db.collection('products').countDocuments(scopedFilter),
+      db.collection('tenants').findOne({ _id: tenantId }),
+      db.collection('call_logs').find(callFilter).toArray(),
     ]);
+
+    const commissionPolicy = normalizeCommissionPolicy(
+      tenantDoc?.commissionPolicy,
+    );
 
     const inRange = (doc: Record<string, unknown>) => {
       if (!cutoffDate) return true;
@@ -511,7 +528,8 @@ export class AnalyticsService {
       });
     }
 
-    // Sales Rep Leaderboard & Target Progress
+    // Sales Rep Leaderboard & Target Progress + Commission Slabs
+    const callLogsInRange = rawCallLogs.filter(inRange);
     const repLeaderboard = users
       .map((u) => {
         const uid = String(u._id);
@@ -527,12 +545,25 @@ export class AnalyticsService {
           (s, d) => s + (Number(d.value) || 0),
           0,
         );
-        const monthlyTarget = Number(u.monthlyTarget) || 500000;
-        const achievedRevenue = Math.max(repPaidRevenue, repWonValue);
-        const targetAchievementPct = Math.min(
-          150,
-          Math.round((achievedRevenue / monthlyTarget) * 100),
-        );
+        const repCallsCount = callLogsInRange.filter(
+          (c) => String(c.callerId) === uid,
+        ).length;
+        const winRatePct =
+          repDeals.length > 0
+            ? Math.round((repWonDeals.length / repDeals.length) * 100)
+            : 0;
+        const monthlyTarget = Number(u.monthlyTarget) || 0;
+        const commission = computeCommissionBreakdown({
+          wonRevenue: repWonValue,
+          paidRevenue: repPaidRevenue,
+          monthlyTarget,
+          policy: commissionPolicy,
+        });
+        const achievedRevenue = commission.eligibleRevenueInr;
+        const targetAchievementPct =
+          monthlyTarget > 0
+            ? Math.min(200, Math.round((achievedRevenue / monthlyTarget) * 100))
+            : 0;
 
         return {
           userId: uid,
@@ -543,10 +574,22 @@ export class AnalyticsService {
           hotLeadsCount: repLeads.filter(
             (l) => l.aiLabel === 'Hot' || Number(l.aiScore) >= 80,
           ).length,
+          dealsCount: repDeals.length,
           wonDealsCount: repWonDeals.length,
+          winRatePct,
+          callsCount: repCallsCount,
+          wonRevenue: repWonValue,
+          paidRevenue: repPaidRevenue,
           achievedRevenue,
           monthlyTarget,
           targetAchievementPct,
+          estimatedCommissionInr: commission.totalCommissionInr,
+          baseCommissionInr: commission.baseCommissionInr,
+          quotaBonusInr: commission.quotaBonusInr,
+          activeTierLabel: commission.activeTierLabel,
+          activeTierRatePct: commission.activeTierRatePct,
+          nextTierRemainingInr: commission.nextTierRemainingInr,
+          nextTierRatePct: commission.nextTierRatePct,
         };
       })
       .sort((a, b) => b.achievedRevenue - a.achievedRevenue || b.leadsCount - a.leadsCount);
@@ -628,6 +671,7 @@ export class AnalyticsService {
       agingBuckets,
       monthlyTrend,
       repLeaderboard,
+      commissionPolicy,
       topCampaigns,
     };
   }

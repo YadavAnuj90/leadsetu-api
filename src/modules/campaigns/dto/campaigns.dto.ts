@@ -5,9 +5,89 @@ export type CampaignSegment =
   | 'hot_leads'
   | 'noida_delhi_ncr'
   | 'indiamart_buyers'
-  | 'gst_customers';
+  | 'gst_customers'
+  | 'b2b_accounts'
+  | 'b2c_consumers'
+  | 'delivered_customers';
 
 export type CampaignStatus = 'completed' | 'running' | 'scheduled' | 'draft';
+
+export class CampaignSegmentFiltersDto {
+  @ApiPropertyOptional({
+    enum: ['all', 'business', 'consumer'],
+    default: 'all',
+    description: 'Filter audience by B2B business vs B2C consumer classification',
+  })
+  accountKind?: 'all' | 'business' | 'consumer';
+
+  @ApiPropertyOptional({
+    description: 'Filter audience by City / Hub substring (e.g. Mumbai, Noida)',
+    example: 'Noida',
+  })
+  city?: string;
+
+  @ApiPropertyOptional({
+    enum: ['all', 'new', 'contacted', 'qualified', 'proposal', 'converted', 'lost'],
+    default: 'all',
+    description: 'Filter Leads by current pipeline status',
+  })
+  leadStatus?: string;
+
+  @ApiPropertyOptional({
+    description: 'Minimum SetuAI score filter (0-100)',
+    example: 75,
+  })
+  minAiScore?: number;
+
+  @ApiPropertyOptional({
+    description: 'Automatically exclude DND / Opt-out contacts & leads (doNotCall / whatsappOptOut)',
+    default: true,
+  })
+  excludeDnd?: boolean;
+}
+
+export class PreviewAudienceDto {
+  @ApiPropertyOptional({
+    enum: [
+      'all_leads',
+      'hot_leads',
+      'noida_delhi_ncr',
+      'indiamart_buyers',
+      'gst_customers',
+      'b2b_accounts',
+      'b2c_consumers',
+      'delivered_customers',
+    ],
+    default: 'all_leads',
+  })
+  targetSegment?: CampaignSegment;
+
+  @ApiPropertyOptional({ type: CampaignSegmentFiltersDto })
+  segmentFilters?: CampaignSegmentFiltersDto;
+}
+
+export class RetargetCampaignDto {
+  @ApiPropertyOptional({
+    description: 'Custom campaign name for this follow-up drip blast',
+  })
+  name?: string;
+
+  @ApiPropertyOptional({
+    description: 'Follow-up WhatsApp message body for non-responders',
+  })
+  messageBody?: string;
+
+  @ApiPropertyOptional({
+    description: 'CTA label for the follow-up message',
+  })
+  ctaLabel?: string;
+
+  @ApiPropertyOptional({
+    description: 'Dispatch immediately (true) or save as draft (false)',
+    default: true,
+  })
+  sendNow?: boolean;
+}
 
 export class CreateCampaignDto {
   @ApiProperty({
@@ -52,10 +132,24 @@ export class CreateCampaignDto {
       'noida_delhi_ncr',
       'indiamart_buyers',
       'gst_customers',
+      'b2b_accounts',
+      'b2c_consumers',
+      'delivered_customers',
     ],
     default: 'all_leads',
   })
   targetSegment?: CampaignSegment;
+
+  @ApiPropertyOptional({
+    description: 'Granular B2B/B2C, City, Lead Status, AI Score & DND exclusion filters',
+    type: CampaignSegmentFiltersDto,
+  })
+  segmentFilters?: CampaignSegmentFiltersDto;
+
+  @ApiPropertyOptional({
+    description: 'Parent campaign ID when created as a non-responder retarget drip',
+  })
+  parentCampaignId?: string;
 
   @ApiProperty({
     description:

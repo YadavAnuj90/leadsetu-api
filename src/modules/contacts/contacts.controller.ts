@@ -44,7 +44,13 @@ export class ContactsController {
     name: 'type',
     required: false,
     enum: ['all', 'customer', 'prospect', 'partner', 'vendor'],
-    description: 'Filter by B2B account type',
+    description: 'Filter by account relationship type',
+  })
+  @ApiQuery({
+    name: 'accountKind',
+    required: false,
+    enum: ['all', 'business', 'consumer'],
+    description: 'Filter by B2B business account vs B2C individual consumer',
   })
   @ApiResponse({
     status: 200,
@@ -52,7 +58,7 @@ export class ContactsController {
   })
   async findAll(
     @Headers('authorization') authorization: string | undefined,
-    @Query() query: { search?: string; type?: string },
+    @Query() query: { search?: string; type?: string; accountKind?: string },
   ) {
     const auth = await this.contactsService.verifyAuth(authorization);
     return this.contactsService.findAll(auth, query);

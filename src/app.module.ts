@@ -23,6 +23,9 @@ import { CallsModule } from './modules/calls/calls.module';
 import { BillingModule } from './modules/billing/billing.module';
 import { PipelinesModule } from './modules/pipelines/pipelines.module';
 import { CustomFieldsModule } from './modules/custom-fields/custom-fields.module';
+import { LeadRoutingModule } from './modules/lead-routing/lead-routing.module';
+import { EmailCrmModule } from './modules/email-crm/email-crm.module';
+import { PortalModule } from './modules/portal/portal.module';
 
 @Module({
   imports: [
@@ -64,6 +67,9 @@ import { CustomFieldsModule } from './modules/custom-fields/custom-fields.module
     BillingModule,
     PipelinesModule,
     CustomFieldsModule,
+    LeadRoutingModule,
+    EmailCrmModule,
+    PortalModule,
   ],
 })
 export class AppModule {}

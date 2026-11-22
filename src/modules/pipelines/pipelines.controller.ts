@@ -20,7 +20,11 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { CreatePipelineDto, UpdatePipelineDto } from './dto/pipeline.dto';
+import {
+  ApplyModePresetDto,
+  CreatePipelineDto,
+  UpdatePipelineDto,
+} from './dto/pipeline.dto';
 import { PipelinesService } from './pipelines.service';
 
 @ApiTags('3. Deals & Kanban Pipeline')
@@ -88,6 +92,21 @@ export class PipelinesController {
   ) {
     const auth = await this.pipelinesService.verifyAuth(authorization);
     return this.pipelinesService.setDefaultPipeline(auth, id);
+  }
+
+  @Post('apply-mode-preset')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Apply segment pipeline stage preset to the workspace default pipeline (Owner/Admin)',
+    description: 'Updates default pipeline name & stages to match a workspace businessMode (`b2b`, `msme`, `b2c`, `hybrid`, `bpo`, `education`) and migrates active deals safely.',
+  })
+  @ApiBody({ type: ApplyModePresetDto })
+  async applyModePreset(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: ApplyModePresetDto,
+  ) {
+    const auth = await this.pipelinesService.verifyAuth(authorization);
+    return this.pipelinesService.applyModePreset(auth, dto?.businessMode);
   }
 
   @Delete(':id')

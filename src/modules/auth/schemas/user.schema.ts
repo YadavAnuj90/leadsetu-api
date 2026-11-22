@@ -122,6 +122,29 @@ export class User {
 
   @Prop({ type: Date, default: null })
   resetPasswordRequestedAt?: Date | null;
+
+  /** Google OAuth identity metadata. */
+  @Prop({ type: String, sparse: true, default: null })
+  googleSub?: string | null;
+
+  @Prop({ type: String, default: 'local', enum: ['local', 'google'] })
+  authProvider?: 'local' | 'google';
+
+  @Prop({ type: String, default: '' })
+  avatarUrl?: string;
+
+  /** Authenticator App (TOTP RFC 6238) 2FA metadata. */
+  @Prop({ type: Boolean, default: false })
+  twoFactorEnabled?: boolean;
+
+  @Prop({ type: String, default: null })
+  twoFactorSecretEncrypted?: string | null;
+
+  @Prop({ type: String, default: null })
+  twoFactorPendingSecretEncrypted?: string | null;
+
+  @Prop({ type: [String], default: [] })
+  twoFactorBackupCodesHashes?: string[];
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

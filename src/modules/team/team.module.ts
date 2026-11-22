@@ -56,6 +56,11 @@ import {
   USER_FEATURE_LABELS,
 } from '../auth/identity.util';
 import { dispatchTeamInviteEmail } from '../auth/email.util';
+import {
+  computeCommissionBreakdown,
+  normalizeCommissionPolicy,
+  type CommissionBasis,
+} from './commission.util';
 
 type Role = 'owner' | 'admin' | 'manager' | 'agent';
 type AssignableRole = Exclude<Role, 'owner'>;
@@ -167,6 +172,40 @@ export class SetMemberStatusDto {
   isActive!: boolean;
 }
 
+export class CommissionSlabItemDto {
+  @ApiProperty({ example: 0 })
+  minRevenueInr!: number;
+
+  @ApiPropertyOptional({ example: 500000, nullable: true })
+  maxRevenueInr?: number | null;
+
+  @ApiProperty({ example: 1.5 })
+  ratePct!: number;
+
+  @ApiProperty({ example: 'Starter Slab (0 – ₹5L)' })
+  label!: string;
+}
+
+export class UpdateCommissionPolicyDto {
+  @ApiPropertyOptional({ default: true })
+  enabled?: boolean;
+
+  @ApiPropertyOptional({
+    enum: ['max_won_or_paid', 'won_deals', 'paid_invoices'],
+    default: 'max_won_or_paid',
+  })
+  basis?: CommissionBasis;
+
+  @ApiPropertyOptional({
+    description: 'Extra flat bonus % earned across eligible revenue once monthlyTarget is reached (100%+)',
+    example: 0.5,
+  })
+  quotaBonusPct?: number;
+
+  @ApiPropertyOptional({ type: [CommissionSlabItemDto] })
+  slabs?: CommissionSlabItemDto[];
+}
+
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 interface Actor {
@@ -179,8 +218,11 @@ interface RepPerformance {
   hotLeads: number;
   convertedLeads: number;
   openPipeline: number;
+  dealsCount: number;
   wonDeals: number;
   wonRevenue: number;
+  paidRevenue: number;
+  callsCount: number;
 }
 
 const EMPTY_PERF: RepPerformance = {
@@ -188,8 +230,11 @@ const EMPTY_PERF: RepPerformance = {
   hotLeads: 0,
   convertedLeads: 0,
   openPipeline: 0,
+  dealsCount: 0,
   wonDeals: 0,
   wonRevenue: 0,
+  paidRevenue: 0,
+  callsCount: 0,
 };
 
 @Injectable()
@@ -305,7 +350,7 @@ export class TeamService {
     };
 
     try {
-      const [leadRows, dealRows] = await Promise.all([
+      const [leadRows, dealRows, invoiceRows, callRows] = await Promise.all([
         db
           .collection('leads')
           .aggregate([
@@ -327,6 +372,7 @@ export class TeamService {
             {
               $group: {
                 _id: '$ownerId',
+                dealsCount: { $sum: 1 },
                 openPipeline: {
                   $sum: { $cond: [{ $in: ['$stage', ['won', 'lost']] }, 0, '$value'] },
                 },
@@ -336,6 +382,46 @@ export class TeamService {
             },
           ])
           .toArray(),
+        db
+          .collection('invoices')
+          .aggregate([
+            {
+              $match: {
+                tenantId,
+                docType: { $ne: 'proforma_quote' },
+                status: { $ne: 'cancelled' },
+              },
+            },
+            {
+              $group: {
+                _id: '$ownerId',
+                paidRevenue: {
+                  $sum: {
+                    $cond: [
+                      { $eq: ['$status', 'paid'] },
+                      '$grandTotal',
+                      { $add: [{ $ifNull: ['$amountPaid', 0] }, { $ifNull: ['$tdsDeducted', 0] }] },
+                    ],
+                  },
+                },
+              },
+            },
+          ])
+          .toArray()
+          .catch(() => []),
+        db
+          .collection('call_logs')
+          .aggregate([
+            { $match: { tenantId } },
+            {
+              $group: {
+                _id: '$callerId',
+                callsCount: { $sum: 1 },
+              },
+            },
+          ])
+          .toArray()
+          .catch(() => []),
       ]);
 
       for (const r of leadRows) {
@@ -347,9 +433,20 @@ export class TeamService {
       }
       for (const r of dealRows) {
         Object.assign(get(r._id), {
+          dealsCount: r.dealsCount || 0,
           openPipeline: r.openPipeline || 0,
           wonDeals: r.wonDeals || 0,
           wonRevenue: r.wonRevenue || 0,
+        });
+      }
+      for (const r of invoiceRows) {
+        Object.assign(get(r._id), {
+          paidRevenue: Math.round(Number(r.paidRevenue) || 0),
+        });
+      }
+      for (const r of callRows) {
+        Object.assign(get(r._id), {
+          callsCount: r.callsCount || 0,
         });
       }
     } catch {
@@ -912,14 +1009,87 @@ export class TeamService {
     };
   }
 
+  async getCommissionPolicy(actor: Actor) {
+    return normalizeCommissionPolicy(actor.tenant.commissionPolicy);
+  }
+
+  async updateCommissionPolicy(actor: Actor, dto: UpdateCommissionPolicyDto) {
+    if (!['owner', 'admin'].includes(actor.user.role)) {
+      throw new ForbiddenException(
+        'Only Workspace Owners or Admins can modify commission slabs.',
+      );
+    }
+    const merged = normalizeCommissionPolicy({
+      ...normalizeCommissionPolicy(actor.tenant.commissionPolicy),
+      ...(dto.enabled !== undefined ? { enabled: dto.enabled } : {}),
+      ...(dto.basis !== undefined ? { basis: dto.basis } : {}),
+      ...(dto.quotaBonusPct !== undefined ? { quotaBonusPct: dto.quotaBonusPct } : {}),
+      ...(dto.slabs !== undefined ? { slabs: dto.slabs } : {}),
+    });
+
+    await this.tenantModel.updateOne(
+      { _id: actor.tenant._id },
+      { $set: { commissionPolicy: merged } },
+    );
+
+    await this.auditService?.record({
+      tenantId: actor.tenant._id.toString(),
+      actorId: actor.user._id.toString(),
+      actorName: actor.user.name,
+      actorEmail: actor.user.email,
+      actorUserCode: actor.user.userCode,
+      actorRole: actor.user.role,
+      action: 'team.commission_policy_updated',
+      entityType: 'team',
+      entityId: actor.tenant._id.toString(),
+      entityLabel: actor.tenant.name,
+      summary: `Updated workspace commission policy (${merged.slabs.length} slabs, basis=${merged.basis}, bonus=${merged.quotaBonusPct}%)`,
+    });
+
+    return merged;
+  }
+
   async getMyPerformance(actor: Actor) {
     const tenantId = actor.tenant._id as Types.ObjectId;
-    const perfMap = await this.getPerformance(tenantId);
-    const p = perfMap.get(actor.user._id.toString()) || EMPTY_PERF;
-    const target = actor.user.monthlyTarget || 0;
+    const [perfMap, allUsers] = await Promise.all([
+      this.getPerformance(tenantId),
+      this.userModel
+        .find({ tenantId, isActive: { $ne: false } })
+        .select('_id monthlyTarget')
+        .exec(),
+    ]);
+    const policy = normalizeCommissionPolicy(actor.tenant.commissionPolicy);
+    const uid = actor.user._id.toString();
+    const p = perfMap.get(uid) || EMPTY_PERF;
+    const target = Number(actor.user.monthlyTarget || 0);
+    const commission = computeCommissionBreakdown({
+      wonRevenue: p.wonRevenue,
+      paidRevenue: p.paidRevenue,
+      monthlyTarget: target,
+      policy,
+    });
+
+    const rankedIds = allUsers
+      .map((u) => {
+        const uPerf = perfMap.get(u._id.toString()) || EMPTY_PERF;
+        const uComm = computeCommissionBreakdown({
+          wonRevenue: uPerf.wonRevenue,
+          paidRevenue: uPerf.paidRevenue,
+          monthlyTarget: Number(u.monthlyTarget || 0),
+          policy,
+        });
+        return { id: u._id.toString(), score: uComm.eligibleRevenueInr, leads: uPerf.leadsCount };
+      })
+      .sort((a, b) => b.score - a.score || b.leads - a.leads);
+
+    const rankIdx = rankedIds.findIndex((r) => r.id === uid);
     const todayKey = new Date().toISOString().slice(0, 10);
+    const winRatePct =
+      p.dealsCount > 0 ? Math.round((p.wonDeals / p.dealsCount) * 100) : 0;
+    const achievedRevenue = commission.eligibleRevenueInr;
+
     return {
-      userId: actor.user._id.toString(),
+      userId: uid,
       name: actor.user.name,
       role: actor.user.role,
       territory: actor.user.territory || '',
@@ -931,9 +1101,15 @@ export class TeamService {
           : 0,
       performance: {
         ...p,
+        achievedRevenue,
+        winRatePct,
         targetAchievedPct:
-          target > 0 ? Math.min(999, Math.round((p.wonRevenue / target) * 100)) : 0,
+          target > 0 ? Math.min(999, Math.round((achievedRevenue / target) * 100)) : 0,
       },
+      commissionPolicy: policy,
+      commission,
+      rankInTeam: rankIdx >= 0 ? rankIdx + 1 : 1,
+      teamTotalReps: Math.max(1, rankedIds.length),
     };
   }
 
@@ -1045,10 +1221,28 @@ export class TeamController {
   }
 
   @Get('me/performance')
-  @ApiOperation({ summary: 'Get personal monthly target, won revenue, and daily AI call counters for current user' })
+  @ApiOperation({ summary: 'Get personal monthly target, won revenue, commission payout estimate, and daily AI call counters' })
   async getMyPerformance(@Headers('authorization') authorization?: string) {
     const actor = await this.teamService.getActor(authorization);
     return this.teamService.getMyPerformance(actor);
+  }
+
+  @Get('commission-policy')
+  @ApiOperation({ summary: 'Get workspace commission slabs and quota accelerator bonus settings' })
+  async getCommissionPolicy(@Headers('authorization') authorization?: string) {
+    const actor = await this.teamService.getActor(authorization);
+    return this.teamService.getCommissionPolicy(actor);
+  }
+
+  @Patch('commission-policy')
+  @ApiOperation({ summary: 'Update workspace progressive commission slabs and 100% quota bonus (Owner/Admin only)' })
+  @ApiBody({ type: UpdateCommissionPolicyDto })
+  async updateCommissionPolicy(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: UpdateCommissionPolicyDto,
+  ) {
+    const actor = await this.teamService.getActor(authorization);
+    return this.teamService.updateCommissionPolicy(actor, dto);
   }
 
   @Get('my-team')

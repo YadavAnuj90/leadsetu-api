@@ -41,6 +41,14 @@ import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 import { Ticket, TicketDocument } from '../tickets/tickets.service';
 import { MetaWhatsAppService } from './meta-whatsapp.service';
 import {
+  buildConciergeFallbackReply,
+  extractBuyerSignals,
+  normalizeAiAgentPolicy,
+  type AiActionLogItem,
+  type AiQualifiedData,
+  type AiSalesAgentPolicy,
+} from './ai-concierge.util';
+import {
   ChatAttachment,
   ChatMessage,
   ConversationDocument,
@@ -389,6 +397,11 @@ export class InboxService {
       estimatedValue: doc.estimatedValue || 0,
       aiSummary: doc.aiSummary || '',
       aiSuggestedReply: doc.aiSuggestedReply || '',
+      aiAutopilotPaused: Boolean(doc.aiAutopilotPaused),
+      aiHandoffReason: doc.aiHandoffReason || '',
+      aiHandedOffAt: doc.aiHandedOffAt || '',
+      aiQualifiedData: (doc.aiQualifiedData || {}) as AiQualifiedData,
+      aiActionLogs: Array.isArray(doc.aiActionLogs) ? doc.aiActionLogs : [],
       linkedEntityType: (doc.linkedEntityType || '') as LinkedCrmEntityType,
       linkedEntityId: doc.linkedEntityId || '',
       linkedEntityLabel: doc.linkedEntityLabel || '',
@@ -3109,24 +3122,201 @@ export class InboxService {
     };
   }
 
-  private async refreshConversationAiOnInbound(conv: ConversationDocument) {
+  async getAiAgentConfig(auth: InboxAuthContext): Promise<AiSalesAgentPolicy> {
+    const tenant = await this.tenantModel.findById(auth.tenantId).lean().exec();
+    if (!tenant) throw new NotFoundException('Workspace not found.');
+    return normalizeAiAgentPolicy(tenant.aiSalesAgentPolicy);
+  }
+
+  async updateAiAgentConfig(
+    auth: InboxAuthContext,
+    dto: Partial<AiSalesAgentPolicy>,
+  ): Promise<AiSalesAgentPolicy> {
+    if (!['owner', 'admin', 'manager'].includes(auth.role)) {
+      throw new ForbiddenException(
+        'Only Workspace Owners, Admins, or Managers can update AI Sales Concierge guardrails.',
+      );
+    }
+    const tenant = await this.tenantModel.findById(auth.tenantId).exec();
+    if (!tenant) throw new NotFoundException('Workspace not found.');
+
+    const merged = normalizeAiAgentPolicy({
+      ...normalizeAiAgentPolicy(tenant.aiSalesAgentPolicy),
+      ...dto,
+    });
+
+    await this.tenantModel.updateOne(
+      { _id: tenant._id },
+      { $set: { aiSalesAgentPolicy: merged } },
+    );
+
+    await this.auditService?.record({
+      tenantId: auth.tenantId,
+      actorId: auth.userId,
+      action: 'inbox.ai_agent_updated',
+      entityType: 'security',
+      entityId: auth.tenantId,
+      entityLabel: '24x7 AI WhatsApp Sales Concierge',
+      summary: `AI Sales Concierge set to ${merged.mode.toUpperCase()} (max discount ${merged.maxDiscountPct}%, handoff score >= ${merged.handoffScoreThreshold})`,
+    });
+
+    return merged;
+  }
+
+  async toggleConversationAutopilot(
+    auth: InboxAuthContext,
+    id: string,
+    paused: boolean,
+  ) {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new NotFoundException('Conversation not found.');
+    }
+    const ownerScope = await resolveOwnerScopeFilter(this.convModel.db, auth);
+    const conv = await this.convModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
+      })
+      .exec();
+    if (!conv) throw new NotFoundException('Conversation not found.');
+
+    conv.aiAutopilotPaused = Boolean(paused);
+    if (!paused) {
+      conv.aiHandoffReason = '';
+    }
+    await conv.save();
+    this.emitRealtimeConversationUpdate(conv, 'conversation.updated');
+
+    const maskPhones = this.auditService
+      ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
+      : false;
+    return this.toDto(conv, maskPhones);
+  }
+
+  async simulateInboundMessage(
+    auth: InboxAuthContext,
+    id: string,
+    messageText: string,
+  ) {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new NotFoundException('Conversation not found.');
+    }
+    const text = String(messageText || '').trim();
+    if (!text) {
+      throw new BadRequestException('Inbound message text is required.');
+    }
+
+    const ownerScope = await resolveOwnerScopeFilter(this.convModel.db, auth);
+    const conv = await this.convModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
+      })
+      .exec();
+    if (!conv) throw new NotFoundException('Conversation not found.');
+
+    const nowIso = new Date().toISOString();
+    const inboundMsg: ChatMessage = {
+      id: randomBytes(6).toString('hex'),
+      direction: 'inbound',
+      content: text,
+      senderName: conv.contactName,
+      status: 'delivered',
+      deliveryProvider: 'crm_local',
+      createdAt: nowIso,
+    };
+
+    conv.messages = [...(conv.messages || []), inboundMsg];
+    conv.status = 'open';
+    conv.lastInboundAt = nowIso;
+    conv.unreadCount = (conv.unreadCount || 0) + 1;
+    conv.markModified('messages');
+    await conv.save();
+    this.emitRealtimeConversationUpdate(conv, 'message.inbound');
+
+    await this.refreshConversationAiOnInbound(conv, text);
+
+    const refreshed = await this.convModel.findById(conv._id).exec();
+    const maskPhones = this.auditService
+      ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
+      : false;
+    return this.toDto(refreshed || conv, maskPhones);
+  }
+
+  private async refreshConversationAiOnInbound(
+    conv: ConversationDocument,
+    explicitInboundText?: string,
+  ) {
     try {
       const tenantId = conv.tenantId.toString();
       const userId = conv.ownerId?.toString() || 'system-webhook';
+      const tenant = await this.tenantModel.findById(tenantId).lean().exec();
+      const policy = normalizeAiAgentPolicy(tenant?.aiSalesAgentPolicy);
+      if (policy.mode === 'off') {
+        return;
+      }
+
+      const lastInboundText =
+        explicitInboundText ||
+        [...(conv.messages || [])].reverse().find((m) => m.direction === 'inbound')
+          ?.content ||
+        '';
       const ctx = await this.buildConversationAiContext(tenantId, conv, {
-        language: 'hinglish',
+        language: policy.language === 'auto' ? 'hinglish' : policy.language,
         tone: 'helpful',
       });
-      const fallback = this.buildLocalConversationAiFallback(ctx);
+
+      const signals = extractBuyerSignals({
+        message: lastInboundText,
+        productsCatalog: ctx.productsCatalog,
+        existingData: (conv.aiQualifiedData || {}) as AiQualifiedData,
+        policy,
+      });
+
+      const fallbackReply = buildConciergeFallbackReply({
+        buyerName: conv.contactName || 'Sir',
+        language: signals.detectedLanguage,
+        signals,
+        policy,
+      });
+      const fallbackSummary = this.buildLocalConversationAiFallback(ctx).summary;
+
+      const missingFields: string[] = [];
+      if (!signals.data.quantity) missingFields.push('quantity');
+      if (!signals.data.city) missingFields.push('delivery city');
+      if (!signals.data.gstin) missingFields.push('GSTIN (optional)');
+
+      const conciergeInstruction = [
+        `You are Leadsetu 24x7 AI Sales Concierge.`,
+        `Max discount cap is ${policy.maxDiscountPct}% — NEVER approve any discount above ${policy.maxDiscountPct}%.`,
+        signals.data.productName
+          ? `Matched Catalog Item: ${signals.data.productName} (SKU ${signals.data.sku}, HSN ${signals.data.hsnSac}), ₹${signals.data.quotedUnitPrice} + ${signals.data.gstRate ?? 18}% GST, MOQ ${signals.data.moq || 1}.`
+          : '',
+        signals.discountExceedsCap
+          ? `Buyer asked for ${signals.requestedDiscountPct}% discount (> ${policy.maxDiscountPct}% cap). Politely decline auto-approval and tell them a Senior Manager will connect.`
+          : missingFields.length > 0
+            ? `Ask briefly for: ${missingFields.join(', ')}.`
+            : `All core specs captured! Confirm handoff to our Sales Specialist for formal Proforma GST Quotation.`,
+      ]
+        .filter(Boolean)
+        .join(' ');
+
+      const enrichedCtx = {
+        ...ctx,
+        language: signals.detectedLanguage,
+        customInstruction: conciergeInstruction,
+      };
 
       const [replyRes, sumRes] = await Promise.all([
-        this.aiBridge
+        this.aiBridge && !signals.discountExceedsCap
           ? this.aiBridge
               .draftWhatsAppReply({
                 tenantId,
                 userId,
                 userRole: 'owner',
-                context: ctx,
+                context: enrichedCtx,
               })
               .catch(() => null)
           : Promise.resolve(null),
@@ -3136,18 +3326,156 @@ export class InboxService {
                 tenantId,
                 userId,
                 userRole: 'owner',
-                context: ctx,
+                context: enrichedCtx,
               })
               .catch(() => null)
           : Promise.resolve(null),
       ]);
 
-      conv.aiSuggestedReply = replyRes?.result?.trim() || fallback.replyDraft;
-      conv.aiSummary = sumRes?.result?.trim() || fallback.summary;
+      const finalReply = replyRes?.result?.trim() || fallbackReply;
+      const finalSummary = sumRes?.result?.trim() || fallbackSummary;
+      const nowIso = new Date().toISOString();
+
+      conv.aiQualifiedData = signals.data as unknown as Record<string, unknown>;
+      conv.aiScore = signals.aiScore;
+      if (signals.data.estimatedTotal && signals.data.estimatedTotal > 0) {
+        conv.estimatedValue = signals.data.estimatedTotal;
+      }
+      if (signals.data.city) {
+        conv.city = signals.data.city;
+      }
+      conv.aiSummary = finalSummary;
+      conv.aiSuggestedReply = finalReply;
+      conv.markModified('aiQualifiedData');
+
+      // Sync qualified buyer specs directly onto linked Lead when enabled
+      if (
+        policy.autoUpdateLeadFields &&
+        conv.linkedEntityType === 'lead' &&
+        conv.linkedEntityId &&
+        Types.ObjectId.isValid(conv.linkedEntityId)
+      ) {
+        try {
+          const leadUpdates: Record<string, unknown> = {
+            aiScore: signals.aiScore,
+            aiLabel: signals.aiLabel,
+            aiSummary: finalSummary,
+            aiNextAction: signals.handoffTriggered
+              ? `HOT AI HANDOFF: ${signals.handoffReason}`
+              : 'AI Concierge qualifying quantity, city & GSTIN on WhatsApp.',
+          };
+          if (signals.data.city) leadUpdates.city = signals.data.city;
+          if (signals.data.estimatedTotal && signals.data.estimatedTotal > 0) {
+            leadUpdates.estimatedValue = signals.data.estimatedTotal;
+          }
+          const summaryBits = [
+            signals.data.productName ? `Product: ${signals.data.productName}` : '',
+            signals.data.quantity ? `Qty: ${signals.data.quantity}` : '',
+            signals.data.city ? `City: ${signals.data.city}` : '',
+            signals.data.gstin ? `GSTIN: ${signals.data.gstin}` : '',
+          ]
+            .filter(Boolean)
+            .join(' · ');
+
+          await this.leadModel.updateOne(
+            { _id: new Types.ObjectId(conv.linkedEntityId), tenantId: conv.tenantId },
+            {
+              $set: leadUpdates,
+              ...(summaryBits
+                ? {
+                    $push: {
+                      activities: {
+                        $each: [
+                          {
+                            id: randomBytes(6).toString('hex'),
+                            type: 'ai_score',
+                            description: `SetuAI 24x7 Concierge qualified Lead (${signals.aiScore}/100 · ${signals.aiLabel}): ${summaryBits}`,
+                            authorName: 'SetuAI Concierge (24x7)',
+                            createdAt: nowIso,
+                          },
+                        ],
+                        $position: 0,
+                      },
+                    },
+                  }
+                : {}),
+            } as Record<string, unknown>,
+          );
+        } catch {
+          // Non-blocking lead enrichment
+        }
+      }
+
+      const logs: AiActionLogItem[] = Array.isArray(conv.aiActionLogs)
+        ? [...(conv.aiActionLogs as AiActionLogItem[])]
+        : [];
+
+      if (policy.mode === 'autopilot' && !conv.aiAutopilotPaused && !conv.whatsappOptOut) {
+        const snapshot =
+          conv.linkedEntityType && conv.linkedEntityId
+            ? await this.resolveCrmEntitySnapshot(
+                tenantId,
+                conv.linkedEntityType,
+                conv.linkedEntityId,
+              )
+            : null;
+
+        await this.appendMessageAndTimeline({
+          auth: {
+            userId,
+            tenantId,
+            email: 'ai-concierge@leadsetu.in',
+            name: 'SetuAI Concierge (24x7)',
+            role: 'system',
+          },
+          doc: conv,
+          rawContent: finalReply,
+          isAiDrafted: true,
+          via: 'inbox',
+          logToTimeline: true,
+          entitySnapshot: snapshot,
+        });
+
+        conv.aiSuggestedReply = '';
+        if (signals.handoffTriggered) {
+          conv.aiAutopilotPaused = true;
+          conv.aiHandoffReason = signals.handoffReason;
+          conv.aiHandedOffAt = nowIso;
+        }
+
+        logs.unshift({
+          id: randomBytes(5).toString('hex'),
+          action: signals.discountExceedsCap
+            ? 'guardrail_blocked'
+            : signals.handoffTriggered
+              ? 'handoff_triggered'
+              : 'autopilot_replied',
+          detail: signals.handoffTriggered
+            ? `${signals.handoffReason} Auto-reply sent & paused for Sales Rep takeover.`
+            : `Auto-replied in ${signals.detectedLanguage} with catalog/qualification specs (Score ${signals.aiScore}).`,
+          replySent: finalReply.slice(0, 220),
+          mode: 'autopilot',
+          createdAt: nowIso,
+        });
+      } else {
+        logs.unshift({
+          id: randomBytes(5).toString('hex'),
+          action: conv.aiAutopilotPaused ? 'skipped_paused' : 'draft_prepared',
+          detail: conv.aiAutopilotPaused
+            ? `AI Auto-Pilot paused on thread (${conv.aiHandoffReason || 'human rep active'}); updated draft instead.`
+            : `Draft-only mode prepared reply & updated AI Score (${signals.aiScore}).`,
+          replySent: finalReply.slice(0, 220),
+          mode: policy.mode,
+          createdAt: nowIso,
+        });
+      }
+
+      conv.aiActionLogs = logs.slice(0, 25);
+      conv.markModified('aiActionLogs');
       await conv.save();
       this.emitRealtimeConversationUpdate(conv, 'conversation.updated');
     } catch {
-      // Non-blocking AI auto-draft hook on webhook arrival
+      // Non-blocking AI auto-concierge hook on webhook arrival
     }
   }
 

@@ -38,6 +38,14 @@ export class CreateLeadSwaggerDto implements CreateLeadDto {
   name!: string;
 
   @ApiPropertyOptional({
+    description: 'Record classification: B2B company account vs B2C individual consumer',
+    enum: ['business', 'consumer'],
+    default: 'business',
+    example: 'business',
+  })
+  accountKind?: 'business' | 'consumer';
+
+  @ApiPropertyOptional({
     description: 'Company or organization name',
     example: 'RS Electricals Pvt. Ltd.',
   })
@@ -189,6 +197,12 @@ export class LeadsController {
     required: false,
     enum: ['all', 'Hot', 'Warm', 'Cold'],
     description: 'Filter by SetuAI heat label',
+  })
+  @ApiQuery({
+    name: 'accountKind',
+    required: false,
+    enum: ['all', 'business', 'consumer'],
+    description: 'Filter by B2B business account vs B2C individual consumer',
   })
   @ApiQuery({
     name: 'sortBy',
@@ -392,6 +406,30 @@ export class LeadsController {
   ) {
     const auth = await this.leadsService.verifyAuth(authorization);
     return this.leadsService.analyzeWithAi(auth, id);
+  }
+
+  @Post(':id/auto-assign')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Auto-assign or re-route a lead using Smart Lead Routing rules',
+    description:
+      'Evaluates workspace Territory, Round-Robin, or Load-Balanced daily cap rules to assign the lead to an eligible sales rep and logs the routing reason.',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'Unique lead record ID',
+    example: 'ld_01a2b3c4d5e6',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns updated lead plus `routing` resolution trace.',
+  })
+  async autoAssign(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+  ) {
+    const auth = await this.leadsService.verifyAuth(authorization);
+    return this.leadsService.autoAssignLead(auth, id);
   }
 
   @Delete(':id')

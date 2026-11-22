@@ -102,6 +102,29 @@ export class ConversationThread {
   @Prop({ default: '' })
   whatsappOptOutAt?: string;
 
+  /** Per-thread Autonomous AI Concierge state, extracted buyer qualification specs & action logs. */
+  @Prop({ type: Boolean, default: false })
+  aiAutopilotPaused?: boolean;
+
+  @Prop({ default: '' })
+  aiHandoffReason?: string;
+
+  @Prop({ default: '' })
+  aiHandedOffAt?: string;
+
+  @Prop({ type: Object, default: {} })
+  aiQualifiedData?: Record<string, unknown>;
+
+  @Prop({ type: Array, default: [] })
+  aiActionLogs?: Array<{
+    id: string;
+    action: string;
+    detail: string;
+    replySent?: string;
+    mode: string;
+    createdAt: string;
+  }>;
+
   @Prop({ type: Array, default: [] })
   messages!: ChatMessage[];
 }

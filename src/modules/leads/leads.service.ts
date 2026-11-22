@@ -27,9 +27,11 @@ import { SuperAdminService } from '../super-admin/super-admin.service';
 import { WorkflowsService } from '../workflows/workflows.service';
 import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 import { CustomFieldsService } from '../custom-fields/custom-fields.service';
+import { LeadRoutingService } from '../lead-routing/lead-routing.service';
 
 export interface CreateLeadDto {
   name: string;
+  accountKind?: 'business' | 'consumer';
   company?: string;
   phone?: string;
   email?: string;
@@ -40,6 +42,7 @@ export interface CreateLeadDto {
   tags?: string[];
   notes?: string;
   customFields?: Record<string, unknown>;
+  autoAssign?: boolean;
 }
 
 export interface UpdateLeadDto extends Partial<CreateLeadDto> {
@@ -51,6 +54,7 @@ export interface LeadsQuery {
   status?: string;
   source?: string;
   aiLabel?: string;
+  accountKind?: string;
   sortBy?: 'aiScore' | 'createdAt' | 'estimatedValue';
   page?: string;
   limit?: string;
@@ -73,6 +77,7 @@ export class LeadsService {
     @Optional() private readonly workflowsService?: WorkflowsService,
     @Optional() private readonly aiBridge?: AiBridgeService,
     @Optional() private readonly customFieldsService?: CustomFieldsService,
+    @Optional() private readonly leadRoutingService?: LeadRoutingService,
   ) {}
 
   async verifyAuth(authHeader?: string): Promise<AuthContext> {
@@ -519,6 +524,7 @@ export class LeadsService {
       tenantId: doc.tenantId.toString(),
       ownerId: doc.ownerId.toString(),
       name: doc.name,
+      accountKind: doc.accountKind === 'consumer' ? 'consumer' : 'business',
       company: doc.company || '',
       phone: maskPhones ? maskPhoneNumber(doc.phone) : doc.phone || '',
       email: doc.email || '',
@@ -563,6 +569,11 @@ export class LeadsService {
     if (query.aiLabel && query.aiLabel !== 'all') {
       filter.aiLabel = query.aiLabel;
     }
+    if (query.accountKind === 'consumer') {
+      filter.accountKind = 'consumer';
+    } else if (query.accountKind === 'business') {
+      filter.accountKind = { $ne: 'consumer' };
+    }
     if (query.search?.trim()) {
       const regex = new RegExp(query.search.trim(), 'i');
       filter.$or = [
@@ -591,6 +602,12 @@ export class LeadsService {
     ]);
 
     const total = allTenantLeads.length;
+    const businessCount = allTenantLeads.filter(
+      (l) => l.accountKind !== 'consumer',
+    ).length;
+    const consumerCount = allTenantLeads.filter(
+      (l) => l.accountKind === 'consumer',
+    ).length;
     const hotCount = allTenantLeads.filter((l) => l.aiLabel === 'Hot').length;
     const qualifiedCount = allTenantLeads.filter((l) =>
       ['qualified', 'proposal', 'converted'].includes(l.status),
@@ -613,6 +630,8 @@ export class LeadsService {
       data: docs.map((d) => this.toDto(d, maskPhones)),
       stats: {
         total,
+        businessCount,
+        consumerCount,
         hotCount,
         qualifiedCount,
         convertedCount,
@@ -687,11 +706,51 @@ export class LeadsService {
         )
       : dto.customFields || {};
 
+    let ownerId = auth.userId;
+    if (this.leadRoutingService && dto.autoAssign !== false) {
+      try {
+        const routingCfg = await this.leadRoutingService.ensureConfig(auth.tenantId);
+        if (dto.autoAssign === true || (routingCfg.enabled && routingCfg.applyOnManualCreate)) {
+          const routed = await this.leadRoutingService.resolveAssigneeForLead(
+            auth.tenantId,
+            {
+              city: dto.city,
+              source: dto.source || 'manual',
+              estimatedValue: Number(dto.estimatedValue) || 0,
+              leadName: dto.name.trim(),
+              commit: true,
+            },
+          );
+          ownerId = routed.assignedUserId;
+          initialActivity.description += ` · Routed to ${routed.assignedUserName} (${routed.strategyUsed})`;
+        }
+      } catch {
+        // Fallback to creator on routing unavailability
+      }
+    }
+
+    let resolvedAccountKind: 'business' | 'consumer' =
+      dto.accountKind === 'consumer' ? 'consumer' : 'business';
+    if (dto.accountKind !== 'consumer' && dto.accountKind !== 'business') {
+      const tenantDoc = await this.leadModel.db
+        .collection('tenants')
+        .findOne(
+          { _id: new Types.ObjectId(auth.tenantId) },
+          { projection: { businessMode: 1 } },
+        )
+        .catch(() => null);
+      const bm = String(tenantDoc?.businessMode || '');
+      if (bm === 'b2c' || bm === 'education' || bm === 'bpo') {
+        resolvedAccountKind = 'consumer';
+      }
+    }
+
     const doc = await this.leadModel.create({
       tenantId: new Types.ObjectId(auth.tenantId),
-      ownerId: new Types.ObjectId(auth.userId),
+      ownerId: new Types.ObjectId(ownerId),
       name: dto.name.trim(),
-      company: dto.company?.trim() || '',
+      accountKind: resolvedAccountKind,
+      company: resolvedAccountKind === 'consumer' ? '' : dto.company?.trim() || '',
       phone: dto.phone?.trim() || '',
       email: dto.email?.trim().toLowerCase() || '',
       city: dto.city?.trim() || 'New Delhi',
@@ -788,6 +847,9 @@ export class LeadsService {
     const prevStatus = doc.status;
 
     if (dto.name !== undefined) doc.name = dto.name.trim();
+    if (dto.accountKind !== undefined) {
+      doc.accountKind = dto.accountKind === 'consumer' ? 'consumer' : 'business';
+    }
     if (dto.company !== undefined) doc.company = dto.company.trim();
     if (dto.phone !== undefined) doc.phone = dto.phone.trim();
     if (dto.email !== undefined) doc.email = dto.email.trim().toLowerCase();
@@ -1333,30 +1395,6 @@ export class LeadsService {
       };
     }
 
-    const usersCol = this.leadModel.db.collection('users');
-    const reps = await usersCol
-      .find({ tenantId: tenantObjectId, isActive: { $ne: false } })
-      .sort({ _id: 1 })
-      .toArray();
-
-    if (reps.length === 0) {
-      throw new BadRequestException('No active sales users in workspace.');
-    }
-
-    const currentIdx = Number(tenant.roundRobinIndex ?? 0);
-    const chosenRep = reps[currentIdx % reps.length];
-    await tenantsCol.updateOne(
-      { _id: tenantObjectId },
-      { $set: { roundRobinIndex: (currentIdx + 1) % reps.length } },
-    );
-
-    const repAuth: AuthContext = {
-      userId: String(chosenRep._id),
-      tenantId: tenantIdStr,
-      email: String(chosenRep.email ?? 'webhook@leadsetu.in'),
-    };
-    const repName = String(chosenRep.name ?? 'Sales Rep');
-
     const leadName = rawName || `Inquiry ${formattedPhone || rawEmail}`;
     const company = String(
       payload?.SENDER_COMPANY ?? payload?.company ?? '',
@@ -1365,6 +1403,56 @@ export class LeadsService {
       payload?.SENDER_CITY ?? payload?.city ?? 'Delhi-NCR',
     ).trim();
     const estimatedValue = Number(payload?.estimatedValue ?? payload?.budget ?? 0) || 0;
+
+    let assignedUserId = '';
+    let repEmail = 'webhook@leadsetu.in';
+    let repName = 'Sales Rep';
+    let strategyUsed = 'round_robin';
+    let routingReason = 'Assigned via workspace Round-Robin';
+
+    if (this.leadRoutingService) {
+      const routed = await this.leadRoutingService.resolveAssigneeForLead(
+        tenantIdStr,
+        {
+          city,
+          source: inferredSource,
+          estimatedValue,
+          leadName,
+          commit: true,
+        },
+      );
+      assignedUserId = routed.assignedUserId;
+      repEmail = routed.assignedUserEmail || repEmail;
+      repName = routed.assignedUserName || repName;
+      strategyUsed = routed.strategyUsed;
+      routingReason = routed.reason;
+    } else {
+      const usersCol = this.leadModel.db.collection('users');
+      const reps = await usersCol
+        .find({ tenantId: tenantObjectId, isActive: { $ne: false } })
+        .sort({ _id: 1 })
+        .toArray();
+
+      if (reps.length === 0) {
+        throw new BadRequestException('No active sales users in workspace.');
+      }
+
+      const currentIdx = Number(tenant.roundRobinIndex ?? 0);
+      const chosenRep = reps[currentIdx % reps.length];
+      await tenantsCol.updateOne(
+        { _id: tenantObjectId },
+        { $set: { roundRobinIndex: (currentIdx + 1) % reps.length } },
+      );
+      assignedUserId = String(chosenRep._id);
+      repEmail = String(chosenRep.email ?? repEmail);
+      repName = String(chosenRep.name ?? repName);
+    }
+
+    const repAuth: AuthContext = {
+      userId: assignedUserId,
+      tenantId: tenantIdStr,
+      email: repEmail,
+    };
 
     const created = await this.create(repAuth, {
       name: leadName,
@@ -1375,6 +1463,7 @@ export class LeadsService {
       source: inferredSource,
       estimatedValue,
       notes: rawNotes || `Captured live via ${inferredSource} webhook`,
+      autoAssign: false,
     });
 
     await this.auditService?.record({
@@ -1387,13 +1476,80 @@ export class LeadsService {
       entityType: 'lead',
       entityId: created.id,
       entityLabel: created.name,
-      summary: `Captured ${inferredSource} webhook lead ${created.name}, assigned round-robin to ${repName}`,
+      summary: `Captured ${inferredSource} webhook lead ${created.name} -> ${repName} (${routingReason})`,
     });
 
     return {
       status: 'created' as const,
       assignedRepName: repName,
+      strategyUsed,
+      routingReason,
       lead: created,
+    };
+  }
+
+  async autoAssignLead(auth: AuthContext, id: string) {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new NotFoundException('Lead not found.');
+    }
+    if (!this.leadRoutingService) {
+      throw new BadRequestException('Lead routing engine is unavailable.');
+    }
+    const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
+    const doc = await this.leadModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
+      })
+      .exec();
+    if (!doc) {
+      throw new NotFoundException('Lead not found.');
+    }
+
+    const routed = await this.leadRoutingService.resolveAssigneeForLead(
+      auth.tenantId,
+      {
+        city: doc.city,
+        source: doc.source,
+        estimatedValue: doc.estimatedValue,
+        leadId: doc._id.toString(),
+        leadName: doc.name,
+        commit: true,
+      },
+    );
+
+    doc.ownerId = new Types.ObjectId(routed.assignedUserId);
+    doc.activities = [
+      {
+        id: randomBytes(6).toString('hex'),
+        type: 'note',
+        description: `Smart Routing assigned lead to ${routed.assignedUserName} · ${routed.reason}`,
+        authorName: auth.email.split('@')[0],
+        createdAt: new Date().toISOString(),
+      },
+      ...(doc.activities || []),
+    ];
+    await doc.save();
+
+    await this.auditService?.record({
+      tenantId: auth.tenantId,
+      actorId: auth.userId,
+      actorEmail: auth.email,
+      action: 'lead.auto_assigned',
+      entityType: 'lead',
+      entityId: doc._id.toString(),
+      entityLabel: doc.name,
+      summary: `Auto-assigned ${doc.name} -> ${routed.assignedUserName} (${routed.strategyUsed})`,
+    });
+
+    const maskPhones = this.auditService
+      ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
+      : false;
+
+    return {
+      routing: routed,
+      lead: this.toDto(doc, maskPhones),
     };
   }
 }

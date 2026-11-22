@@ -12,11 +12,14 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { Model, Types } from 'mongoose';
 import { randomBytes } from 'crypto';
+import axios from 'axios';
 import { User, UserDocument } from './schemas/user.schema';
 import { Tenant, TenantDocument } from './schemas/tenant.schema';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import { isIpAllowed } from '../super-admin/tenant-security.guard';
 import {
+  decryptSecret,
+  encryptSecret,
   generateAccountId,
   generateUserCode,
   hashSecret,
@@ -28,6 +31,18 @@ import {
 } from './identity.util';
 import { uploadToCloudinary } from './cloudinary.util';
 import { dispatchPasswordResetEmail } from './email.util';
+import {
+  buildOtpAuthUri,
+  generateBackupRecoveryCodes,
+  generateBase32Secret,
+  generateTotpQrDataUrl,
+  verifyTotpCode,
+} from './totp.util';
+import {
+  DEFAULT_HIDDEN_MODULES_BY_MODE,
+  normalizeBusinessMode,
+  type WorkspaceBusinessMode,
+} from './business-mode.util';
 
 export interface RegisterInput {
   name: string;
@@ -37,6 +52,7 @@ export interface RegisterInput {
   companyName?: string;
   logoUrl?: string;
   city?: string;
+  businessMode?: WorkspaceBusinessMode;
 }
 
 export interface LoginInput {
@@ -205,6 +221,8 @@ export class AuthService {
         lastLoginAt: user.lastLoginAt ? new Date(user.lastLoginAt).toISOString() : null,
         createdAt: rawUser.createdAt ? new Date(rawUser.createdAt).toISOString() : null,
         maskPhones: viewerMasked,
+        twoFactorEnabled: Boolean(user.twoFactorEnabled),
+        authProvider: user.authProvider || 'local',
       },
       tenant: {
         id: tenant._id.toString(),
@@ -225,6 +243,10 @@ export class AuthService {
           tenant.maskPhoneForAgents || effectiveState?.forcePhoneMasking,
         ),
         blockAgentExport: effectiveState?.blockCsvExport ?? (tenant.blockAgentExport ?? true),
+        businessMode: tenant.businessMode || 'b2b',
+        hiddenNavModules: Array.isArray(tenant.hiddenNavModules)
+          ? tenant.hiddenNavModules
+          : [],
         effectiveFeatures: effectiveState?.effectiveFeatures,
         effectiveFeatureDetails: effectiveState?.effectiveFeatureDetails,
         globalKillSwitches: effectiveState?.globalKillSwitches,
@@ -288,6 +310,7 @@ export class AuthService {
         })
       : '';
     const workspaceTitle = cleanCompanyName || 'Leadsetu Workspace';
+    const businessMode = normalizeBusinessMode(input.businessMode);
     const tenant = await this.tenantModel.create({
       name: workspaceTitle,
       companyName: cleanCompanyName,
@@ -298,6 +321,8 @@ export class AuthService {
       status: 'trial',
       trialEndsAt,
       city: input.city?.trim() || 'Delhi-NCR',
+      businessMode,
+      hiddenNavModules: DEFAULT_HIDDEN_MODULES_BY_MODE[businessMode] || [],
     });
 
     const user = await this.userModel.create({
@@ -376,6 +401,10 @@ export class AuthService {
           `Login blocked: Your IP (${clientIp}) is not on this workspace's IP Allowlist.`,
         );
       }
+    }
+
+    if (user.twoFactorEnabled && user.twoFactorSecretEncrypted) {
+      return this.issueTwoFactorChallenge(user);
     }
 
     return this.issueTokens(user, tenant);
@@ -483,6 +512,8 @@ export class AuthService {
         lastLoginAt: user.lastLoginAt ? new Date(user.lastLoginAt).toISOString() : null,
         createdAt: rawUser.createdAt ? new Date(rawUser.createdAt).toISOString() : null,
         maskPhones: viewerMasked,
+        twoFactorEnabled: Boolean(user.twoFactorEnabled),
+        authProvider: user.authProvider || 'local',
         isImpersonation: Boolean(payload.isImpersonation),
         impersonatorEmail: payload.impersonatorEmail || '',
       },
@@ -506,6 +537,10 @@ export class AuthService {
               tenant.maskPhoneForAgents || effectiveState?.forcePhoneMasking,
             ),
             blockAgentExport: effectiveState?.blockCsvExport ?? (tenant.blockAgentExport ?? true),
+            businessMode: tenant.businessMode || 'b2b',
+            hiddenNavModules: Array.isArray(tenant.hiddenNavModules)
+              ? tenant.hiddenNavModules
+              : [],
             effectiveFeatures: effectiveState?.effectiveFeatures,
             effectiveFeatureDetails: effectiveState?.effectiveFeatureDetails,
             globalKillSwitches: effectiveState?.globalKillSwitches,
@@ -977,5 +1012,334 @@ export class AuthService {
       message:
         'Your password has been updated and all prior sessions were signed out.',
     };
+  }
+
+  // ─── Google OAuth SSO & Authenticator App (TOTP) 2FA ─────────────────
+
+  private async issueTwoFactorChallenge(user: UserDocument) {
+    const accessSecret =
+      this.configService.get<string>('JWT_SECRET') ||
+      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+    const challengeToken = await this.jwtService.signAsync(
+      {
+        sub: user._id.toString(),
+        email: user.email,
+        type: '2fa_challenge',
+      },
+      {
+        secret: accessSecret,
+        expiresIn: '5m',
+      },
+    );
+    return {
+      requiresTwoFactor: true as const,
+      challengeToken,
+      maskedEmail: this.maskEmailAddress(user.email),
+      message: 'Enter the 6-digit code from your Authenticator app (or an 8-char backup code).',
+    };
+  }
+
+  getGoogleAuthConfig() {
+    const clientId = (
+      this.configService.get<string>('GOOGLE_CLIENT_ID') ||
+      process.env.GOOGLE_CLIENT_ID ||
+      process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ||
+      ''
+    ).trim();
+    return {
+      enabled: clientId.length > 0,
+      clientId,
+    };
+  }
+
+  async authenticateWithGoogle(
+    input: { idToken?: string; companyName?: string },
+    clientIp = '',
+  ) {
+    const idToken = input.idToken?.trim();
+    if (!idToken) {
+      throw new BadRequestException('Google ID token is required.');
+    }
+
+    let googleProfile: {
+      sub?: string;
+      email?: string;
+      email_verified?: string | boolean;
+      name?: string;
+      picture?: string;
+      aud?: string;
+    };
+
+    try {
+      const res = await axios.get<typeof googleProfile>(
+        'https://oauth2.googleapis.com/tokeninfo',
+        {
+          params: { id_token: idToken },
+          timeout: 8000,
+        },
+      );
+      googleProfile = res.data || {};
+    } catch {
+      throw new UnauthorizedException('Unable to verify Google Sign-In token.');
+    }
+
+    const email = String(googleProfile.email || '').trim().toLowerCase();
+    const isVerified =
+      googleProfile.email_verified === true ||
+      googleProfile.email_verified === 'true';
+    if (!email || !isVerified || !googleProfile.sub) {
+      throw new UnauthorizedException('Google account email must be verified.');
+    }
+
+    const configuredClientId = this.getGoogleAuthConfig().clientId;
+    if (configuredClientId && googleProfile.aud !== configuredClientId) {
+      throw new UnauthorizedException('Google OAuth token audience mismatch.');
+    }
+
+    let user = await this.userModel.findOne({ email }).exec();
+    let tenant: TenantDocument | null = null;
+
+    if (user) {
+      if (!user.isActive) {
+        throw new ForbiddenException('Your user account has been deactivated.');
+      }
+      user.googleSub = googleProfile.sub;
+      if (googleProfile.picture && !user.avatarUrl) {
+        user.avatarUrl = googleProfile.picture;
+      }
+      await user.save();
+
+      tenant = await this.tenantModel.findById(user.tenantId).exec();
+      if (!tenant) {
+        throw new BadRequestException('Workspace not found for this account.');
+      }
+      if (user.role !== 'super_admin') {
+        if (tenant.dpdpRetention?.purgedAt || tenant.dpdpRetention?.softDeletedAt) {
+          throw new ForbiddenException('This workspace is deactivated under DPDP policy.');
+        }
+        if (tenant.status === 'suspended') {
+          throw new ForbiddenException('This workspace has been suspended.');
+        }
+        if (clientIp && !isIpAllowed(clientIp, tenant.securityPolicy?.ipAllowlist)) {
+          throw new ForbiddenException(
+            `Login blocked: Your IP (${clientIp}) is not on this workspace's IP Allowlist.`,
+          );
+        }
+      }
+
+      if (user.twoFactorEnabled && user.twoFactorSecretEncrypted) {
+        return this.issueTwoFactorChallenge(user);
+      }
+
+      return this.issueTokens(user, tenant);
+    }
+
+    // First-time Google SSO -> provision Workspace Tenant & Owner cleanly
+    const displayName =
+      String(googleProfile.name || '').trim() || email.split('@')[0];
+    const companyName = input.companyName?.trim() || `${displayName}'s Workspace`;
+    const accountId = await generateAccountId(this.tenantModel);
+    const userCode = await generateUserCode(this.userModel);
+
+    tenant = await this.tenantModel.create({
+      accountId,
+      name: companyName,
+      companyName,
+      slug: this.generateSlug(companyName),
+      city: 'Delhi-NCR',
+      plan: 'growth',
+      status: 'trial',
+    });
+
+    user = await this.userModel.create({
+      tenantId: tenant._id,
+      userCode,
+      name: displayName,
+      email,
+      passwordHash: this.hashSecret(randomBytes(32).toString('hex')),
+      role: 'owner',
+      departmentPreset: 'executive',
+      permissions: ['*'],
+      isActive: true,
+      googleSub: googleProfile.sub,
+      authProvider: 'google',
+      avatarUrl: googleProfile.picture || '',
+    });
+
+    return this.issueTokens(user, tenant);
+  }
+
+  private consumeBackupCodeIfMatch(user: UserDocument, code: string): boolean {
+    const normalized = code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (normalized.length < 6) return false;
+    const formatted =
+      normalized.length === 8
+        ? `${normalized.slice(0, 4)}-${normalized.slice(4)}`
+        : normalized;
+    const targetHash = sha256Hex(formatted);
+    const list = Array.isArray(user.twoFactorBackupCodesHashes)
+      ? [...user.twoFactorBackupCodesHashes]
+      : [];
+    const idx = list.indexOf(targetHash);
+    if (idx === -1) return false;
+    list.splice(idx, 1);
+    user.twoFactorBackupCodesHashes = list;
+    return true;
+  }
+
+  async verifyTwoFactorLogin(
+    input: { challengeToken: string; code: string },
+    clientIp = '',
+  ) {
+    const challengeToken = input.challengeToken?.trim();
+    const code = input.code?.trim();
+    if (!challengeToken || !code) {
+      throw new BadRequestException('Challenge token and 6-digit code are required.');
+    }
+
+    const accessSecret =
+      this.configService.get<string>('JWT_SECRET') ||
+      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+
+    let payload: { sub: string; type?: string };
+    try {
+      payload = await this.jwtService.verifyAsync<{ sub: string; type?: string }>(
+        challengeToken,
+        { secret: accessSecret },
+      );
+    } catch {
+      throw new UnauthorizedException('2FA challenge expired. Please sign in again.');
+    }
+
+    if (payload.type !== '2fa_challenge') {
+      throw new UnauthorizedException('Invalid 2FA challenge token.');
+    }
+
+    const user = await this.userModel.findById(payload.sub).exec();
+    if (!user || !user.isActive || !user.twoFactorEnabled || !user.twoFactorSecretEncrypted) {
+      throw new UnauthorizedException('Invalid 2FA account state.');
+    }
+
+    const secret = decryptSecret(user.twoFactorSecretEncrypted);
+    const validTotp = verifyTotpCode(secret, code);
+    const validBackup = !validTotp && this.consumeBackupCodeIfMatch(user, code);
+
+    if (!validTotp && !validBackup) {
+      throw new UnauthorizedException('Invalid Authenticator code or backup code.');
+    }
+
+    if (validBackup) {
+      await user.save();
+    }
+
+    const tenant = await this.tenantModel.findById(user.tenantId).exec();
+    if (!tenant) {
+      throw new BadRequestException('Workspace not found.');
+    }
+    if (clientIp && user.role !== 'super_admin' && !isIpAllowed(clientIp, tenant.securityPolicy?.ipAllowlist)) {
+      throw new ForbiddenException(`Login blocked: IP ${clientIp} not allowed.`);
+    }
+
+    return this.issueTokens(user, tenant);
+  }
+
+  async getTwoFactorStatus(authHeader?: string) {
+    const profile = await this.getProfileFromToken(authHeader);
+    const user = await this.userModel.findById(profile.user.id).exec();
+    if (!user) throw new UnauthorizedException('User not found.');
+    return {
+      enabled: Boolean(user.twoFactorEnabled),
+      backupCodesRemaining: Array.isArray(user.twoFactorBackupCodesHashes)
+        ? user.twoFactorBackupCodesHashes.length
+        : 0,
+    };
+  }
+
+  async setupTwoFactor(authHeader?: string) {
+    const profile = await this.getProfileFromToken(authHeader);
+    const user = await this.userModel.findById(profile.user.id).exec();
+    if (!user) throw new UnauthorizedException('User not found.');
+
+    const secret = generateBase32Secret(20);
+    user.twoFactorPendingSecretEncrypted = encryptSecret(secret);
+    await user.save();
+
+    const otpauthUri = buildOtpAuthUri({
+      secret,
+      accountEmail: user.email,
+      issuer: 'Leadsetu CRM',
+    });
+    const qrDataUrl = await generateTotpQrDataUrl(otpauthUri);
+
+    return {
+      secret,
+      otpauthUri,
+      qrDataUrl,
+    };
+  }
+
+  async enableTwoFactor(authHeader: string | undefined, code: string) {
+    const profile = await this.getProfileFromToken(authHeader);
+    const user = await this.userModel.findById(profile.user.id).exec();
+    if (!user) throw new UnauthorizedException('User not found.');
+
+    const pendingEncrypted = user.twoFactorPendingSecretEncrypted;
+    if (!pendingEncrypted) {
+      throw new BadRequestException('Generate a 2FA setup QR first before verifying.');
+    }
+
+    const secret = decryptSecret(pendingEncrypted);
+    if (!verifyTotpCode(secret, code)) {
+      throw new BadRequestException('Invalid 6-digit verification code. Check your Authenticator app clock and retry.');
+    }
+
+    const backupCodes = generateBackupRecoveryCodes(8);
+    user.twoFactorEnabled = true;
+    user.twoFactorSecretEncrypted = pendingEncrypted;
+    user.twoFactorPendingSecretEncrypted = null;
+    user.twoFactorBackupCodesHashes = backupCodes.map((c) => sha256Hex(c));
+    await user.save();
+
+    return {
+      enabled: true,
+      backupCodes,
+    };
+  }
+
+  async disableTwoFactor(
+    authHeader: string | undefined,
+    input: { code?: string; currentPassword?: string },
+  ) {
+    const profile = await this.getProfileFromToken(authHeader);
+    const user = await this.userModel.findById(profile.user.id).exec();
+    if (!user) throw new UnauthorizedException('User not found.');
+
+    if (!user.twoFactorEnabled) {
+      return { enabled: false };
+    }
+
+    const secret = user.twoFactorSecretEncrypted
+      ? decryptSecret(user.twoFactorSecretEncrypted)
+      : '';
+
+    const codeValid = input.code ? verifyTotpCode(secret, input.code) : false;
+    const pwdValid =
+      user.authProvider !== 'google' &&
+      input.currentPassword &&
+      this.verifySecret(input.currentPassword, user.passwordHash);
+
+    if (!codeValid && !pwdValid) {
+      throw new UnauthorizedException(
+        'Enter your current 6-digit Authenticator code (or account password) to disable 2FA.',
+      );
+    }
+
+    user.twoFactorEnabled = false;
+    user.twoFactorSecretEncrypted = null;
+    user.twoFactorPendingSecretEncrypted = null;
+    user.twoFactorBackupCodesHashes = [];
+    await user.save();
+
+    return { enabled: false };
   }
 }

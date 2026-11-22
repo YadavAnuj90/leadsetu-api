@@ -16,7 +16,9 @@ import { Model, Types } from 'mongoose';
 import { User, UserDocument } from '../auth/schemas/user.schema';
 import { Tenant, TenantDocument } from '../auth/schemas/tenant.schema';
 import { uploadToCloudinary } from '../auth/cloudinary.util';
+import { resolveOwnerScopeFilter } from '../auth/identity.util';
 import { AuditService } from '../audit/audit.service';
+import { InboxService } from '../inbox/inbox.service';
 import { Contact, ContactDocument } from '../contacts/contacts.service';
 import { Deal, DealDocument } from '../deals/schemas/deal.schema';
 import { Lead, LeadDocument } from '../leads/schemas/lead.schema';
@@ -38,6 +40,7 @@ import {
   CallTelemetrySnapshotDto,
   CreateCallShareLinkDto,
   LogSimCallDto,
+  PowerDialOutcomeDto,
   PublicCallCallbackDto,
   SaveCallDispositionDto,
   UploadCallRecordingDto,
@@ -105,6 +108,7 @@ export class CallsService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     @Optional() private readonly auditService?: AuditService,
+    @Optional() private readonly inboxService?: InboxService,
   ) {}
 
   private userLockKey(tenantId: string, userId: string): string {
@@ -1065,7 +1069,12 @@ export class CallsService {
 
   private formatOutcomeLabel(tag?: string): string {
     const map: Record<string, string> = {
+      rnr: 'RNR (No Answer)',
+      busy: 'Busy / Line Engaged',
+      callback: 'Callback Scheduled',
       interested: 'Interested',
+      not_interested: 'Not Interested',
+      dnd: 'DND / Do Not Call',
       quote_discussed: 'Quote Discussed',
       followup_requested: 'Follow-up Requested',
       support_resolved: 'Support Resolved',
@@ -1681,6 +1690,374 @@ export class CallsService {
     };
   }
 
+  // ─── Option 2: BPO Power Dialer Queue + Smart RNR Auto-Retry ─────────────
+
+  async getPowerQueue(
+    auth: CallAuthContext,
+    query?: { onlyDue?: string; limit?: string },
+  ) {
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+    const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
+    const limit = Math.min(100, Math.max(10, Number(query?.limit) || 50));
+    const onlyDue = query?.onlyDue === 'true';
+
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    const [leads, dndCount, completedTodayCount] = await Promise.all([
+      this.leadModel
+        .find({
+          tenantId: tenantOid,
+          ...ownerScope,
+          status: { $nin: ['converted', 'lost'] },
+          doNotCall: { $ne: true },
+          lastCallOutcome: { $ne: 'interested' },
+          phone: { $exists: true, $ne: '' },
+        })
+        .sort({ aiScore: -1, createdAt: 1 })
+        .limit(200)
+        .exec(),
+      this.leadModel
+        .countDocuments({
+          tenantId: tenantOid,
+          ...ownerScope,
+          doNotCall: true,
+        })
+        .exec(),
+      this.callLogModel
+        .countDocuments({
+          tenantId: tenantOid,
+          callerId: new Types.ObjectId(auth.userId),
+          startedAt: { $gte: startOfToday },
+          linkedEntityType: 'lead',
+        })
+        .exec(),
+    ]);
+
+    const nowMs = Date.now();
+    const formatted = leads.map((l) => {
+      const retryMs = l.nextCallRetryAt ? Date.parse(l.nextCallRetryAt) : NaN;
+      const isRetryScheduled = Number.isFinite(retryMs);
+      const isDueNow = !isRetryScheduled || retryMs <= nowMs;
+      const bucket: 'due_retry' | 'fresh' | 'scheduled_later' = isRetryScheduled
+        ? isDueNow
+          ? 'due_retry'
+          : 'scheduled_later'
+        : l.lastCalledAt
+          ? 'due_retry'
+          : 'fresh';
+
+      return {
+        id: l._id.toString(),
+        name: l.name,
+        company: l.company || '',
+        accountKind: l.accountKind === 'consumer' ? 'consumer' : 'business',
+        phone: l.phone || '',
+        email: l.email || '',
+        city: l.city || 'Delhi-NCR',
+        source: l.source || 'manual',
+        status: l.status || 'new',
+        estimatedValue: Number(l.estimatedValue) || 0,
+        aiScore: Number(l.aiScore) || 70,
+        aiLabel: l.aiLabel || 'Warm',
+        aiNextAction: l.aiNextAction || l.aiSummary || '',
+        notes: l.notes || '',
+        rnrRetryCount: Number(l.rnrRetryCount) || 0,
+        nextCallRetryAt: l.nextCallRetryAt || '',
+        lastCalledAt: l.lastCalledAt || '',
+        lastCallOutcome: l.lastCallOutcome || '',
+        isDueNow,
+        queueBucket: bucket,
+      };
+    });
+
+    const bucketRank: Record<'due_retry' | 'fresh' | 'scheduled_later', number> = {
+      due_retry: 0,
+      fresh: 1,
+      scheduled_later: 2,
+    };
+
+    formatted.sort((a, b) => {
+      const rankDiff = bucketRank[a.queueBucket] - bucketRank[b.queueBucket];
+      if (rankDiff !== 0) return rankDiff;
+      if (a.queueBucket === 'due_retry' && b.queueBucket === 'due_retry') {
+        return (a.nextCallRetryAt || '').localeCompare(b.nextCallRetryAt || '');
+      }
+      return b.aiScore - a.aiScore;
+    });
+
+    const filtered = onlyDue ? formatted.filter((item) => item.isDueNow) : formatted;
+
+    return {
+      data: filtered.slice(0, limit),
+      stats: {
+        queueTotal: filtered.length,
+        dueNowCount: formatted.filter((i) => i.isDueNow).length,
+        freshCount: formatted.filter((i) => i.queueBucket === 'fresh').length,
+        rnrRetryPendingCount: formatted.filter(
+          (i) => i.rnrRetryCount > 0 && i.nextCallRetryAt,
+        ).length,
+        dndCount,
+        completedTodayCount,
+      },
+    };
+  }
+
+  async recordPowerDialOutcome(
+    auth: CallAuthContext,
+    dto: PowerDialOutcomeDto,
+  ) {
+    const leadId = String(dto.leadId || '').trim();
+    if (!Types.ObjectId.isValid(leadId)) {
+      throw new BadRequestException('Valid leadId is required.');
+    }
+
+    const validDispositions = new Set([
+      'rnr',
+      'busy',
+      'callback',
+      'interested',
+      'not_interested',
+      'dnd',
+    ]);
+    if (!validDispositions.has(dto.disposition)) {
+      throw new BadRequestException('Invalid power dialer disposition.');
+    }
+
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+    const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
+    const lead = await this.leadModel
+      .findOne({
+        _id: new Types.ObjectId(leadId),
+        tenantId: tenantOid,
+        ...ownerScope,
+      })
+      .exec();
+    if (!lead) {
+      throw new NotFoundException('Lead not found in your dialer queue.');
+    }
+
+    const tenantDoc = await this.tenantModel
+      .findById(tenantOid)
+      .select({ companyName: 1, name: 1 })
+      .exec();
+    const companyLabel = tenantDoc?.companyName || tenantDoc?.name || 'our team';
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const cleanNotes = String(dto.notes || '').trim();
+    const outcomeLabel = this.formatOutcomeLabel(dto.disposition);
+
+    const callStatus: 'completed' | 'missed' | 'rejected' =
+      dto.disposition === 'rnr'
+        ? 'missed'
+        : dto.disposition === 'busy'
+          ? 'rejected'
+          : 'completed';
+    const durationSeconds =
+      callStatus === 'completed'
+        ? Math.max(0, Math.round(Number(dto.durationSeconds) || 0))
+        : 0;
+
+    let scheduledFor = '';
+    let retryType:
+      | 'retry_1_2h'
+      | 'retry_2_next_day_whatsapp'
+      | 'callback_scheduled'
+      | 'qualified_hot'
+      | 'closed_lost'
+      | 'dnd_suppressed' = 'qualified_hot';
+    let whatsappSent = false;
+    let whatsappStatus = '';
+    let taskTitle = '';
+    let taskDueDate = '';
+
+    if (dto.disposition === 'rnr' || dto.disposition === 'busy') {
+      const nextCount = (lead.rnrRetryCount || 0) + 1;
+      lead.rnrRetryCount = nextCount;
+      if (lead.status === 'new') {
+        lead.status = 'contacted';
+      }
+
+      if (nextCount === 1) {
+        const retryAt = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+        scheduledFor = retryAt.toISOString();
+        retryType = 'retry_1_2h';
+        taskTitle = `RNR Retry #1 (+2h): Call ${lead.name}`;
+        taskDueDate = retryAt.toISOString().slice(0, 10);
+      } else {
+        const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+        tomorrow.setHours(10, 30, 0, 0);
+        scheduledFor = tomorrow.toISOString();
+        retryType = 'retry_2_next_day_whatsapp';
+        taskTitle = `RNR Retry #${nextCount} (Next Day): Call ${lead.name}`;
+        taskDueDate = tomorrow.toISOString().slice(0, 10);
+      }
+      lead.nextCallRetryAt = scheduledFor;
+    } else if (dto.disposition === 'callback') {
+      const parsedCallback = dto.callbackAt ? new Date(dto.callbackAt) : null;
+      const targetAt =
+        parsedCallback && Number.isFinite(parsedCallback.getTime())
+          ? parsedCallback
+          : new Date(now.getTime() + 4 * 60 * 60 * 1000);
+      scheduledFor = targetAt.toISOString();
+      retryType = 'callback_scheduled';
+      lead.nextCallRetryAt = scheduledFor;
+      if (lead.status === 'new') lead.status = 'contacted';
+      taskTitle = `Callback Requested: Call ${lead.name}`;
+      taskDueDate = targetAt.toISOString().slice(0, 10);
+    } else if (dto.disposition === 'interested') {
+      retryType = 'qualified_hot';
+      lead.nextCallRetryAt = '';
+      lead.status = 'qualified';
+      lead.aiScore = Math.max(Number(lead.aiScore) || 70, 85);
+      lead.aiLabel = 'Hot';
+      taskTitle = `Send Quote / Next Step to Hot Lead: ${lead.name}`;
+      taskDueDate = now.toISOString().slice(0, 10);
+    } else if (dto.disposition === 'not_interested') {
+      retryType = 'closed_lost';
+      lead.nextCallRetryAt = '';
+      lead.status = 'lost';
+    } else if (dto.disposition === 'dnd') {
+      retryType = 'dnd_suppressed';
+      lead.nextCallRetryAt = '';
+      lead.doNotCall = true;
+      lead.status = 'lost';
+      const nextTags = new Set(Array.isArray(lead.tags) ? lead.tags : []);
+      nextTags.add('DND');
+      lead.tags = Array.from(nextTags);
+    }
+
+    lead.lastCalledAt = nowIso;
+    lead.lastCallOutcome = dto.disposition;
+
+    const activityDesc = `Power Dialer (${outcomeLabel}${
+      durationSeconds > 0 ? ` · ${durationSeconds}s` : ''
+    })${scheduledFor ? ` · Next Retry: ${scheduledFor.slice(0, 16).replace('T', ' ')}` : ''}${
+      cleanNotes ? `: ${cleanNotes}` : ''
+    }`;
+
+    lead.activities = [
+      {
+        id: randomBytes(6).toString('hex'),
+        type: 'call',
+        description: activityDesc,
+        authorName: auth.name || auth.email.split('@')[0],
+        createdAt: nowIso,
+      },
+      ...(lead.activities || []),
+    ];
+    await lead.save();
+
+    if (
+      retryType === 'retry_2_next_day_whatsapp' &&
+      dto.disposition === 'rnr' &&
+      dto.sendWhatsAppOnRnr !== false &&
+      this.inboxService &&
+      lead.phone
+    ) {
+      const waRes = await this.inboxService
+        .dispatchAutomatedWhatsApp({
+          tenantId: auth.tenantId,
+          userId: auth.userId,
+          actorName: auth.name || 'Dialer Auto-Retry',
+          linkedEntityType: 'lead',
+          linkedEntityId: lead._id.toString(),
+          contactName: lead.name,
+          company: lead.company || '',
+          phone: lead.phone,
+          city: lead.city || '',
+          estimatedValue: Number(lead.estimatedValue) || 0,
+          messageBody: `Hi ${lead.name}, tried calling you from ${companyLabel} regarding your inquiry. Reply here with a good time to connect!`,
+          timelineMarker: 'rnr_auto_retry_2',
+        })
+        .catch(() => null);
+      if (waRes && !waRes.skippedDnd && waRes.status !== 'failed') {
+        whatsappSent = true;
+        whatsappStatus = waRes.status || 'sent';
+      }
+    }
+
+    let createdTaskId = '';
+    if (taskTitle) {
+      const task = await this.taskModel.create({
+        tenantId: tenantOid,
+        ownerId: new Types.ObjectId(auth.userId),
+        title: taskTitle,
+        description:
+          cleanNotes ||
+          `${outcomeLabel} logged via Power Dialer${
+            scheduledFor ? ` (Scheduled for ${scheduledFor})` : ''
+          }`,
+        priority:
+          dto.disposition === 'interested' || dto.disposition === 'callback'
+            ? 'high'
+            : 'medium',
+        status: 'pending',
+        category: 'call',
+        dueDate: taskDueDate || nowIso.slice(0, 10),
+        relatedName: lead.name,
+        relatedCompany: lead.company || '',
+        relatedPhone: lead.phone || '',
+      });
+      createdTaskId = task._id.toString();
+    }
+
+    const startedAt = new Date(now.getTime() - Math.max(1, durationSeconds) * 1000);
+    const userOid = new Types.ObjectId(auth.userId);
+    const callDoc = await this.callLogModel.create({
+      tenantId: tenantOid,
+      callerId: userOid,
+      calleeId: userOid,
+      callChannel: 'sim_mobile',
+      callerType: 'agent',
+      callerName: auth.name,
+      callerRole: auth.role,
+      callerUserCode: auth.userCode,
+      customerPhone: lead.phone || '',
+      calleeName: lead.name,
+      calleeRole: lead.accountKind === 'consumer' ? 'B2C Consumer' : 'B2B Lead',
+      calleeUserCode: '',
+      status: callStatus,
+      startedAt,
+      answeredAt: callStatus === 'completed' ? startedAt : null,
+      connectedAt: callStatus === 'completed' ? startedAt : null,
+      endedAt: now,
+      setupTimeMs: 0,
+      durationSeconds,
+      endedByUserId: auth.userId,
+      endReason: `Power Dialer · ${outcomeLabel}`,
+      linkedEntityType: 'lead',
+      linkedEntityId: lead._id.toString(),
+      linkedEntityLabel: lead.company ? `${lead.name} (${lead.company})` : lead.name,
+      notes: cleanNotes,
+      outcomeTag: dto.disposition,
+      dispositionByUserId: auth.userId,
+      dispositionAt: now,
+      followUpTaskId: createdTaskId,
+    });
+
+    return {
+      call: this.toDto(callDoc, auth.userId),
+      lead: {
+        id: lead._id.toString(),
+        name: lead.name,
+        status: lead.status,
+        rnrRetryCount: Number(lead.rnrRetryCount) || 0,
+        nextCallRetryAt: lead.nextCallRetryAt || '',
+        lastCallOutcome: lead.lastCallOutcome || '',
+        doNotCall: Boolean(lead.doNotCall),
+      },
+      retryAction: {
+        type: retryType,
+        scheduledFor,
+        whatsappSent,
+        whatsappStatus,
+        taskId: createdTaskId,
+      },
+    };
+  }
+
   // ─── Phase 2: Customer Click-to-Call Shareable Links ──────────────────────
 
   private getJwtSecret(): string {
@@ -2196,9 +2573,12 @@ export class CallsService {
 
   async getUserAnalytics(auth: CallAuthContext) {
     const tenantOid = new Types.ObjectId(auth.tenantId);
-    const isAdminViewer = ['owner', 'admin', 'super_admin'].includes(
+    const isAdminViewer = ['owner', 'admin', 'manager', 'super_admin'].includes(
       auth.role,
     );
+
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
 
     const [users, calls] = await Promise.all([
       this.userModel
@@ -2227,6 +2607,8 @@ export class CallsService {
           calleeId: 1,
           status: 1,
           durationSeconds: 1,
+          startedAt: 1,
+          outcomeTag: 1,
         })
         .exec(),
     ]);
@@ -2240,6 +2622,10 @@ export class CallsService {
         outgoingCalls: number;
         incomingCalls: number;
         totalDurationSeconds: number;
+        todayDials: number;
+        todayConnected: number;
+        todayTalkSeconds: number;
+        dispositionBreakdown: Record<string, number>;
       }
     >();
 
@@ -2251,6 +2637,10 @@ export class CallsService {
         outgoingCalls: 0,
         incomingCalls: 0,
         totalDurationSeconds: 0,
+        todayDials: 0,
+        todayConnected: 0,
+        todayTalkSeconds: 0,
+        dispositionBreakdown: {},
       });
     }
 
@@ -2262,16 +2652,27 @@ export class CallsService {
       const callerId = c.callerId.toString();
       const calleeId = c.calleeId.toString();
       const dur = Math.max(0, Number(c.durationSeconds) || 0);
+      const isToday = c.startedAt ? new Date(c.startedAt) >= startOfToday : false;
+      const tag = String(c.outcomeTag || '').trim();
 
       const callerBucket = statsMap.get(callerId);
       if (callerBucket) {
         callerBucket.totalCalls += 1;
         callerBucket.outgoingCalls += 1;
+        if (isToday) callerBucket.todayDials += 1;
         if (isAnswered(c.status)) {
           callerBucket.answeredCalls += 1;
           callerBucket.totalDurationSeconds += dur;
+          if (isToday) {
+            callerBucket.todayConnected += 1;
+            callerBucket.todayTalkSeconds += dur;
+          }
         } else if (isMissed(c.status)) {
           callerBucket.missedCalls += 1;
+        }
+        if (tag) {
+          callerBucket.dispositionBreakdown[tag] =
+            (callerBucket.dispositionBreakdown[tag] || 0) + 1;
         }
       }
 
@@ -2296,6 +2697,10 @@ export class CallsService {
           s.totalCalls > 0
             ? Math.round((s.answeredCalls / s.totalCalls) * 100)
             : 0;
+        const todayConnectRatePct =
+          s.todayDials > 0
+            ? Math.round((s.todayConnected / s.todayDials) * 100)
+            : 0;
         return {
           userId: uid,
           name: u.name,
@@ -2304,9 +2709,15 @@ export class CallsService {
           territory: u.territory || '',
           ...s,
           answerRatePct,
+          todayConnectRatePct,
         };
       })
-      .sort((a, b) => b.totalCalls - a.totalCalls || a.name.localeCompare(b.name));
+      .sort(
+        (a, b) =>
+          b.todayDials - a.todayDials ||
+          b.totalCalls - a.totalCalls ||
+          a.name.localeCompare(b.name),
+      );
 
     return {
       isAdminView: isAdminViewer,

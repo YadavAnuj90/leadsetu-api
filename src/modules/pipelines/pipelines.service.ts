@@ -17,6 +17,10 @@ import {
   StageCategory,
 } from './schemas/pipeline.schema';
 import { Deal, DealDocument } from '../deals/schemas/deal.schema';
+import {
+  normalizeBusinessMode,
+  type WorkspaceBusinessMode,
+} from '../auth/business-mode.util';
 import { CreatePipelineDto, UpdatePipelineDto } from './dto/pipeline.dto';
 
 export interface PipelineAuthContext {
@@ -28,6 +32,37 @@ export interface PipelineAuthContext {
 
 const PRESET_TEMPLATES: Record<string, PipelineStage[]> = {
   b2b_sales: DEFAULT_PIPELINE_STAGES,
+  msme_sales: [
+    { id: 'inquiry', name: 'New Inquiry', probability: 25, color: '#3978EA', category: 'open', rottenAfterDays: 7 },
+    { id: 'quote_sent', name: 'Estimate / Quote Sent', probability: 55, color: '#F59E0B', category: 'open', rottenAfterDays: 7 },
+    { id: 'confirmed', name: 'Order Confirmed', probability: 80, color: '#8B5CF6', category: 'open', rottenAfterDays: 5 },
+    { id: 'won', name: 'Closed Won / Paid', probability: 100, color: '#10B981', category: 'won', rottenAfterDays: 0 },
+    { id: 'lost', name: 'Lost', probability: 0, color: '#64748B', category: 'lost', rottenAfterDays: 0 },
+  ],
+  b2c_orders: [
+    { id: 'inquiry', name: 'New Inquiry', probability: 20, color: '#3978EA', category: 'open', rottenAfterDays: 5 },
+    { id: 'confirmed', name: 'Order Confirmed', probability: 45, color: '#8B5CF6', category: 'open', rottenAfterDays: 3 },
+    { id: 'packed', name: 'Packed', probability: 70, color: '#F59E0B', category: 'open', rottenAfterDays: 3 },
+    { id: 'dispatched', name: 'Dispatched', probability: 85, color: '#0EA5E9', category: 'open', rottenAfterDays: 5 },
+    { id: 'won', name: 'Delivered / COD Settled', probability: 100, color: '#10B981', category: 'won', rottenAfterDays: 0 },
+    { id: 'lost', name: 'Cancelled / RTO', probability: 0, color: '#64748B', category: 'lost', rottenAfterDays: 0 },
+  ],
+  education_admissions: [
+    { id: 'inquiry', name: 'Inquiry', probability: 20, color: '#3978EA', category: 'open', rottenAfterDays: 5 },
+    { id: 'counseling', name: 'Counseling Done', probability: 40, color: '#8B5CF6', category: 'open', rottenAfterDays: 5 },
+    { id: 'demo', name: 'Demo Attended', probability: 65, color: '#0EA5E9', category: 'open', rottenAfterDays: 7 },
+    { id: 'fee_pending', name: 'Fee Pending', probability: 85, color: '#F59E0B', category: 'open', rottenAfterDays: 7 },
+    { id: 'won', name: 'Enrolled', probability: 100, color: '#10B981', category: 'won', rottenAfterDays: 0 },
+    { id: 'lost', name: 'Dropped', probability: 0, color: '#64748B', category: 'lost', rottenAfterDays: 0 },
+  ],
+  bpo_callbacks: [
+    { id: 'fresh', name: 'Fresh Queue', probability: 20, color: '#3978EA', category: 'open', rottenAfterDays: 2 },
+    { id: 'contacted', name: 'Contacted', probability: 40, color: '#8B5CF6', category: 'open', rottenAfterDays: 3 },
+    { id: 'callback', name: 'Callback Scheduled', probability: 60, color: '#F59E0B', category: 'open', rottenAfterDays: 3 },
+    { id: 'hot_transfer', name: 'Hot Transfer', probability: 85, color: '#EC4899', category: 'open', rottenAfterDays: 2 },
+    { id: 'won', name: 'Closed', probability: 100, color: '#10B981', category: 'won', rottenAfterDays: 0 },
+    { id: 'lost', name: 'Not Interested / DND', probability: 0, color: '#64748B', category: 'lost', rottenAfterDays: 0 },
+  ],
   dealer_onboarding: [
     { id: 'inquiry', name: 'Distributor Inquiry', probability: 20, color: '#3978EA', category: 'open', rottenAfterDays: 7 },
     { id: 'kyc_gst', name: 'GSTIN & Shop KYC', probability: 40, color: '#0EA5E9', category: 'open', rottenAfterDays: 5 },
@@ -49,6 +84,42 @@ const PRESET_TEMPLATES: Record<string, PipelineStage[]> = {
     { id: 'won', name: 'Closed Won', probability: 100, color: ' #10B981'.trim(), category: 'won', rottenAfterDays: 0 },
     { id: 'lost', name: 'Closed Lost', probability: 0, color: '#64748B', category: 'lost', rottenAfterDays: 0 },
   ],
+};
+
+const MODE_PIPELINE_DEFAULTS: Record<
+  WorkspaceBusinessMode,
+  { name: string; description: string; template: string }
+> = {
+  b2b: {
+    name: 'B2B Sales Pipeline',
+    description: 'Default workspace deal workflow synced across Leads, Quotes & GST Invoices.',
+    template: 'b2b_sales',
+  },
+  msme: {
+    name: 'MSME Orders & Deals',
+    description: 'Lightweight quote-to-order pipeline built for small traders & MSMEs.',
+    template: 'msme_sales',
+  },
+  b2c: {
+    name: 'B2C / D2C Orders Pipeline',
+    description: 'Consumer inquiry to order confirmation, packing, dispatch & COD delivery.',
+    template: 'b2c_orders',
+  },
+  hybrid: {
+    name: 'Hybrid Deals & Orders',
+    description: 'Unified pipeline supporting both B2B wholesale deals and consumer orders.',
+    template: 'b2b_sales',
+  },
+  bpo: {
+    name: 'BPO Callback Pipeline',
+    description: 'Telecalling queue, callback scheduling, hot transfers & closure tracking.',
+    template: 'bpo_callbacks',
+  },
+  education: {
+    name: 'Admissions Pipeline',
+    description: 'Student inquiry, counseling, demo class, fee payment & course enrollment.',
+    template: 'education_admissions',
+  },
 };
 
 function slugifyStageId(raw: string): string {
@@ -99,7 +170,7 @@ export class PipelinesService {
   }
 
   private assertCanConfigurePipelines(auth: PipelineAuthContext) {
-    if (auth.role !== 'owner' && auth.role !== 'admin') {
+    if (!['owner', 'admin', 'super_admin'].includes(auth.role)) {
       throw new ForbiddenException(
         'Only Workspace Owners or Admins can create, edit, or delete sales pipelines.',
       );
@@ -171,6 +242,13 @@ export class PipelinesService {
     return normalized;
   }
 
+  private async getTenantBusinessMode(tenantId: string): Promise<WorkspaceBusinessMode> {
+    const tenantDoc = await this.pipelineModel.db
+      .collection('tenants')
+      .findOne({ _id: new Types.ObjectId(tenantId) }, { projection: { businessMode: 1 } });
+    return normalizeBusinessMode((tenantDoc?.businessMode as string) || 'b2b');
+  }
+
   async ensureDefaultPipeline(tenantId: string): Promise<PipelineDocument> {
     const tenantObjectId = new Types.ObjectId(tenantId);
     const existing = await this.pipelineModel
@@ -186,13 +264,67 @@ export class PipelinesService {
       return existing[0];
     }
 
+    const mode = await this.getTenantBusinessMode(tenantId);
+    const presetCfg = MODE_PIPELINE_DEFAULTS[mode] || MODE_PIPELINE_DEFAULTS.b2b;
+    const stages = (PRESET_TEMPLATES[presetCfg.template] || DEFAULT_PIPELINE_STAGES).map((s) => ({
+      ...s,
+    }));
+
     return this.pipelineModel.create({
       tenantId: tenantObjectId,
-      name: 'B2B Sales Pipeline',
-      description: 'Default workspace deal workflow synced across Leads, Quotes & GST Invoices.',
+      name: presetCfg.name,
+      description: presetCfg.description,
       isDefault: true,
-      stages: DEFAULT_PIPELINE_STAGES,
+      stages,
     });
+  }
+
+  async applyModePreset(
+    auth: PipelineAuthContext,
+    inputMode?: WorkspaceBusinessMode,
+  ) {
+    this.assertCanConfigurePipelines(auth);
+    const mode = inputMode
+      ? normalizeBusinessMode(inputMode)
+      : await this.getTenantBusinessMode(auth.tenantId);
+    const presetCfg = MODE_PIPELINE_DEFAULTS[mode] || MODE_PIPELINE_DEFAULTS.b2b;
+    const nextStages = (
+      PRESET_TEMPLATES[presetCfg.template] || DEFAULT_PIPELINE_STAGES
+    ).map((s) => ({ ...s }));
+
+    const def = await this.ensureDefaultPipeline(auth.tenantId);
+    const tenantObjectId = new Types.ObjectId(auth.tenantId);
+    const validIds = new Set(nextStages.map((s) => s.id));
+    const fallbackOpen =
+      nextStages.find((s) => s.category === 'open') || nextStages[0];
+
+    const orphanedDeals = await this.dealModel
+      .find({
+        tenantId: tenantObjectId,
+        $or: [{ pipelineId: def._id }, { pipelineId: null }, { pipelineId: { $exists: false } }],
+        stage: { $nin: Array.from(validIds) },
+      })
+      .exec();
+
+    for (const deal of orphanedDeals) {
+      const target =
+        nextStages.find((s) => s.category === deal.stageCategory) || fallbackOpen;
+      deal.stage = target.id;
+      deal.probability = target.probability;
+      deal.stageCategory = target.category;
+      await deal.save();
+    }
+
+    def.name = presetCfg.name;
+    def.description = presetCfg.description;
+    def.stages = nextStages;
+    await def.save();
+
+    return {
+      pipeline: this.toDto(def),
+      migratedDealsCount: orphanedDeals.length,
+      appliedMode: mode,
+    };
   }
 
   async resolvePipelineForTenant(

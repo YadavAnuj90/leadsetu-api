@@ -22,6 +22,8 @@ import {
 } from '@nestjs/swagger';
 import {
   CreateCampaignDto,
+  PreviewAudienceDto,
+  RetargetCampaignDto,
   UpdateCampaignDto,
 } from './dto/campaigns.dto';
 import { CampaignsService } from './campaigns.service';
@@ -59,6 +61,9 @@ export class CampaignsController {
       'noida_delhi_ncr',
       'indiamart_buyers',
       'gst_customers',
+      'b2b_accounts',
+      'b2c_consumers',
+      'delivered_customers',
     ],
     description: 'Filter by target audience segment',
   })
@@ -91,6 +96,21 @@ export class CampaignsController {
   ) {
     const auth = await this.campaignsService.verifyAuth(authorization);
     return this.campaignsService.findOne(auth, id);
+  }
+
+  @Post('preview-audience')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Live preview of matched CRM audience counts & sample recipients using segment + B2B/B2C/City/Status/DND filters',
+  })
+  @ApiBody({ type: PreviewAudienceDto })
+  async previewAudience(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: PreviewAudienceDto,
+  ) {
+    const auth = await this.campaignsService.verifyAuth(authorization);
+    return this.campaignsService.previewAudience(auth, dto);
   }
 
   @Post()
@@ -127,6 +147,23 @@ export class CampaignsController {
   ) {
     const auth = await this.campaignsService.verifyAuth(authorization);
     return this.campaignsService.launchCampaign(auth, id);
+  }
+
+  @Post(':id/retarget-non-responders')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary:
+      '1-Click Follow-Up Drip: re-message only recipients from this campaign who have not replied (excluding DND/opt-outs)',
+  })
+  @ApiParam({ name: 'id', description: 'Source campaign record ID' })
+  @ApiBody({ type: RetargetCampaignDto })
+  async retargetNonResponders(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() dto: RetargetCampaignDto,
+  ) {
+    const auth = await this.campaignsService.verifyAuth(authorization);
+    return this.campaignsService.retargetNonResponders(auth, id, dto);
   }
 
   @Post(':id/opt-out')

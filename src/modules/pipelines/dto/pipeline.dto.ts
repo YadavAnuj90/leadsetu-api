@@ -48,6 +48,25 @@ export class PipelineStageDto implements PipelineStage {
   requireNoteOnEnter?: boolean;
 }
 
+export type PipelineTemplateKey =
+  | 'b2b_sales'
+  | 'msme_sales'
+  | 'b2c_orders'
+  | 'education_admissions'
+  | 'bpo_callbacks'
+  | 'dealer_onboarding'
+  | 'amc_renewals'
+  | 'blank';
+
+export class ApplyModePresetDto {
+  @ApiPropertyOptional({
+    description: 'Workspace business mode to apply stages for (defaults to current tenant businessMode)',
+    enum: ['b2b', 'msme', 'b2c', 'hybrid', 'bpo', 'education'],
+    example: 'b2c',
+  })
+  businessMode?: 'b2b' | 'msme' | 'b2c' | 'hybrid' | 'bpo' | 'education';
+}
+
 export class CreatePipelineDto {
   @ApiProperty({
     description: 'Pipeline display name',
@@ -63,10 +82,19 @@ export class CreatePipelineDto {
 
   @ApiPropertyOptional({
     description: 'Starter template preset used if custom stages array is omitted',
-    enum: ['b2b_sales', 'dealer_onboarding', 'amc_renewals', 'blank'],
-    example: 'dealer_onboarding',
+    enum: [
+      'b2b_sales',
+      'msme_sales',
+      'b2c_orders',
+      'education_admissions',
+      'bpo_callbacks',
+      'dealer_onboarding',
+      'amc_renewals',
+      'blank',
+    ],
+    example: 'b2c_orders',
   })
-  template?: 'b2b_sales' | 'dealer_onboarding' | 'amc_renewals' | 'blank';
+  template?: PipelineTemplateKey;
 
   @ApiPropertyOptional({
     description: 'Set newly created pipeline as the workspace default',

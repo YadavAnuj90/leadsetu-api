@@ -802,6 +802,19 @@ export class InvoicesService {
     return this.toDto(doc, maskPhones);
   }
 
+  public async getTenantRecoveryPublicInfo(tenantId: string) {
+    return this.getTenantRecoveryConfig(tenantId);
+  }
+
+  public buildUpiPaymentLink(
+    upiId: string,
+    merchantName: string,
+    invoiceNumber: string,
+    amountInr: number,
+  ) {
+    return this.buildUpiLink(upiId, merchantName, invoiceNumber, amountInr);
+  }
+
   private async getTenantRecoveryConfig(tenantId: string) {
     const tenant = Types.ObjectId.isValid(tenantId)
       ? await this.invoiceModel.db
@@ -1643,22 +1656,110 @@ export class InvoicesService {
     }
     await doc.save();
 
-    // Update linked deal activity if connected
+    // Update linked deal stage + timeline activity when connected
     if (doc.linkedDealId && Types.ObjectId.isValid(doc.linkedDealId)) {
       try {
-        await this.invoiceModel.db?.collection('deals').updateOne(
+        const dealsCol = this.invoiceModel.db?.collection('deals');
+        const pipelinesCol = this.invoiceModel.db?.collection('pipelines');
+        const existingDeal = await dealsCol?.findOne({
+          _id: new Types.ObjectId(doc.linkedDealId),
+          tenantId: doc.tenantId,
+        });
+
+        const activitiesToPush: Array<Record<string, unknown>> = [
+          {
+            id: `act-${Date.now()}`,
+            type: 'quote',
+            description:
+              decision === 'approved'
+                ? `Buyer ${buyerName} APPROVED ${doc.invoiceNumber} (₹${doc.grandTotal.toLocaleString('en-IN')}) via Magic Portal.`
+                : `Buyer ${buyerName} requested changes on ${doc.invoiceNumber}${remark ? `: "${remark}"` : '.'}`,
+            authorName: buyerName,
+            createdAt: nowIso,
+          },
+        ];
+
+        const updateSet: Record<string, unknown> = {};
+        if (decision === 'approved' && existingDeal) {
+          let nextStage = String(existingDeal.stage || 'negotiation');
+          let nextProbability = Math.max(Number(existingDeal.probability || 0), 90);
+          const curCat = String(existingDeal.stageCategory || 'open');
+
+          if (curCat !== 'won') {
+            let targetStageId = '';
+            if (existingDeal.pipelineId && pipelinesCol) {
+              const pipe = await pipelinesCol.findOne({ _id: existingDeal.pipelineId });
+              const pipeStages = Array.isArray(pipe?.stages)
+                ? (pipe.stages as Array<{ id: string; name: string; category?: string; probability?: number }>)
+                : [];
+              const negStage = pipeStages.find(
+                (s) =>
+                  s.category === 'open' &&
+                  /negotiat|approv|closing|verbal|commit|final/i.test(s.name || s.id),
+              );
+              const openStages = pipeStages.filter((s) => (s.category || 'open') === 'open');
+              const picked = negStage || openStages[openStages.length - 1];
+              if (picked) {
+                targetStageId = picked.id;
+                nextProbability = Math.max(90, Number(picked.probability || 90));
+              }
+            } else {
+              targetStageId = 'negotiation';
+            }
+
+            if (targetStageId && targetStageId !== nextStage) {
+              activitiesToPush.unshift({
+                id: `act-${Date.now() + 1}`,
+                type: 'stage_change',
+                description: `Auto-moved deal stage "${nextStage}" -> "${targetStageId}" (${nextProbability}% confidence) after Buyer approved quote ${doc.invoiceNumber}.`,
+                authorName: 'Buyer Portal Automation',
+                createdAt: nowIso,
+              });
+              nextStage = targetStageId;
+            }
+          }
+
+          updateSet.stage = nextStage;
+          updateSet.probability = nextProbability;
+        }
+
+        const dealUpdateOp: Record<string, unknown> = {
+          $push: {
+            activities: {
+              $each: activitiesToPush,
+              $position: 0,
+            },
+          },
+        };
+        if (Object.keys(updateSet).length > 0) {
+          dealUpdateOp.$set = updateSet;
+        }
+
+        await dealsCol?.updateOne(
           { _id: new Types.ObjectId(doc.linkedDealId), tenantId: doc.tenantId },
+          dealUpdateOp,
+        );
+      } catch {
+        // Non-blocking activity sync
+      }
+    }
+
+    // Also update linked Lead timeline if connected
+    if (doc.linkedLeadId && Types.ObjectId.isValid(doc.linkedLeadId)) {
+      try {
+        await this.invoiceModel.db?.collection('leads').updateOne(
+          { _id: new Types.ObjectId(doc.linkedLeadId), tenantId: doc.tenantId },
           {
             $push: {
               activities: {
                 $each: [
                   {
-                    id: `act-${Date.now()}`,
-                    type: 'quote',
+                    id: `act-${Date.now() + 2}`,
+                    type: 'note',
                     description:
                       decision === 'approved'
-                        ? `Buyer ${buyerName} APPROVED ${doc.invoiceNumber} (₹${doc.grandTotal.toLocaleString('en-IN')}) via public quote portal.`
-                        : `Buyer ${buyerName} requested changes on ${doc.invoiceNumber}${remark ? `: "${remark}"` : '.'}`,
+                        ? `Buyer ${buyerName} APPROVED quote ${doc.invoiceNumber} (₹${doc.grandTotal.toLocaleString('en-IN')}) via Magic Portal.`
+                        : `Buyer ${buyerName} requested revision on quote ${doc.invoiceNumber}${remark ? `: "${remark}"` : '.'}`,
                     authorName: buyerName,
                     createdAt: nowIso,
                   },
@@ -1669,7 +1770,7 @@ export class InvoicesService {
           } as Record<string, unknown>,
         );
       } catch {
-        // Non-blocking activity sync
+        // Non-blocking lead timeline sync
       }
     }
 
@@ -2952,7 +3053,7 @@ export class InvoicesService {
         this.configService.get<string>('FRONTEND_URL') ||
         'http://localhost:3000',
     ).replace(/\/+$/, '');
-    const publicUrl = `${baseOrigin}/quote/${doc.publicToken}`;
+    const publicUrl = `${baseOrigin}/portal/${doc.publicToken}`;
 
     const pdfBuffer = this.buildDocumentPdfBuffer(doc, sellerCompany, publicUrl);
     const filename = `${doc.invoiceNumber}.pdf`;

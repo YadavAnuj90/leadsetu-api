@@ -297,6 +297,47 @@ export class UpdateWhatsAppConfigSwaggerDto {
   clearAppSecret?: boolean;
 }
 
+export class UpdateAiAgentConfigSwaggerDto {
+  @ApiPropertyOptional({ enum: ['autopilot', 'draft_only', 'off'], example: 'autopilot' })
+  mode?: 'autopilot' | 'draft_only' | 'off';
+
+  @ApiPropertyOptional({ enum: ['auto', 'hinglish', 'english', 'hindi'], example: 'auto' })
+  language?: 'auto' | 'hinglish' | 'english' | 'hindi';
+
+  @ApiPropertyOptional({ example: 10 })
+  maxDiscountPct?: number;
+
+  @ApiPropertyOptional({ example: 80 })
+  handoffScoreThreshold?: number;
+
+  @ApiPropertyOptional({ default: true })
+  autoSendCatalogPricing?: boolean;
+
+  @ApiPropertyOptional({ default: true })
+  autoUpdateLeadFields?: boolean;
+
+  @ApiPropertyOptional({ default: false })
+  businessHoursOnly?: boolean;
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['human', 'manager', 'call back', 'discount'],
+  })
+  escalationKeywords?: string[];
+}
+
+export class ToggleAutopilotSwaggerDto {
+  @ApiProperty({ example: false })
+  paused!: boolean;
+}
+
+export class SimulateInboundSwaggerDto {
+  @ApiProperty({
+    example: 'Namaste, 500 switch ka rate kya hai Gurugram ke liye? GSTIN 06AABCU9603R1ZM',
+  })
+  message!: string;
+}
+
 @ApiTags('6. Unified WhatsApp & AI Inbox')
 @ApiBearerAuth('access-token')
 @Controller('inbox')
@@ -346,6 +387,30 @@ export class InboxController {
   ) {
     const auth = await this.inboxService.verifyAuth(authorization);
     return this.inboxService.getWhatsAppConfig(auth);
+  }
+
+  @Get('ai-agent/config')
+  @ApiOperation({
+    summary: 'Get 24x7 Autonomous AI WhatsApp Sales Concierge & Discount Guardrail configuration',
+  })
+  async getAiAgentConfig(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.getAiAgentConfig(auth);
+  }
+
+  @Patch('ai-agent/config')
+  @ApiOperation({
+    summary: 'Configure Autonomous 24x7 AI Sales Concierge mode (autopilot / draft_only / off), discount caps & handoff score',
+  })
+  @ApiBody({ type: UpdateAiAgentConfigSwaggerDto })
+  async updateAiAgentConfig(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: UpdateAiAgentConfigSwaggerDto,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.updateAiAgentConfig(auth, body);
   }
 
   @Patch('whatsapp-config')
@@ -598,6 +663,37 @@ export class InboxController {
   ) {
     const auth = await this.inboxService.verifyAuth(authorization);
     return this.inboxService.markConversationRead(auth, id);
+  }
+
+  @Patch(':id/ai-autopilot')
+  @ApiOperation({
+    summary: 'Pause or resume 24x7 Autonomous AI Concierge on a specific conversation thread',
+  })
+  @ApiParam({ name: 'id', description: 'Unique conversation thread ID' })
+  @ApiBody({ type: ToggleAutopilotSwaggerDto })
+  async toggleAutopilot(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() body: ToggleAutopilotSwaggerDto,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.toggleConversationAutopilot(auth, id, body.paused);
+  }
+
+  @Post(':id/simulate-inbound')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Simulate an inbound buyer WhatsApp message to trigger & test the 24x7 AI Sales Concierge live',
+  })
+  @ApiParam({ name: 'id', description: 'Unique conversation thread ID' })
+  @ApiBody({ type: SimulateInboundSwaggerDto })
+  async simulateInbound(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() body: SimulateInboundSwaggerDto,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.simulateInboundMessage(auth, id, body.message);
   }
 
   @Post(':id/ai-assist')

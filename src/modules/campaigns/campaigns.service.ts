@@ -16,8 +16,11 @@ import { ConfigService } from '@nestjs/config';
 import { HydratedDocument, Model, Types } from 'mongoose';
 import {
   CampaignSegment,
+  CampaignSegmentFiltersDto,
   CampaignStatus,
   CreateCampaignDto,
+  PreviewAudienceDto,
+  RetargetCampaignDto,
 } from './dto/campaigns.dto';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import { resolveOwnerScopeFilter } from '../auth/identity.util';
@@ -85,9 +88,18 @@ export class Campaign {
       'noida_delhi_ncr',
       'indiamart_buyers',
       'gst_customers',
+      'b2b_accounts',
+      'b2c_consumers',
+      'delivered_customers',
     ],
   })
   targetSegment!: CampaignSegment;
+
+  @Prop({ type: Object, default: {} })
+  segmentFilters?: CampaignSegmentFiltersDto;
+
+  @Prop({ trim: true, default: '' })
+  parentCampaignId?: string;
 
   @Prop({ required: true, trim: true })
   messageBody!: string;
@@ -201,27 +213,55 @@ export class CampaignsService {
         ncrLeads,
         indiamartLeads,
         gstContacts,
+        b2bAccounts,
+        b2cConsumers,
+        deliveredCustomers,
       ] = await Promise.all([
-        leadsCol.countDocuments({ tenantId: tenantObjectId, ...ownerScope }),
         leadsCol.countDocuments({
           tenantId: tenantObjectId,
           ...ownerScope,
+          doNotCall: { $ne: true },
+        }),
+        leadsCol.countDocuments({
+          tenantId: tenantObjectId,
+          ...ownerScope,
+          doNotCall: { $ne: true },
           $or: [{ aiScore: { $gte: 75 } }, { aiLabel: 'Hot' }],
         }),
         leadsCol.countDocuments({
           tenantId: tenantObjectId,
           ...ownerScope,
+          doNotCall: { $ne: true },
           city: { $regex: /noida|delhi|gurugram|gurgaon|ghaziabad|faridabad/i },
         }),
         leadsCol.countDocuments({
           tenantId: tenantObjectId,
           ...ownerScope,
+          doNotCall: { $ne: true },
           source: 'indiamart',
         }),
         contactsCol.countDocuments({
           tenantId: tenantObjectId,
           ...ownerScope,
           gstin: { $exists: true, $ne: '' },
+        }),
+        leadsCol.countDocuments({
+          tenantId: tenantObjectId,
+          ...ownerScope,
+          doNotCall: { $ne: true },
+          accountKind: { $ne: 'consumer' },
+        }),
+        leadsCol.countDocuments({
+          tenantId: tenantObjectId,
+          ...ownerScope,
+          doNotCall: { $ne: true },
+          accountKind: 'consumer',
+        }),
+        leadsCol.countDocuments({
+          tenantId: tenantObjectId,
+          ...ownerScope,
+          doNotCall: { $ne: true },
+          status: 'converted',
         }),
       ]);
 
@@ -231,12 +271,18 @@ export class CampaignsService {
         noida_delhi_ncr: ncrLeads,
         indiamart_buyers: indiamartLeads,
         gst_customers: gstContacts,
+        b2b_accounts: b2bAccounts,
+        b2c_consumers: b2cConsumers,
+        delivered_customers: deliveredCustomers,
         rawDbCounts: {
           totalLeads,
           hotLeads,
           ncrLeads,
           indiamartLeads,
           gstContacts,
+          b2bAccounts,
+          b2cConsumers,
+          deliveredCustomers,
         },
       };
     } catch {
@@ -246,12 +292,18 @@ export class CampaignsService {
         noida_delhi_ncr: 0,
         indiamart_buyers: 0,
         gst_customers: 0,
+        b2b_accounts: 0,
+        b2c_consumers: 0,
+        delivered_customers: 0,
         rawDbCounts: {
           totalLeads: 0,
           hotLeads: 0,
           ncrLeads: 0,
           indiamartLeads: 0,
           gstContacts: 0,
+          b2bAccounts: 0,
+          b2cConsumers: 0,
+          deliveredCustomers: 0,
         },
       };
     }
@@ -261,6 +313,7 @@ export class CampaignsService {
     tenantObjectId: Types.ObjectId,
     segment: CampaignSegment,
     ownerScope: Record<string, unknown> = {},
+    filters: CampaignSegmentFiltersDto = {},
   ): Promise<
     Array<{
       recipientId: string;
@@ -271,6 +324,7 @@ export class CampaignsService {
       city: string;
       estimatedValue: number;
       optedOut: boolean;
+      accountKind: 'business' | 'consumer';
     }>
   > {
     const db = this.campaignModel.db;
@@ -281,18 +335,71 @@ export class CampaignsService {
     let rows: Array<Record<string, unknown>> = [];
     let entityType: 'lead' | 'contact' = 'lead';
 
+    const cleanCity = String(filters?.city || '').trim();
+    const cityRegex = cleanCity
+      ? new RegExp(cleanCity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+      : null;
+
     if (segment === 'gst_customers') {
       entityType = 'contact';
+      const contactFilter: Record<string, unknown> = {
+        tenantId: tenantObjectId,
+        ...ownerScope,
+        gstin: { $exists: true, $ne: '' },
+        phone: { $exists: true, $ne: '' },
+      };
+      if (cityRegex) contactFilter.city = cityRegex;
+      if (filters?.accountKind === 'consumer') {
+        contactFilter.accountKind = 'consumer';
+      } else if (filters?.accountKind === 'business') {
+        contactFilter.accountKind = { $ne: 'consumer' };
+      }
       rows = await contactsCol
-        .find({
-          tenantId: tenantObjectId,
-          ...ownerScope,
-          gstin: { $exists: true, $ne: '' },
-          phone: { $exists: true, $ne: '' },
-        })
+        .find(contactFilter)
         .sort({ updatedAt: -1 })
         .limit(200)
         .toArray();
+    } else if (segment === 'delivered_customers') {
+      const leadFilter: Record<string, unknown> = {
+        tenantId: tenantObjectId,
+        ...ownerScope,
+        status: 'converted',
+        phone: { $exists: true, $ne: '' },
+      };
+      if (cityRegex) leadFilter.city = cityRegex;
+      if (filters?.accountKind === 'consumer') {
+        leadFilter.accountKind = 'consumer';
+      } else if (filters?.accountKind === 'business') {
+        leadFilter.accountKind = { $ne: 'consumer' };
+      }
+      const convertedLeads = await leadsCol
+        .find(leadFilter)
+        .sort({ updatedAt: -1 })
+        .limit(150)
+        .toArray();
+
+      const contactFilter: Record<string, unknown> = {
+        tenantId: tenantObjectId,
+        ...ownerScope,
+        type: 'customer',
+        phone: { $exists: true, $ne: '' },
+      };
+      if (cityRegex) contactFilter.city = cityRegex;
+      if (filters?.accountKind === 'consumer') {
+        contactFilter.accountKind = 'consumer';
+      } else if (filters?.accountKind === 'business') {
+        contactFilter.accountKind = { $ne: 'consumer' };
+      }
+      const customerContacts = await contactsCol
+        .find(contactFilter)
+        .sort({ updatedAt: -1 })
+        .limit(150)
+        .toArray();
+
+      rows = [
+        ...convertedLeads.map((r) => ({ ...r, _srcType: 'lead' })),
+        ...customerContacts.map((r) => ({ ...r, _srcType: 'contact' })),
+      ];
     } else {
       const leadFilter: Record<string, unknown> = {
         tenantId: tenantObjectId,
@@ -307,6 +414,29 @@ export class CampaignsService {
         };
       } else if (segment === 'indiamart_buyers') {
         leadFilter.source = 'indiamart';
+      } else if (segment === 'b2b_accounts') {
+        leadFilter.accountKind = { $ne: 'consumer' };
+      } else if (segment === 'b2c_consumers') {
+        leadFilter.accountKind = 'consumer';
+      }
+
+      if (cityRegex) {
+        leadFilter.city = cityRegex;
+      }
+      if (filters?.accountKind === 'consumer') {
+        leadFilter.accountKind = 'consumer';
+      } else if (filters?.accountKind === 'business') {
+        leadFilter.accountKind = { $ne: 'consumer' };
+      }
+      if (filters?.leadStatus && filters.leadStatus !== 'all') {
+        leadFilter.status = filters.leadStatus;
+      }
+      if (
+        filters?.minAiScore !== undefined &&
+        Number.isFinite(Number(filters.minAiScore)) &&
+        Number(filters.minAiScore) > 0
+      ) {
+        leadFilter.aiScore = { $gte: Number(filters.minAiScore) };
       }
 
       rows = await leadsCol
@@ -328,6 +458,7 @@ export class CampaignsService {
         .filter((d) => d.length >= 10),
     );
 
+    const excludeDnd = filters?.excludeDnd !== false;
     const seenPhones = new Set<string>();
     const results: Array<{
       recipientId: string;
@@ -338,6 +469,7 @@ export class CampaignsService {
       city: string;
       estimatedValue: number;
       optedOut: boolean;
+      accountKind: 'business' | 'consumer';
     }> = [];
 
     for (const r of rows) {
@@ -350,17 +482,20 @@ export class CampaignsService {
       const hasDndTag = tags.some((t) =>
         /^(dnd|opt_out|opted_out|unsubscribed)$/i.test(String(t).trim()),
       );
-      const optedOut = hasDndTag || optOutPhones.has(last10);
+      const isDndLead = Boolean(r.doNotCall);
+      const optedOut = excludeDnd && (hasDndTag || isDndLead || optOutPhones.has(last10));
 
       results.push({
         recipientId: String(r._id),
-        entityType,
+        entityType:
+          r._srcType === 'contact' || entityType === 'contact' ? 'contact' : 'lead',
         contactName: String(r.name || 'Buyer').trim(),
         company: String(r.company || '').trim(),
         phone,
         city: String(r.city || 'Delhi-NCR').trim(),
         estimatedValue: Number(r.estimatedValue ?? r.lifetimeValue ?? 0) || 0,
         optedOut,
+        accountKind: r.accountKind === 'consumer' ? 'consumer' : 'business',
       });
     }
 
@@ -404,6 +539,7 @@ export class CampaignsService {
       tenantObjectId,
       doc.targetSegment,
       ownerScope,
+      doc.segmentFilters || {},
     );
 
     const recipients: CampaignRecipientEntry[] = [];
@@ -517,7 +653,152 @@ export class CampaignsService {
     doc.markModified('recipients');
   }
 
-  private toDto(doc: CampaignDocument) {
+  private async computeCampaignAttributionMap(
+    tenantObjectId: Types.ObjectId,
+    ownerScope: Record<string, unknown>,
+    docs: CampaignDocument[],
+  ): Promise<
+    Map<
+      string,
+      {
+        qualifiedLeadsCount: number;
+        closedDealsCount: number;
+        liveAttributedRevenue: number;
+      }
+    >
+  > {
+    const map = new Map<
+      string,
+      {
+        qualifiedLeadsCount: number;
+        closedDealsCount: number;
+        liveAttributedRevenue: number;
+      }
+    >();
+    if (docs.length === 0) return map;
+
+    const db = this.campaignModel.db;
+    const [leads, wonDeals, paidInvoices] = await Promise.all([
+      db
+        .collection('leads')
+        .find(
+          { tenantId: tenantObjectId, ...ownerScope },
+          { projection: { _id: 1, phone: 1, status: 1, aiScore: 1 } },
+        )
+        .toArray(),
+      db
+        .collection('deals')
+        .find(
+          {
+            tenantId: tenantObjectId,
+            ...ownerScope,
+            $or: [{ stageCategory: 'won' }, { stage: 'won' }],
+          },
+          { projection: { _id: 1, contactPhone: 1, value: 1, createdAt: 1, updatedAt: 1 } },
+        )
+        .toArray(),
+      db
+        .collection('invoices')
+        .find(
+          {
+            tenantId: tenantObjectId,
+            docType: { $ne: 'proforma_quote' },
+            status: { $in: ['paid', 'partial'] },
+          },
+          {
+            projection: {
+              _id: 1,
+              phone: 1,
+              linkedLeadId: 1,
+              grandTotal: 1,
+              amountPaid: 1,
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          },
+        )
+        .toArray(),
+    ]);
+
+    const leadById = new Map<string, Record<string, unknown>>();
+    const leadByLast10 = new Map<string, Record<string, unknown>>();
+    for (const l of leads) {
+      leadById.set(String(l._id), l);
+      const p10 = extractLast10Digits(String(l.phone || ''));
+      if (p10.length >= 10) leadByLast10.set(p10, l);
+    }
+
+    for (const camp of docs) {
+      const recipients = camp.recipients || [];
+      const recIds = new Set(recipients.map((r) => String(r.recipientId)));
+      const recPhones = new Set(
+        recipients
+          .map((r) => extractLast10Digits(r.phone))
+          .filter((d) => d.length >= 10),
+      );
+      const rawCamp = camp.toObject() as unknown as { createdAt?: Date };
+      const campCreatedMs = rawCamp.createdAt
+        ? new Date(rawCamp.createdAt).getTime() - 10_000
+        : 0;
+
+      const qualifiedSet = new Set<string>();
+      for (const r of recipients) {
+        const l =
+          leadById.get(String(r.recipientId)) ||
+          leadByLast10.get(extractLast10Digits(r.phone));
+        if (
+          l &&
+          (['qualified', 'proposal', 'converted'].includes(String(l.status || '')) ||
+            Number(l.aiScore || 0) >= 80)
+        ) {
+          qualifiedSet.add(String(l._id));
+        }
+      }
+
+      let closedDealsCount = 0;
+      let dealsRevenue = 0;
+      for (const d of wonDeals) {
+        const d10 = extractLast10Digits(String(d.contactPhone || ''));
+        const ts = new Date(
+          String(d.updatedAt || d.createdAt || new Date().toISOString()),
+        ).getTime();
+        if (recPhones.has(d10) && ts >= campCreatedMs) {
+          closedDealsCount += 1;
+          dealsRevenue += Number(d.value || 0) || 0;
+        }
+      }
+
+      let invoiceRevenue = 0;
+      for (const inv of paidInvoices) {
+        const i10 = extractLast10Digits(String(inv.phone || ''));
+        const linkedId = String(inv.linkedLeadId || '');
+        const ts = new Date(
+          String(inv.updatedAt || inv.createdAt || new Date().toISOString()),
+        ).getTime();
+        if ((recPhones.has(i10) || (linkedId && recIds.has(linkedId))) && ts >= campCreatedMs) {
+          invoiceRevenue += Number(inv.amountPaid || inv.grandTotal || 0) || 0;
+        }
+      }
+
+      const liveRevenue = Math.max(dealsRevenue, invoiceRevenue);
+      map.set(camp._id.toString(), {
+        qualifiedLeadsCount: qualifiedSet.size,
+        closedDealsCount,
+        liveAttributedRevenue: Math.max(liveRevenue, Number(camp.attributedRevenue || 0)),
+      });
+    }
+
+    return map;
+  }
+
+  private toDto(
+    doc: CampaignDocument,
+    attribution?: {
+      qualifiedLeadsCount: number;
+      closedDealsCount: number;
+      liveAttributedRevenue: number;
+    },
+  ) {
     const raw = doc.toObject() as unknown as Record<string, unknown> & {
       createdAt?: Date;
       updatedAt?: Date;
@@ -526,6 +807,9 @@ export class CampaignsService {
     const delivered = doc.deliveredCount || 0;
     const read = doc.readCount || 0;
     const replied = doc.repliedCount || 0;
+    const attributedRevenue = attribution
+      ? attribution.liveAttributedRevenue
+      : doc.attributedRevenue || 0;
 
     return {
       id: doc._id.toString(),
@@ -536,6 +820,8 @@ export class CampaignsService {
       language: doc.language || 'hinglish',
       channel: doc.channel || 'whatsapp_cloud',
       targetSegment: doc.targetSegment || 'all_leads',
+      segmentFilters: doc.segmentFilters || {},
+      parentCampaignId: doc.parentCampaignId || '',
       messageBody: doc.messageBody,
       ctaLabel: doc.ctaLabel || 'Get Instant Quote',
       audienceCount: doc.audienceCount || 0,
@@ -545,11 +831,13 @@ export class CampaignsService {
       repliedCount: replied,
       failedCount: doc.failedCount || 0,
       skippedDndCount: doc.skippedDndCount || 0,
+      qualifiedLeadsCount: attribution?.qualifiedLeadsCount ?? 0,
+      closedDealsCount: attribution?.closedDealsCount ?? 0,
       recipients: doc.recipients || [],
       deliveryRate: sent > 0 ? Math.round((delivered / sent) * 100) : 0,
       readRate: delivered > 0 ? Math.round((read / delivered) * 100) : 0,
-      replyRate: read > 0 ? Math.round((replied / read) * 100) : 0,
-      attributedRevenue: doc.attributedRevenue || 0,
+      replyRate: sent > 0 ? Math.round((replied / sent) * 100) : 0,
+      attributedRevenue,
       status: doc.status || 'completed',
       scheduledFor: doc.scheduledFor || '',
       createdAt: raw.createdAt
@@ -594,23 +882,42 @@ export class CampaignsService {
       this.getLiveSegmentCounts(tenantObjectId, ownerScope),
     ]);
 
+    const attrMap = await this.computeCampaignAttributionMap(
+      tenantObjectId,
+      ownerScope,
+      all,
+    );
+
     const totalSent = all.reduce((s, c) => s + (c.sentCount || 0), 0);
     const totalDelivered = all.reduce((s, c) => s + (c.deliveredCount || 0), 0);
     const totalRead = all.reduce((s, c) => s + (c.readCount || 0), 0);
     const totalReplies = all.reduce((s, c) => s + (c.repliedCount || 0), 0);
+    const totalQualifiedLeads = all.reduce(
+      (s, c) => s + (attrMap.get(c._id.toString())?.qualifiedLeadsCount || 0),
+      0,
+    );
+    const totalClosedDeals = all.reduce(
+      (s, c) => s + (attrMap.get(c._id.toString())?.closedDealsCount || 0),
+      0,
+    );
     const totalAttributedRevenue = all.reduce(
-      (s, c) => s + (c.attributedRevenue || 0),
+      (s, c) =>
+        s +
+        (attrMap.get(c._id.toString())?.liveAttributedRevenue ??
+          (c.attributedRevenue || 0)),
       0,
     );
 
     return {
-      data: docs.map((d) => this.toDto(d)),
+      data: docs.map((d) => this.toDto(d, attrMap.get(d._id.toString()))),
       stats: {
         totalCampaigns: all.length,
         totalSent,
         totalDelivered,
         totalRead,
         totalReplies,
+        totalQualifiedLeads,
+        totalClosedDeals,
         avgDeliveryRate:
           totalSent > 0 ? Math.round((totalDelivered / totalSent) * 100) : 0,
         avgReadRate:
@@ -620,6 +927,37 @@ export class CampaignsService {
         totalAttributedRevenue,
         segmentCounts,
       },
+    };
+  }
+
+  async previewAudience(
+    auth: { userId: string; tenantId: string },
+    dto: PreviewAudienceDto,
+  ) {
+    const tenantObjectId = new Types.ObjectId(auth.tenantId);
+    const ownerScope = await resolveOwnerScopeFilter(this.campaignModel.db, auth);
+    const segment: CampaignSegment = dto?.targetSegment || 'all_leads';
+    const recipients = await this.resolveSegmentRecipients(
+      tenantObjectId,
+      segment,
+      ownerScope,
+      dto?.segmentFilters || {},
+    );
+    const active = recipients.filter((r) => !r.optedOut);
+    const excluded = recipients.filter((r) => r.optedOut);
+
+    return {
+      targetSegment: segment,
+      totalMatched: recipients.length,
+      willDispatchCount: active.length,
+      excludedDndCount: excluded.length,
+      sampleRecipients: active.slice(0, 8).map((r) => ({
+        id: r.recipientId,
+        name: r.contactName,
+        company: r.company,
+        city: r.city,
+        accountKind: r.accountKind,
+      })),
     };
   }
 
@@ -636,7 +974,12 @@ export class CampaignsService {
       })
       .exec();
     if (!doc) throw new NotFoundException('Campaign not found.');
-    return this.toDto(doc);
+    const attrMap = await this.computeCampaignAttributionMap(
+      new Types.ObjectId(auth.tenantId),
+      ownerScope,
+      [doc],
+    );
+    return this.toDto(doc, attrMap.get(doc._id.toString()));
   }
 
   async create(
@@ -674,6 +1017,8 @@ export class CampaignsService {
       language: dto.language || 'hinglish',
       channel: dto.channel || 'whatsapp_cloud',
       targetSegment: segment,
+      segmentFilters: dto.segmentFilters || {},
+      parentCampaignId: dto.parentCampaignId?.trim() || '',
       messageBody: dto.messageBody.trim(),
       ctaLabel: dto.ctaLabel?.trim() || 'Get Instant Quote',
       audienceCount: previewAudience,
@@ -717,6 +1062,163 @@ export class CampaignsService {
     await this.dispatchCampaignToRecipients(auth, doc, ownerScope);
     await doc.save();
     return this.toDto(doc);
+  }
+
+  async retargetNonResponders(
+    auth: { userId: string; tenantId: string; email: string; name?: string },
+    sourceCampaignId: string,
+    dto: RetargetCampaignDto,
+  ) {
+    if (!Types.ObjectId.isValid(sourceCampaignId)) {
+      throw new NotFoundException('Source campaign not found.');
+    }
+    const tenantObjectId = new Types.ObjectId(auth.tenantId);
+    const ownerScope = await resolveOwnerScopeFilter(this.campaignModel.db, auth);
+    const source = await this.campaignModel
+      .findOne({
+        _id: new Types.ObjectId(sourceCampaignId),
+        tenantId: tenantObjectId,
+        ...ownerScope,
+      })
+      .exec();
+    if (!source) throw new NotFoundException('Source campaign not found.');
+
+    const nonResponders = (source.recipients || []).filter((r) =>
+      ['sent', 'delivered', 'read'].includes(r.status),
+    );
+    if (nonResponders.length === 0) {
+      throw new BadRequestException(
+        'No non-responding recipients left to retarget in this campaign.',
+      );
+    }
+
+    const followUpBody =
+      dto?.messageBody?.trim() ||
+      `Hi {{name}}, following up on our recent WhatsApp update from ${source.name}. Reply here if you'd like pricing or a quick call!`;
+    const sendNow = dto?.sendNow !== false;
+
+    const followUpDoc = await this.campaignModel.create({
+      tenantId: tenantObjectId,
+      ownerId: new Types.ObjectId(auth.userId),
+      name: dto?.name?.trim() || `Follow-Up: ${source.name}`,
+      templateName: source.templateName || 'followup_drip_v1',
+      sendMode: source.sendMode || 'text',
+      language: source.language || 'hinglish',
+      channel: 'whatsapp_ai_drip',
+      targetSegment: source.targetSegment,
+      segmentFilters: source.segmentFilters || {},
+      parentCampaignId: source._id.toString(),
+      messageBody: followUpBody,
+      ctaLabel: dto?.ctaLabel?.trim() || source.ctaLabel || 'Reply Now',
+      audienceCount: nonResponders.length,
+      sentCount: 0,
+      deliveredCount: 0,
+      readCount: 0,
+      repliedCount: 0,
+      failedCount: 0,
+      skippedDndCount: 0,
+      recipients: [],
+      attributedRevenue: 0,
+      status: sendNow ? 'completed' : 'draft',
+      scheduledFor: '',
+    });
+
+    if (sendNow) {
+      const db = this.campaignModel.db;
+      const optOutConvs = await db
+        .collection('conversations')
+        .find({ tenantId: tenantObjectId, whatsappOptOut: true }, { projection: { phone: 1 } })
+        .toArray();
+      const optOutPhones = new Set(
+        optOutConvs
+          .map((c) => extractLast10Digits(String(c.phone || '')))
+          .filter((d) => d.length >= 10),
+      );
+      const dndLeadRows = await db
+        .collection('leads')
+        .find({ tenantId: tenantObjectId, doNotCall: true }, { projection: { phone: 1 } })
+        .toArray();
+      const dndLeadPhones = new Set(
+        dndLeadRows
+          .map((l) => extractLast10Digits(String(l.phone || '')))
+          .filter((d) => d.length >= 10),
+      );
+
+      const nowIso = new Date().toISOString();
+      const nextRecipients: CampaignRecipientEntry[] = [];
+      for (const rec of nonResponders) {
+        const p10 = extractLast10Digits(rec.phone);
+        if (optOutPhones.has(p10) || dndLeadPhones.has(p10)) {
+          nextRecipients.push({
+            ...rec,
+            status: 'opted_out',
+            deliveryProvider: 'skipped_dnd',
+            error: 'Excluded by DND / Opt-Out guard',
+            sentAt: nowIso,
+          });
+          continue;
+        }
+        const dispatch = await this.inboxService.dispatchAutomatedWhatsApp({
+          tenantId: auth.tenantId,
+          userId: auth.userId,
+          actorName: auth.name || auth.email.split('@')[0],
+          linkedEntityType: rec.entityType,
+          linkedEntityId: rec.recipientId,
+          contactName: rec.contactName,
+          company: rec.company,
+          phone: rec.phone,
+          messageBody: followUpBody,
+          sendMode: followUpDoc.sendMode || 'text',
+          metaTemplateName: followUpDoc.templateName,
+          languageCode: followUpDoc.language === 'english' ? 'en' : 'hi',
+          campaignId: followUpDoc._id.toString(),
+          campaignName: followUpDoc.name,
+        });
+
+        const st = dispatch.skippedDnd
+          ? 'opted_out'
+          : dispatch.status === 'failed'
+            ? 'failed'
+            : dispatch.status === 'delivered'
+              ? 'delivered'
+              : 'sent';
+
+        nextRecipients.push({
+          recipientId: rec.recipientId,
+          entityType: rec.entityType,
+          contactName: rec.contactName,
+          company: rec.company,
+          phone: rec.phone,
+          status: st,
+          deliveryProvider: dispatch.skippedDnd
+            ? 'skipped_dnd'
+            : dispatch.deliveryProvider || 'crm_local',
+          externalMessageId: dispatch.externalMessageId || '',
+          conversationId: dispatch.conversationId || '',
+          messageId: dispatch.messageId || '',
+          renderedMessage: dispatch.renderedMessage || followUpBody,
+          error: dispatch.deliveryError || dispatch.reason || '',
+          replyPreview: '',
+          sentAt: nowIso,
+          deliveredAt: st === 'delivered' ? nowIso : '',
+          readAt: '',
+          repliedAt: '',
+        });
+      }
+      const metrics = this.recomputeMetricsFromRecipients(nextRecipients);
+      followUpDoc.recipients = nextRecipients;
+      followUpDoc.audienceCount = metrics.audienceCount;
+      followUpDoc.sentCount = metrics.sentCount;
+      followUpDoc.deliveredCount = metrics.deliveredCount;
+      followUpDoc.readCount = metrics.readCount;
+      followUpDoc.repliedCount = metrics.repliedCount;
+      followUpDoc.failedCount = metrics.failedCount;
+      followUpDoc.skippedDndCount = metrics.skippedDndCount;
+      followUpDoc.markModified('recipients');
+      await followUpDoc.save();
+    }
+
+    return this.toDto(followUpDoc);
   }
 
   async toggleRecipientOptOut(

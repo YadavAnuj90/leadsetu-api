@@ -45,6 +45,14 @@ export class CreateContactDto {
   gstin?: string;
 
   @ApiPropertyOptional({
+    description: 'Record classification: B2B company account vs B2C individual consumer',
+    enum: ['business', 'consumer'],
+    default: 'business',
+    example: 'business',
+  })
+  accountKind?: 'business' | 'consumer';
+
+  @ApiPropertyOptional({
     description: 'B2B account relationship type',
     enum: ['customer', 'prospect', 'partner', 'vendor'],
     default: 'customer',

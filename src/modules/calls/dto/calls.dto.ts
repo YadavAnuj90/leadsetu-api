@@ -133,3 +133,39 @@ export class UploadCallRecordingDto {
   @ApiPropertyOptional({ example: 45 })
   durationSeconds?: number;
 }
+
+export type PowerDialDisposition =
+  | 'rnr'
+  | 'busy'
+  | 'callback'
+  | 'interested'
+  | 'not_interested'
+  | 'dnd';
+
+export class PowerDialOutcomeDto {
+  @ApiPropertyOptional({ description: 'Target Lead ID from Power Dialer Queue' })
+  leadId!: string;
+
+  @ApiPropertyOptional({
+    enum: ['rnr', 'busy', 'callback', 'interested', 'not_interested', 'dnd'],
+    example: 'rnr',
+  })
+  disposition!: PowerDialDisposition;
+
+  @ApiPropertyOptional({ example: 35 })
+  durationSeconds?: number;
+
+  @ApiPropertyOptional({ example: 'Customer asked to call back tomorrow morning' })
+  notes?: string;
+
+  @ApiPropertyOptional({
+    description: 'Optional ISO timestamp for scheduled callback disposition',
+  })
+  callbackAt?: string;
+
+  @ApiPropertyOptional({
+    description: 'Auto-send WhatsApp "Tried calling you..." message on RNR Retry #2+',
+    default: true,
+  })
+  sendWhatsAppOnRnr?: boolean;
+}
