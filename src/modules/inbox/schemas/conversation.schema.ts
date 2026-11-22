@@ -125,6 +125,22 @@ export class ConversationThread {
     createdAt: string;
   }>;
 
+  /** Meta Click-to-WhatsApp (CTWA) Ad Attribution metadata */
+  @Prop({ trim: true, default: '' })
+  adPlatform?: string;
+
+  @Prop({ trim: true, default: '' })
+  ctwaClid?: string;
+
+  @Prop({ trim: true, default: '', index: true })
+  adId?: string;
+
+  @Prop({ trim: true, default: '' })
+  adHeadline?: string;
+
+  @Prop({ trim: true, default: '' })
+  adSourceUrl?: string;
+
   @Prop({ type: Array, default: [] })
   messages!: ChatMessage[];
 }

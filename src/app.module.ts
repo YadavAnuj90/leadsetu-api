@@ -26,6 +26,7 @@ import { CustomFieldsModule } from './modules/custom-fields/custom-fields.module
 import { LeadRoutingModule } from './modules/lead-routing/lead-routing.module';
 import { EmailCrmModule } from './modules/email-crm/email-crm.module';
 import { PortalModule } from './modules/portal/portal.module';
+import { MetaCapiModule } from './modules/meta-capi/meta-capi.module';
 
 @Module({
   imports: [
@@ -70,6 +71,7 @@ import { PortalModule } from './modules/portal/portal.module';
     LeadRoutingModule,
     EmailCrmModule,
     PortalModule,
+    MetaCapiModule,
   ],
 })
 export class AppModule {}

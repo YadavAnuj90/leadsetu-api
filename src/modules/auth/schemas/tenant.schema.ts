@@ -371,6 +371,48 @@ export class WhatsAppCloudConfig {
 export const WhatsAppCloudConfigSchema =
   SchemaFactory.createForClass(WhatsAppCloudConfig);
 
+/** Per-tenant Meta Ads Click-to-WhatsApp & Conversions API (CAPI) settings. */
+@Schema({ _id: false })
+export class MetaCapiConfig {
+  @Prop({ type: Boolean, default: false })
+  enabled!: boolean;
+
+  @Prop({ trim: true, default: '' })
+  pixelId!: string;
+
+  @Prop({ trim: true, default: '' })
+  accessTokenEncrypted!: string;
+
+  @Prop({ trim: true, default: '' })
+  accessTokenMask!: string;
+
+  @Prop({ trim: true, default: '' })
+  testEventCode!: string;
+
+  @Prop({ type: Boolean, default: true })
+  autoFireOnCtwaInbound!: boolean;
+
+  @Prop({ type: Boolean, default: true })
+  autoFireOnLeadQualified!: boolean;
+
+  @Prop({ type: Boolean, default: true })
+  autoFireOnDealWon!: boolean;
+
+  @Prop({ type: Boolean, default: true })
+  autoFireOnInvoicePaid!: boolean;
+
+  @Prop({ trim: true, default: '' })
+  lastFiredAt!: string;
+
+  @Prop({ trim: true, default: '' })
+  lastStatus!: string;
+
+  @Prop({ trim: true, default: '' })
+  lastError!: string;
+}
+
+export const MetaCapiConfigSchema = SchemaFactory.createForClass(MetaCapiConfig);
+
 @Schema({ timestamps: true, collection: 'tenants' })
 export class Tenant {
   @Prop({ required: true, trim: true })
@@ -465,6 +507,10 @@ export class Tenant {
   /** Per-tenant Official Meta WhatsApp Cloud API credentials & webhook config. */
   @Prop({ type: WhatsAppCloudConfigSchema, default: () => ({}) })
   whatsappCloud?: WhatsAppCloudConfig;
+
+  /** Per-tenant Meta Ads Click-to-WhatsApp & Conversions API (CAPI) config. */
+  @Prop({ type: MetaCapiConfigSchema, default: () => ({}) })
+  metaCapi?: MetaCapiConfig;
 
   /** Custom seat cap override set by Super Admin (null = use plan default). */
   @Prop({ type: Number, default: null })

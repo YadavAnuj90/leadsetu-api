@@ -38,6 +38,7 @@ import {
 } from '../super-admin/schemas/platform-config.schema';
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
+import { MetaCapiService } from '../meta-capi/meta-capi.service';
 import { Ticket, TicketDocument } from '../tickets/tickets.service';
 import { MetaWhatsAppService } from './meta-whatsapp.service';
 import {
@@ -279,6 +280,7 @@ export class InboxService {
     @Optional() private readonly auditService?: AuditService,
     @Optional() private readonly superAdminService?: SuperAdminService,
     @Optional() private readonly aiBridge?: AiBridgeService,
+    @Optional() private readonly metaCapiService?: MetaCapiService,
   ) {}
 
   registerRealtimeEmitter(
@@ -405,6 +407,11 @@ export class InboxService {
       linkedEntityType: (doc.linkedEntityType || '') as LinkedCrmEntityType,
       linkedEntityId: doc.linkedEntityId || '',
       linkedEntityLabel: doc.linkedEntityLabel || '',
+      adPlatform: doc.adPlatform || '',
+      ctwaClid: doc.ctwaClid || '',
+      adId: doc.adId || '',
+      adHeadline: doc.adHeadline || '',
+      adSourceUrl: doc.adSourceUrl || '',
       unreadCount: doc.unreadCount || 0,
       lastInboundAt: doc.lastInboundAt || '',
       lastMessage: lastMsg?.content || '',
@@ -3747,6 +3754,17 @@ export class InboxService {
           const extracted = this.extractInboundMetaContent(msg);
           const nowIso = new Date().toISOString();
 
+          // Extract Meta Click-to-WhatsApp (CTWA) Ad referral payload when present
+          const referral = (msg.referral && typeof msg.referral === 'object'
+            ? (msg.referral as Record<string, unknown>)
+            : null);
+          const ctwaClid = String(referral?.ctwa_clid || '').trim();
+          const ctwaAdId = String(referral?.source_id || '').trim();
+          const ctwaHeadline = String(referral?.headline || '').trim();
+          const ctwaBody = String(referral?.body || '').trim();
+          const ctwaSourceUrl = String(referral?.source_url || '').trim();
+          const hasCtwaReferral = Boolean(ctwaClid || ctwaAdId || ctwaHeadline);
+
           // Deduplicate if webhook delivers same wamid twice
           if (wamid) {
             const dup = await this.convModel
@@ -3816,18 +3834,30 @@ export class InboxService {
                   phone: formattedPhone,
                   email: '',
                   city: tenant.city || 'Delhi-NCR',
-                  source: 'whatsapp',
+                  source: hasCtwaReferral ? 'meta_ads' : 'whatsapp',
                   status: 'new',
                   estimatedValue: 0,
-                  aiScore: 78,
-                  aiLabel: 'Warm',
-                  aiInsight: 'Inbound WhatsApp Cloud inquiry — reply promptly.',
-                  notes: `Inbound WhatsApp reply: "${extracted.text.slice(0, 140)}"`,
+                  tags: hasCtwaReferral ? ['Meta CTWA Ad'] : [],
+                  adPlatform: hasCtwaReferral ? 'meta_ctwa' : '',
+                  ctwaClid,
+                  adId: ctwaAdId,
+                  adHeadline: ctwaHeadline,
+                  adSourceUrl: ctwaSourceUrl,
+                  aiScore: hasCtwaReferral ? 84 : 78,
+                  aiLabel: hasCtwaReferral ? 'Hot' : 'Warm',
+                  aiInsight: hasCtwaReferral
+                    ? `Inbound Click-to-WhatsApp lead from Meta Ad${ctwaHeadline ? ` "${ctwaHeadline}"` : ''}.`
+                    : 'Inbound WhatsApp Cloud inquiry — reply promptly.',
+                  notes: hasCtwaReferral
+                    ? `[Meta Ad Referral${ctwaHeadline ? `: ${ctwaHeadline}` : ''}] ${ctwaBody || extracted.text.slice(0, 140)}`
+                    : `Inbound WhatsApp reply: "${extracted.text.slice(0, 140)}"`,
                   activities: [
                     {
                       id: randomBytes(6).toString('hex'),
                       type: 'created',
-                      description: `Auto-created from inbound WhatsApp Cloud message (${formattedPhone}).`,
+                      description: hasCtwaReferral
+                        ? `Auto-created from Meta Click-to-WhatsApp Ad (${ctwaHeadline || ctwaAdId || formattedPhone}).`
+                        : `Auto-created from inbound WhatsApp Cloud message (${formattedPhone}).`,
                       authorName: 'WhatsApp Cloud Webhook',
                       createdAt: nowIso,
                     },
@@ -3835,6 +3865,16 @@ export class InboxService {
                 });
                 ownerId = fallbackOwner;
               }
+            } else if (hasCtwaReferral) {
+              matchedLead.adPlatform = 'meta_ctwa';
+              if (ctwaClid) matchedLead.ctwaClid = ctwaClid;
+              if (ctwaAdId) matchedLead.adId = ctwaAdId;
+              if (ctwaHeadline) matchedLead.adHeadline = ctwaHeadline;
+              if (ctwaSourceUrl) matchedLead.adSourceUrl = ctwaSourceUrl;
+              if (!Array.isArray(matchedLead.tags) || !matchedLead.tags.includes('Meta CTWA Ad')) {
+                matchedLead.tags = [...(matchedLead.tags || []), 'Meta CTWA Ad'];
+              }
+              await matchedLead.save();
             }
 
             conv = new this.convModel({
@@ -3856,9 +3896,20 @@ export class InboxService {
                   ? `${matchedLead.name} (${matchedLead.company})`
                   : matchedLead.name
                 : '',
+              adPlatform: hasCtwaReferral ? 'meta_ctwa' : matchedLead?.adPlatform || '',
+              ctwaClid: ctwaClid || matchedLead?.ctwaClid || '',
+              adId: ctwaAdId || matchedLead?.adId || '',
+              adHeadline: ctwaHeadline || matchedLead?.adHeadline || '',
+              adSourceUrl: ctwaSourceUrl || matchedLead?.adSourceUrl || '',
               unreadCount: 0,
               messages: [],
             });
+          } else if (hasCtwaReferral) {
+            conv.adPlatform = 'meta_ctwa';
+            if (ctwaClid) conv.ctwaClid = ctwaClid;
+            if (ctwaAdId) conv.adId = ctwaAdId;
+            if (ctwaHeadline) conv.adHeadline = ctwaHeadline;
+            if (ctwaSourceUrl) conv.adSourceUrl = ctwaSourceUrl;
           }
 
           const inboundMsg: ChatMessage = {
@@ -3890,6 +3941,26 @@ export class InboxService {
           conv.markModified('messages');
           await conv.save();
           this.emitRealtimeConversationUpdate(conv, 'message.inbound');
+
+          if (hasCtwaReferral && this.metaCapiService) {
+            void this.metaCapiService
+              .fireConversionEvent({
+                tenantId: conv.tenantId.toString(),
+                eventName: 'LeadSubmitted',
+                entityType: conv.linkedEntityId ? 'lead' : 'conversation',
+                entityId: conv.linkedEntityId || conv._id.toString(),
+                entityLabel: conv.contactName || 'WhatsApp Ad Lead',
+                phone: conv.phone,
+                ctwaClid: conv.ctwaClid,
+                adId: conv.adId,
+                adHeadline: conv.adHeadline,
+                adSourceUrl: conv.adSourceUrl,
+                valueInr: Number(conv.estimatedValue || 0),
+                triggeredBy: 'auto_ctwa_inbound',
+                respectAutoToggle: true,
+              })
+              .catch(() => {});
+          }
 
           if (isOptOutKeyword) {
             await this.setPhoneOptOut(conv.tenantId.toString(), from, true);

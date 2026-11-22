@@ -320,3 +320,20 @@ export class ApplyBankMatchDto {
   @ApiProperty({ type: [BankMatchItemDto], description: 'Reconciled bank matches to post to invoice ledgers' })
   matches!: BankMatchItemDto[];
 }
+
+export class UpdateSellerGstProfileDto {
+  @ApiPropertyOptional({ example: 'Anuj Industrial Electricals Pvt. Ltd.' })
+  companyName?: string;
+
+  @ApiPropertyOptional({ example: '09AAACA1234A1Z5' })
+  gstin?: string;
+
+  @ApiPropertyOptional({ example: '09 - Uttar Pradesh' })
+  state?: string;
+
+  @ApiPropertyOptional({ example: 'Noida' })
+  city?: string;
+
+  @ApiPropertyOptional({ example: 'Plot 42, Sector 63, Noida, UP 201301' })
+  address?: string;
+}

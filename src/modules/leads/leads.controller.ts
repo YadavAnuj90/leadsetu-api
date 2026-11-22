@@ -205,6 +205,12 @@ export class LeadsController {
     description: 'Filter by B2B business account vs B2C individual consumer',
   })
   @ApiQuery({
+    name: 'adPlatform',
+    required: false,
+    enum: ['all', 'meta_ctwa'],
+    description: 'Filter by Meta Click-to-WhatsApp Ad attribution',
+  })
+  @ApiQuery({
     name: 'sortBy',
     required: false,
     enum: ['aiScore', 'estimatedValue', 'createdAt'],

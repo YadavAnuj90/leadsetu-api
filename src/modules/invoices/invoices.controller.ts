@@ -34,6 +34,7 @@ import {
   SendRecoveryChaserDto,
   UpdateInvoiceDto,
   UpdateRecoveryConfigDto,
+  UpdateSellerGstProfileDto,
 } from './dto/invoices.dto';
 import { InvoicesService } from './invoices.service';
 
@@ -79,27 +80,64 @@ export class InvoicesController {
   }
 
   @Get('export/gstr1')
+  @ApiQuery({ name: 'month', required: false, example: '2026-11' })
+  @ApiQuery({
+    name: 'section',
+    required: false,
+    enum: ['all', 'b2b', 'b2c', 'hsn'],
+  })
   @ApiOperation({
     summary:
-      'Export CA-ready GSTR-1 & Tally Prime CSV across all GST invoices & credit notes',
+      'Export CA-ready GSTR-1 & Tally Prime CSV (supports ?month=YYYY-MM & ?section=all|b2b|b2c|hsn)',
   })
   async exportGstr1(
     @Headers('authorization') authorization: string | undefined,
+    @Query() query: { month?: string; section?: string },
   ) {
     const auth = await this.invoicesService.verifyAuth(authorization);
-    return this.invoicesService.exportGstr1Csv(auth);
+    return this.invoicesService.exportGstr1Csv(auth, query);
   }
 
   @Get('export/tally-xml')
+  @ApiQuery({ name: 'month', required: false, example: '2026-11' })
+  @ApiQuery({ name: 'includeMasters', required: false, enum: ['true', 'false'] })
   @ApiOperation({
     summary:
-      'Export native TallyPrime <ENVELOPE> XML containing Sales, Receipt & TDS Receivable vouchers',
+      'Export native TallyPrime <ENVELOPE> XML containing Party Ledger Masters + Sales, Receipt & TDS Receivable vouchers',
   })
   async exportTallyXml(
     @Headers('authorization') authorization: string | undefined,
+    @Query() query: { month?: string; includeMasters?: string },
   ) {
     const auth = await this.invoicesService.verifyAuth(authorization);
-    return this.invoicesService.exportTallyXml(auth);
+    return this.invoicesService.exportTallyXml(auth, query);
+  }
+
+  @Get('compliance/gstr1')
+  @ApiQuery({ name: 'month', required: false, example: '2026-11' })
+  @ApiOperation({
+    summary:
+      'CA GSTR-1 Filing Workbench: B2B, B2CL/B2CS, HSN Table 12 summary, GST/E-Way compliance audit & GST Portal JSON',
+  })
+  async getGstr1ComplianceOverview(
+    @Headers('authorization') authorization: string | undefined,
+    @Query() query: { month?: string },
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.getGstr1ComplianceOverview(auth, query);
+  }
+
+  @Patch('compliance/seller-profile')
+  @ApiOperation({
+    summary:
+      'Update workspace seller legal name, 15-digit GSTIN, state & address for GSTR-1 / Tally exports',
+  })
+  async updateSellerGstProfile(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() dto: UpdateSellerGstProfileDto,
+  ) {
+    const auth = await this.invoicesService.verifyAuth(authorization);
+    return this.invoicesService.updateSellerGstProfile(auth, dto);
   }
 
   @Get('recovery/overview')

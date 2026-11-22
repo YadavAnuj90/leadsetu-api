@@ -23,6 +23,7 @@ import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 import { PipelinesService } from '../pipelines/pipelines.service';
 import { DEFAULT_PIPELINE_STAGES } from '../pipelines/schemas/pipeline.schema';
 import { CustomFieldsService } from '../custom-fields/custom-fields.service';
+import { MetaCapiService } from '../meta-capi/meta-capi.service';
 
 export interface CreateDealDto {
   title: string;
@@ -73,6 +74,7 @@ export class DealsService {
     @Optional() private readonly aiBridge?: AiBridgeService,
     @Optional() private readonly pipelinesService?: PipelinesService,
     @Optional() private readonly customFieldsService?: CustomFieldsService,
+    @Optional() private readonly metaCapiService?: MetaCapiService,
   ) {}
 
   async verifyAuth(authHeader?: string): Promise<AuthContext> {
@@ -787,6 +789,9 @@ export class DealsService {
     }
 
     const prevStage = doc.stage;
+    const prevStageCategory =
+      doc.stageCategory ||
+      (doc.stage === 'won' ? 'won' : doc.stage === 'lost' ? 'lost' : 'open');
     if (dto.title !== undefined) doc.title = dto.title.trim();
     if (dto.company !== undefined) doc.company = dto.company.trim();
     if (dto.contactName !== undefined) doc.contactName = dto.contactName.trim();
@@ -928,6 +933,29 @@ export class DealsService {
         entityLabel: `${doc.title}${doc.company ? ` (${doc.company})` : ''}`,
         summary: `Moved deal "${doc.title}" stage: ${prevStage.toUpperCase()} -> ${dto.stage.toUpperCase()}`,
       });
+    }
+    const nextStageCategory =
+      doc.stageCategory ||
+      (doc.stage === 'won' ? 'won' : doc.stage === 'lost' ? 'lost' : 'open');
+    if (
+      nextStageCategory === 'won' &&
+      prevStageCategory !== 'won' &&
+      this.metaCapiService
+    ) {
+      await this.metaCapiService
+        .fireConversionEvent({
+          tenantId: auth.tenantId,
+          eventName: 'Purchase',
+          entityType: 'deal',
+          entityId: doc._id.toString(),
+          entityLabel: doc.title,
+          phone: doc.contactPhone,
+          email: doc.contactEmail,
+          valueInr: Number(doc.value || 0),
+          triggeredBy: 'auto_deal_won',
+          respectAutoToggle: true,
+        })
+        .catch(() => {});
     }
     const maskPhones = this.auditService
       ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)

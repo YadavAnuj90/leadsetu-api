@@ -28,6 +28,7 @@ import { WorkflowsService } from '../workflows/workflows.service';
 import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 import { CustomFieldsService } from '../custom-fields/custom-fields.service';
 import { LeadRoutingService } from '../lead-routing/lead-routing.service';
+import { MetaCapiService } from '../meta-capi/meta-capi.service';
 
 export interface CreateLeadDto {
   name: string;
@@ -41,6 +42,11 @@ export interface CreateLeadDto {
   estimatedValue?: number;
   tags?: string[];
   notes?: string;
+  adPlatform?: string;
+  ctwaClid?: string;
+  adId?: string;
+  adHeadline?: string;
+  adSourceUrl?: string;
   customFields?: Record<string, unknown>;
   autoAssign?: boolean;
 }
@@ -55,6 +61,7 @@ export interface LeadsQuery {
   source?: string;
   aiLabel?: string;
   accountKind?: string;
+  adPlatform?: string;
   sortBy?: 'aiScore' | 'createdAt' | 'estimatedValue';
   page?: string;
   limit?: string;
@@ -78,6 +85,7 @@ export class LeadsService {
     @Optional() private readonly aiBridge?: AiBridgeService,
     @Optional() private readonly customFieldsService?: CustomFieldsService,
     @Optional() private readonly leadRoutingService?: LeadRoutingService,
+    @Optional() private readonly metaCapiService?: MetaCapiService,
   ) {}
 
   async verifyAuth(authHeader?: string): Promise<AuthContext> {
@@ -541,6 +549,11 @@ export class LeadsService {
       aiScoredAt: doc.aiScoredAt || '',
       tags: doc.tags || [],
       notes: doc.notes || '',
+      adPlatform: doc.adPlatform || '',
+      ctwaClid: doc.ctwaClid || '',
+      adId: doc.adId || '',
+      adHeadline: doc.adHeadline || '',
+      adSourceUrl: doc.adSourceUrl || '',
       customFields: doc.customFields || {},
       activities: doc.activities || [],
       createdAt: raw.createdAt ? new Date(raw.createdAt).toISOString() : new Date().toISOString(),
@@ -574,15 +587,34 @@ export class LeadsService {
     } else if (query.accountKind === 'business') {
       filter.accountKind = { $ne: 'consumer' };
     }
+    const andClauses: Record<string, unknown>[] = [];
+    if (query.adPlatform === 'meta_ctwa') {
+      andClauses.push({
+        $or: [
+          { adPlatform: 'meta_ctwa' },
+          { source: 'meta_ads' },
+          { ctwaClid: { $ne: '' } },
+          { adId: { $ne: '' } },
+        ],
+      });
+    }
     if (query.search?.trim()) {
       const regex = new RegExp(query.search.trim(), 'i');
-      filter.$or = [
-        { name: regex },
-        { company: regex },
-        { phone: regex },
-        { email: regex },
-        { city: regex },
-      ];
+      andClauses.push({
+        $or: [
+          { name: regex },
+          { company: regex },
+          { phone: regex },
+          { email: regex },
+          { city: regex },
+          { adHeadline: regex },
+        ],
+      });
+    }
+    if (andClauses.length === 1) {
+      Object.assign(filter, andClauses[0]);
+    } else if (andClauses.length > 1) {
+      filter.$and = andClauses;
     }
 
     const sortField = query.sortBy || 'createdAt';
@@ -615,6 +647,13 @@ export class LeadsService {
     const convertedCount = allTenantLeads.filter(
       (l) => l.status === 'converted',
     ).length;
+    const metaCtwaCount = allTenantLeads.filter(
+      (l) =>
+        l.adPlatform === 'meta_ctwa' ||
+        l.source === 'meta_ads' ||
+        Boolean(l.ctwaClid) ||
+        Boolean(l.adId),
+    ).length;
     const totalPipelineValue = allTenantLeads
       .filter((l) => l.status !== 'lost')
       .reduce((acc, l) => acc + (Number(l.estimatedValue) || 0), 0);
@@ -635,6 +674,7 @@ export class LeadsService {
         hotCount,
         qualifiedCount,
         convertedCount,
+        metaCtwaCount,
         totalPipelineValue,
         avgAiScore,
       },
@@ -766,6 +806,13 @@ export class LeadsService {
       aiScoredAt: ai.aiScoredAt,
       tags: Array.isArray(dto.tags) ? dto.tags : [],
       notes: dto.notes?.trim() || '',
+      adPlatform:
+        dto.adPlatform?.trim() ||
+        (dto.ctwaClid || dto.adId ? 'meta_ctwa' : ''),
+      ctwaClid: dto.ctwaClid?.trim() || '',
+      adId: dto.adId?.trim() || '',
+      adHeadline: dto.adHeadline?.trim() || '',
+      adSourceUrl: dto.adSourceUrl?.trim() || '',
       customFields: sanitizedCustomFields,
       activities: [initialActivity],
     });
@@ -860,6 +907,11 @@ export class LeadsService {
       doc.estimatedValue = Number(dto.estimatedValue) || 0;
     if (dto.tags !== undefined) doc.tags = dto.tags;
     if (dto.notes !== undefined) doc.notes = dto.notes.trim();
+    if (dto.adPlatform !== undefined) doc.adPlatform = dto.adPlatform.trim();
+    if (dto.ctwaClid !== undefined) doc.ctwaClid = dto.ctwaClid.trim();
+    if (dto.adId !== undefined) doc.adId = dto.adId.trim();
+    if (dto.adHeadline !== undefined) doc.adHeadline = dto.adHeadline.trim();
+    if (dto.adSourceUrl !== undefined) doc.adSourceUrl = dto.adSourceUrl.trim();
     if (dto.customFields !== undefined) {
       doc.customFields = this.customFieldsService
         ? await this.customFieldsService.sanitizeEntityValues(
@@ -943,6 +995,26 @@ export class LeadsService {
         entityLabel: `${doc.name}${doc.company ? ` (${doc.company})` : ''}`,
         summary: `Lead ${doc.name} status updated: ${prevStatus.toUpperCase()} -> ${dto.status.toUpperCase()}`,
       });
+      if (doc.status === 'qualified' && prevStatus !== 'qualified' && this.metaCapiService) {
+        await this.metaCapiService
+          .fireConversionEvent({
+            tenantId: auth.tenantId,
+            eventName: 'QualifiedLead',
+            entityType: 'lead',
+            entityId: doc._id.toString(),
+            entityLabel: doc.name,
+            phone: doc.phone,
+            email: doc.email,
+            ctwaClid: doc.ctwaClid,
+            adId: doc.adId,
+            adHeadline: doc.adHeadline,
+            adSourceUrl: doc.adSourceUrl,
+            valueInr: Number(doc.estimatedValue || 0),
+            triggeredBy: 'auto_lead_qualified',
+            respectAutoToggle: true,
+          })
+          .catch(() => {});
+      }
     }
     const maskPhones = this.auditService
       ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)

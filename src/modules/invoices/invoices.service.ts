@@ -25,6 +25,7 @@ import {
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 import { InboxService, extractLast10Digits } from '../inbox/inbox.service';
+import { MetaCapiService } from '../meta-capi/meta-capi.service';
 import {
   ApplyBankMatchDto,
   BankStatementReconcileDto,
@@ -35,6 +36,7 @@ import {
   RecordPromiseToPayDto,
   SendRecoveryChaserDto,
   UpdateRecoveryConfigDto,
+  UpdateSellerGstProfileDto,
 } from './dto/invoices.dto';
 
 export type InvoiceDocument = HydratedDocument<Invoice>;
@@ -301,6 +303,7 @@ export class InvoicesService {
     @Optional() private readonly superAdminService?: SuperAdminService,
     @Optional() private readonly aiBridge?: AiBridgeService,
     @Optional() private readonly inboxService?: InboxService,
+    @Optional() private readonly metaCapiService?: MetaCapiService,
   ) {}
 
   async verifyAuth(authHeader?: string) {
@@ -672,7 +675,582 @@ export class InvoicesService {
     };
   }
 
-  async exportGstr1Csv(auth: { userId: string; tenantId: string; email: string }) {
+  private static readonly GSTIN_REGEX =
+    /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+
+  private extractPosStateCode(raw?: string): string {
+    const val = String(raw || '').trim();
+    const prefix = val.match(/^(\d{2})/);
+    if (prefix) return prefix[1];
+    const lower = val.toLowerCase();
+    const map: Array<[string, string]> = [
+      ['delhi', '07'],
+      ['uttar pradesh', '09'],
+      ['noida', '09'],
+      ['ghaziabad', '09'],
+      ['haryana', '06'],
+      ['gurugram', '06'],
+      ['gurgaon', '06'],
+      ['faridabad', '06'],
+      ['rajasthan', '08'],
+      ['jaipur', '08'],
+      ['maharashtra', '27'],
+      ['mumbai', '27'],
+      ['pune', '27'],
+      ['gujarat', '24'],
+      ['ahmedabad', '24'],
+      ['surat', '24'],
+      ['karnataka', '29'],
+      ['bengaluru', '29'],
+      ['bangalore', '29'],
+      ['tamil nadu', '33'],
+      ['chennai', '33'],
+      ['telangana', '36'],
+      ['hyderabad', '36'],
+      ['west bengal', '19'],
+      ['kolkata', '19'],
+      ['punjab', '03'],
+      ['madhya pradesh', '23'],
+    ];
+    for (const [needle, code] of map) {
+      if (lower.includes(needle)) return code;
+    }
+    return '';
+  }
+
+  private normalizeMonthParam(month?: string): string {
+    const clean = String(month || '').trim();
+    return /^\d{4}-\d{2}$/.test(clean) ? clean : 'all';
+  }
+
+  private async computeGstr1Dataset(
+    auth: { userId: string; tenantId: string; email?: string },
+    monthInput?: string,
+  ) {
+    const db = this.invoiceModel.db;
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+    const month = this.normalizeMonthParam(monthInput);
+
+    const [tenant, ownerScope] = await Promise.all([
+      db.collection('tenants').findOne({ _id: tenantOid }),
+      resolveOwnerScopeFilter(db, auth),
+    ]);
+    const allDocs = await this.invoiceModel
+      .find({ tenantId: tenantOid, ...ownerScope })
+      .sort({ createdAt: -1 })
+      .exec();
+
+    const dtosAll = allDocs.map((d) => this.toDto(d, false));
+    const dtosPeriod =
+      month === 'all'
+        ? dtosAll
+        : dtosAll.filter((d) => String(d.createdAt || '').slice(0, 7) === month);
+
+    const taxInvoices = dtosPeriod.filter(
+      (d) => d.docType === 'tax_invoice' && d.status !== 'cancelled',
+    );
+    const cancelledCount = dtosPeriod.filter((d) => d.status === 'cancelled').length;
+    const proformaExcludedCount = dtosPeriod.filter(
+      (d) => d.docType === 'proforma_quote',
+    ).length;
+
+    const sellerGstin = String(tenant?.gstin || '').trim().toUpperCase();
+    const sellerCompany = String(
+      tenant?.companyName || tenant?.name || 'Leadsetu Workspace',
+    ).trim();
+    const sellerState = String(tenant?.state || tenant?.city || '09 - Uttar Pradesh').trim();
+    const sellerStateCode =
+      (sellerGstin && sellerGstin.slice(0, 2)) ||
+      this.extractPosStateCode(sellerState) ||
+      '09';
+    const isSellerGstinValid = InvoicesService.GSTIN_REGEX.test(sellerGstin);
+
+    const b2bInvoices: Array<{
+      id: string;
+      invoiceNumber: string;
+      date: string;
+      clientName: string;
+      gstin: string;
+      placeOfSupply: string;
+      posStateCode: string;
+      taxType: 'cgst_sgst' | 'igst';
+      gstRate: number;
+      taxableAmount: number;
+      cgstAmount: number;
+      sgstAmount: number;
+      igstAmount: number;
+      gstAmount: number;
+      grandTotal: number;
+      status: string;
+      ewayRequired: boolean;
+    }> = [];
+
+    const b2cBucketMap = new Map<
+      string,
+      {
+        bucket: 'B2CL' | 'B2CS';
+        placeOfSupply: string;
+        posStateCode: string;
+        taxType: 'cgst_sgst' | 'igst';
+        gstRate: number;
+        invoiceCount: number;
+        taxableAmount: number;
+        cgstAmount: number;
+        sgstAmount: number;
+        igstAmount: number;
+        grandTotal: number;
+      }
+    >();
+
+    const hsnMap = new Map<
+      string,
+      {
+        hsnSac: string;
+        gstRate: number;
+        descriptions: string[];
+        totalQuantity: number;
+        taxableAmount: number;
+        cgstAmount: number;
+        sgstAmount: number;
+        igstAmount: number;
+        totalValue: number;
+      }
+    >();
+
+    const complianceIssues: Array<{
+      severity: 'error' | 'warning' | 'info';
+      code: string;
+      invoiceId?: string;
+      invoiceNumber?: string;
+      clientName?: string;
+      amount?: number;
+      message: string;
+      recommendation: string;
+    }> = [];
+
+    if (!sellerGstin) {
+      complianceIssues.push({
+        severity: 'error',
+        code: 'SELLER_GSTIN_MISSING',
+        message: 'Workspace Seller 15-digit GSTIN is not configured yet.',
+        recommendation:
+          'Add your company GSTIN & State via "Edit Seller GSTIN Profile" before downloading GSTR-1 JSON for GST Portal upload.',
+      });
+    } else if (!isSellerGstinValid) {
+      complianceIssues.push({
+        severity: 'error',
+        code: 'SELLER_GSTIN_INVALID',
+        message: `Workspace Seller GSTIN "${sellerGstin}" does not match 15-character GSTIN format.`,
+        recommendation: 'Verify your 15-digit GSTIN in Seller GSTIN Profile.',
+      });
+    }
+
+    let ewayRequiredCount = 0;
+
+    for (const inv of taxInvoices) {
+      const cleanGstin = String(inv.gstin || '').trim().toUpperCase();
+      const hasAnyGstin = cleanGstin.length > 0 && cleanGstin !== 'URD';
+      const isBuyerGstinValid = hasAnyGstin
+        ? InvoicesService.GSTIN_REGEX.test(cleanGstin)
+        : false;
+      const posCode =
+        this.extractPosStateCode(inv.placeOfSupply) || sellerStateCode;
+
+      if (hasAnyGstin && !isBuyerGstinValid) {
+        complianceIssues.push({
+          severity: 'error',
+          code: 'INVALID_BUYER_GSTIN',
+          invoiceId: inv.id,
+          invoiceNumber: inv.invoiceNumber,
+          clientName: inv.clientName,
+          amount: inv.grandTotal,
+          message: `${inv.invoiceNumber} (${inv.clientName}) has invalid buyer GSTIN "${cleanGstin}".`,
+          recommendation: 'Correct the 15-character buyer GSTIN or clear it if unregistered (B2C).',
+        });
+      }
+
+      if (isBuyerGstinValid && posCode && cleanGstin.slice(0, 2) !== posCode) {
+        complianceIssues.push({
+          severity: 'warning',
+          code: 'GSTIN_POS_MISMATCH',
+          invoiceId: inv.id,
+          invoiceNumber: inv.invoiceNumber,
+          clientName: inv.clientName,
+          amount: inv.grandTotal,
+          message: `${inv.invoiceNumber}: Buyer GSTIN state (${cleanGstin.slice(0, 2)}) differs from Place of Supply (${inv.placeOfSupply || posCode}).`,
+          recommendation:
+            'Confirm whether this is a Ship-To different state supply or align Place of Supply with buyer GSTIN.',
+        });
+      }
+
+      if (sellerStateCode && posCode) {
+        const expectedTaxType =
+          sellerStateCode === posCode ? 'cgst_sgst' : 'igst';
+        if (inv.gstRate > 0 && inv.taxType !== expectedTaxType) {
+          complianceIssues.push({
+            severity: 'warning',
+            code: 'TAX_TYPE_MISMATCH',
+            invoiceId: inv.id,
+            invoiceNumber: inv.invoiceNumber,
+            clientName: inv.clientName,
+            amount: inv.grandTotal,
+            message: `${inv.invoiceNumber}: Place of Supply (${posCode}) vs Seller State (${sellerStateCode}) expects ${expectedTaxType === 'igst' ? 'IGST' : 'CGST+SGST'}, billed as ${inv.taxType.toUpperCase()}.`,
+            recommendation: 'Review intra-state vs inter-state GST rule before GSTR-1 filing.',
+          });
+        }
+      }
+
+      const ewayRequired = inv.grandTotal >= 50000;
+      if (ewayRequired) {
+        ewayRequiredCount += 1;
+        complianceIssues.push({
+          severity: 'info',
+          code: 'EWAY_BILL_REQUIRED',
+          invoiceId: inv.id,
+          invoiceNumber: inv.invoiceNumber,
+          clientName: inv.clientName,
+          amount: inv.grandTotal,
+          message: `${inv.invoiceNumber} (₹${inv.grandTotal.toLocaleString('en-IN')}) exceeds ₹50,000 E-Way Bill threshold (Rule 138 CGST).`,
+          recommendation:
+            'Ensure E-Way Bill Part-A & vehicle number Part-B are generated if physical goods are dispatched.',
+        });
+      }
+
+      if (isBuyerGstinValid) {
+        b2bInvoices.push({
+          id: inv.id,
+          invoiceNumber: inv.invoiceNumber,
+          date: inv.createdAt.slice(0, 10),
+          clientName: inv.clientName,
+          gstin: cleanGstin,
+          placeOfSupply: inv.placeOfSupply || `${posCode} - India`,
+          posStateCode: posCode || '09',
+          taxType: inv.taxType,
+          gstRate: inv.gstRate,
+          taxableAmount: inv.taxableAmount,
+          cgstAmount: inv.cgstAmount,
+          sgstAmount: inv.sgstAmount,
+          igstAmount: inv.igstAmount,
+          gstAmount: inv.gstAmount,
+          grandTotal: inv.grandTotal,
+          status: inv.status,
+          ewayRequired,
+        });
+      } else {
+        const isB2cl = inv.taxType === 'igst' && inv.grandTotal > 250000;
+        const bucket: 'B2CL' | 'B2CS' = isB2cl ? 'B2CL' : 'B2CS';
+        const posLabel = inv.placeOfSupply || `${posCode || '09'} - India`;
+        const bKey = `${bucket}|${posLabel}|${inv.taxType}|${inv.gstRate}`;
+        const cur = b2cBucketMap.get(bKey) || {
+          bucket,
+          placeOfSupply: posLabel,
+          posStateCode: posCode || '09',
+          taxType: inv.taxType,
+          gstRate: inv.gstRate,
+          invoiceCount: 0,
+          taxableAmount: 0,
+          cgstAmount: 0,
+          sgstAmount: 0,
+          igstAmount: 0,
+          grandTotal: 0,
+        };
+        cur.invoiceCount += 1;
+        cur.taxableAmount = Number((cur.taxableAmount + inv.taxableAmount).toFixed(2));
+        cur.cgstAmount = Number((cur.cgstAmount + inv.cgstAmount).toFixed(2));
+        cur.sgstAmount = Number((cur.sgstAmount + inv.sgstAmount).toFixed(2));
+        cur.igstAmount = Number((cur.igstAmount + inv.igstAmount).toFixed(2));
+        cur.grandTotal = Number((cur.grandTotal + inv.grandTotal).toFixed(2));
+        b2cBucketMap.set(bKey, cur);
+      }
+
+      // HSN/SAC aggregation proportional to taxableAmount (respecting any invoice-level discount)
+      const items = Array.isArray(inv.items) && inv.items.length > 0
+        ? inv.items
+        : [
+            {
+              description: `${inv.clientName} Supply`,
+              hsnSac: '998314',
+              quantity: 1,
+              unitPrice: inv.taxableAmount,
+              amount: inv.taxableAmount,
+            },
+          ];
+      const rawItemsSum = items.reduce(
+        (acc, it) => acc + Math.max(0, Number(it.amount || 0)),
+        0,
+      );
+      const scale = rawItemsSum > 0 ? inv.taxableAmount / rawItemsSum : 1;
+
+      for (const item of items) {
+        const hsn = String(item.hsnSac || '998314').trim() || '998314';
+        const hKey = `${hsn}|${inv.gstRate}`;
+        const itemTaxable = Number(
+          ((Number(item.amount || 0) || 0) * scale).toFixed(2),
+        );
+        const itemIgst =
+          inv.taxType === 'igst'
+            ? Number(((itemTaxable * inv.gstRate) / 100).toFixed(2))
+            : 0;
+        const itemCgst =
+          inv.taxType !== 'igst'
+            ? Number(((itemTaxable * (inv.gstRate / 2)) / 100).toFixed(2))
+            : 0;
+        const itemSgst =
+          inv.taxType !== 'igst'
+            ? Number(((itemTaxable * (inv.gstRate / 2)) / 100).toFixed(2))
+            : 0;
+        const curHsn = hsnMap.get(hKey) || {
+          hsnSac: hsn,
+          gstRate: inv.gstRate,
+          descriptions: [],
+          totalQuantity: 0,
+          taxableAmount: 0,
+          cgstAmount: 0,
+          sgstAmount: 0,
+          igstAmount: 0,
+          totalValue: 0,
+        };
+        if (
+          item.description &&
+          curHsn.descriptions.length < 3 &&
+          !curHsn.descriptions.includes(item.description)
+        ) {
+          curHsn.descriptions.push(item.description);
+        }
+        curHsn.totalQuantity += Number(item.quantity || 1);
+        curHsn.taxableAmount = Number((curHsn.taxableAmount + itemTaxable).toFixed(2));
+        curHsn.cgstAmount = Number((curHsn.cgstAmount + itemCgst).toFixed(2));
+        curHsn.sgstAmount = Number((curHsn.sgstAmount + itemSgst).toFixed(2));
+        curHsn.igstAmount = Number((curHsn.igstAmount + itemIgst).toFixed(2));
+        curHsn.totalValue = Number(
+          (
+            curHsn.totalValue +
+            itemTaxable +
+            itemCgst +
+            itemSgst +
+            itemIgst
+          ).toFixed(2),
+        );
+        hsnMap.set(hKey, curHsn);
+      }
+    }
+
+    const b2cSummary = Array.from(b2cBucketMap.values());
+    const hsnSummary = Array.from(hsnMap.values()).sort(
+      (a, b) => b.taxableAmount - a.taxableAmount,
+    );
+
+    const b2bTaxable = Number(
+      b2bInvoices.reduce((a, r) => a + r.taxableAmount, 0).toFixed(2),
+    );
+    const b2bTax = Number(
+      b2bInvoices.reduce((a, r) => a + r.gstAmount, 0).toFixed(2),
+    );
+    const b2cTaxable = Number(
+      b2cSummary.reduce((a, r) => a + r.taxableAmount, 0).toFixed(2),
+    );
+    const b2cTax = Number(
+      b2cSummary
+        .reduce((a, r) => a + r.cgstAmount + r.sgstAmount + r.igstAmount, 0)
+        .toFixed(2),
+    );
+
+    const criticalIssueCount = complianceIssues.filter(
+      (i) => i.severity === 'error' || i.severity === 'warning',
+    ).length;
+    const complianceScorePct = Math.max(
+      0,
+      Math.min(100, 100 - criticalIssueCount * 12),
+    );
+
+    // Build GST Portal GSTR-1 JSON v1.1 schema
+    const refMonth =
+      month === 'all' ? new Date().toISOString().slice(0, 7) : month;
+    const [yr, mo] = refMonth.split('-');
+    const filingPeriodCode = `${mo}${yr}`;
+
+    const portalB2bByCtin = new Map<
+      string,
+      Array<Record<string, unknown>>
+    >();
+    for (const inv of b2bInvoices) {
+      const ddMMyyyy = `${inv.date.slice(8, 10)}-${inv.date.slice(5, 7)}-${inv.date.slice(0, 4)}`;
+      const entry = {
+        inum: inv.invoiceNumber,
+        idt: ddMMyyyy,
+        val: inv.grandTotal,
+        pos: inv.posStateCode,
+        rchrg: 'N',
+        inv_typ: 'R',
+        itms: [
+          {
+            num: 1,
+            itm_det: {
+              rt: inv.gstRate,
+              txval: inv.taxableAmount,
+              ...(inv.taxType === 'igst'
+                ? { iamt: inv.igstAmount }
+                : { camt: inv.cgstAmount, samt: inv.sgstAmount }),
+              csamt: 0,
+            },
+          },
+        ],
+      };
+      const list = portalB2bByCtin.get(inv.gstin) || [];
+      list.push(entry);
+      portalB2bByCtin.set(inv.gstin, list);
+    }
+
+    const portalJson = {
+      gstin: sellerGstin || 'UNREGISTERED_SET_IN_SETTINGS',
+      fp: filingPeriodCode,
+      version: 'GST3.1.6',
+      hash: 'hash',
+      b2b: Array.from(portalB2bByCtin.entries()).map(([ctin, inv]) => ({
+        ctin,
+        inv,
+      })),
+      b2cs: b2cSummary
+        .filter((b) => b.bucket === 'B2CS')
+        .map((b) => ({
+          sply_ty: b.taxType === 'igst' ? 'INTER' : 'INTRA',
+          pos: b.posStateCode,
+          typ: 'OE',
+          rt: b.gstRate,
+          txval: b.taxableAmount,
+          ...(b.taxType === 'igst'
+            ? { iamt: b.igstAmount }
+            : { camt: b.cgstAmount, samt: b.sgstAmount }),
+          csamt: 0,
+        })),
+      hsn: {
+        data: hsnSummary.map((h, idx) => ({
+          num: idx + 1,
+          hsn_sc: h.hsnSac,
+          desc: h.descriptions[0] || `HSN ${h.hsnSac}`,
+          uqc: 'NOS',
+          qty: h.totalQuantity,
+          rt: h.gstRate,
+          txval: h.taxableAmount,
+          iamt: h.igstAmount,
+          camt: h.cgstAmount,
+          samt: h.sgstAmount,
+          csamt: 0,
+        })),
+      },
+    };
+
+    return {
+      period: {
+        month,
+        filingPeriodCode,
+        label:
+          month === 'all'
+            ? 'All Periods (FY YTD)'
+            : new Date(`${refMonth}-01`).toLocaleString('en-IN', {
+                month: 'long',
+                year: 'numeric',
+              }),
+      },
+      seller: {
+        companyName: sellerCompany,
+        gstin: sellerGstin,
+        state: sellerState,
+        stateCode: sellerStateCode,
+        address: String(tenant?.address || ''),
+        isSellerGstinValid,
+      },
+      summary: {
+        totalTaxInvoices: taxInvoices.length,
+        cancelledCount,
+        proformaExcludedCount,
+        b2bCount: b2bInvoices.length,
+        b2bTaxable,
+        b2bTax,
+        b2cCount: b2cSummary.reduce((a, b) => a + b.invoiceCount, 0),
+        b2cTaxable,
+        b2cTax,
+        hsnCount: hsnSummary.length,
+        ewayRequiredCount,
+        issuesCount: criticalIssueCount,
+        complianceScorePct,
+      },
+      b2bInvoices,
+      b2cSummary,
+      hsnSummary,
+      complianceIssues,
+      portalJson,
+      filteredDocsCount: dtosPeriod.length,
+      taxInvoicesDocs: taxInvoices,
+      allPeriodDtos: dtosPeriod,
+    };
+  }
+
+  async getGstr1ComplianceOverview(
+    auth: { userId: string; tenantId: string },
+    query?: { month?: string },
+  ) {
+    const dataset = await this.computeGstr1Dataset(auth, query?.month);
+    const {
+      taxInvoicesDocs: _ignoredTax,
+      allPeriodDtos: _ignoredAll,
+      ...publicOverview
+    } = dataset;
+    return publicOverview;
+  }
+
+  async updateSellerGstProfile(
+    auth: { userId: string; tenantId: string },
+    dto: UpdateSellerGstProfileDto,
+  ) {
+    const db = this.invoiceModel.db;
+    const viewer = Types.ObjectId.isValid(auth.userId)
+      ? await db.collection('users').findOne({ _id: new Types.ObjectId(auth.userId) })
+      : null;
+    const role = String(viewer?.role || '').toLowerCase();
+    if (!['owner', 'admin', 'super_admin'].includes(role)) {
+      throw new ForbiddenException(
+        'Only workspace Owners or Admins can update Seller GSTIN & billing state.',
+      );
+    }
+
+    const updateFields: Record<string, unknown> = {};
+    if (dto.companyName !== undefined) {
+      updateFields.companyName = String(dto.companyName).trim();
+    }
+    if (dto.gstin !== undefined) {
+      const cleanGstin = String(dto.gstin).trim().toUpperCase();
+      if (cleanGstin && !InvoicesService.GSTIN_REGEX.test(cleanGstin)) {
+        throw new BadRequestException(
+          'Enter a valid 15-character Indian GSTIN (e.g. 09AAACA1234A1Z5).',
+        );
+      }
+      updateFields.gstin = cleanGstin;
+    }
+    if (dto.state !== undefined) {
+      updateFields.state = String(dto.state).trim();
+    }
+    if (dto.city !== undefined) {
+      updateFields.city = String(dto.city).trim();
+    }
+    if (dto.address !== undefined) {
+      updateFields.address = String(dto.address).trim();
+    }
+
+    if (Object.keys(updateFields).length > 0) {
+      await db.collection('tenants').updateOne(
+        { _id: new Types.ObjectId(auth.tenantId) },
+        { $set: updateFields },
+      );
+    }
+
+    return this.getGstr1ComplianceOverview(auth, {});
+  }
+
+  async exportGstr1Csv(
+    auth: { userId: string; tenantId: string; email: string },
+    query?: { month?: string; section?: string },
+  ) {
     const db = this.invoiceModel.db;
     if (db && Types.ObjectId.isValid(auth.tenantId) && Types.ObjectId.isValid(auth.userId)) {
       const [tenant, viewer] = await Promise.all([
@@ -687,77 +1265,182 @@ export class InvoicesService {
       }
     }
 
-    const ownerScope = await resolveOwnerScopeFilter(this.invoiceModel.db, auth);
-    const docs = await this.invoiceModel
-      .find({ tenantId: new Types.ObjectId(auth.tenantId), ...ownerScope })
-      .sort({ createdAt: -1 })
-      .exec();
+    const section = ['b2b', 'b2c', 'hsn'].includes(
+      String(query?.section || '').toLowerCase(),
+    )
+      ? (String(query?.section).toLowerCase() as 'b2b' | 'b2c' | 'hsn')
+      : 'all';
+    const dataset = await this.computeGstr1Dataset(auth, query?.month);
 
     const csvEscape = (v: unknown) => {
       const s = String(v ?? '').replace(/"/g, '""');
       return `"${s}"`;
     };
 
-    const headers = [
-      'Invoice Number',
-      'Document Type',
-      'Invoice Date',
-      'Due Date',
-      'Status',
-      'Days Overdue',
-      'Buyer Name',
-      'Buyer GSTIN',
-      'Place of Supply',
-      'Tax Type',
-      'HSN/SAC Summary',
-      'GST Rate (%)',
-      'Taxable Value (INR)',
-      'CGST (INR)',
-      'SGST (INR)',
-      'IGST (INR)',
-      'Total GST (INR)',
-      'Grand Total (INR)',
-      'Amount Paid (INR)',
-      'TDS Deducted (INR)',
-      'Balance Due (INR)',
-      'Payment Method',
-    ];
+    let headers: string[] = [];
+    let rows: string[] = [];
+    let rowCount = 0;
 
-    const rows = docs.map((d) => {
-      const dto = this.toDto(d, false);
-      const hsnCodes = Array.from(
-        new Set((dto.items || []).map((it) => it.hsnSac).filter(Boolean)),
-      ).join(' | ');
-      return [
-        dto.invoiceNumber,
-        dto.docType === 'proforma_quote' ? 'Proforma Quotation' : 'Tax Invoice',
-        dto.createdAt.slice(0, 10),
-        dto.dueDate || '',
-        dto.status.toUpperCase(),
-        dto.daysOverdue,
-        dto.clientName,
-        dto.gstin || 'URD / Unregistered',
-        dto.placeOfSupply,
-        dto.taxType === 'igst' ? 'IGST (Inter-State)' : 'CGST+SGST (Intra-State)',
-        hsnCodes || '998314',
-        dto.gstRate,
-        dto.taxableAmount,
-        dto.cgstAmount,
-        dto.sgstAmount,
-        dto.igstAmount,
-        dto.gstAmount,
-        dto.grandTotal,
-        dto.amountPaid,
-        dto.tdsDeducted,
-        dto.balanceDue,
-        dto.paymentMethod.toUpperCase(),
-      ]
-        .map(csvEscape)
-        .join(',');
-    });
+    if (section === 'b2b') {
+      headers = [
+        'GSTIN/UIN of Recipient',
+        'Receiver Name',
+        'Invoice Number',
+        'Invoice Date',
+        'Invoice Value (INR)',
+        'Place Of Supply',
+        'Reverse Charge',
+        'Invoice Type',
+        'Rate (%)',
+        'Taxable Value (INR)',
+        'CGST (INR)',
+        'SGST (INR)',
+        'IGST (INR)',
+        'E-Way Bill Required',
+      ];
+      rows = dataset.b2bInvoices.map((r) =>
+        [
+          r.gstin,
+          r.clientName,
+          r.invoiceNumber,
+          r.date,
+          r.grandTotal,
+          r.placeOfSupply,
+          'N',
+          'Regular B2B',
+          r.gstRate,
+          r.taxableAmount,
+          r.cgstAmount,
+          r.sgstAmount,
+          r.igstAmount,
+          r.ewayRequired ? 'YES (>=50K)' : 'NO',
+        ]
+          .map(csvEscape)
+          .join(','),
+      );
+      rowCount = dataset.b2bInvoices.length;
+    } else if (section === 'b2c') {
+      headers = [
+        'Return Table',
+        'Type',
+        'Place Of Supply',
+        'Rate (%)',
+        'Invoice Count',
+        'Taxable Value (INR)',
+        'CGST (INR)',
+        'SGST (INR)',
+        'IGST (INR)',
+        'Total Invoice Value (INR)',
+      ];
+      rows = dataset.b2cSummary.map((r) =>
+        [
+          r.bucket,
+          'OE',
+          r.placeOfSupply,
+          r.gstRate,
+          r.invoiceCount,
+          r.taxableAmount,
+          r.cgstAmount,
+          r.sgstAmount,
+          r.igstAmount,
+          r.grandTotal,
+        ]
+          .map(csvEscape)
+          .join(','),
+      );
+      rowCount = dataset.b2cSummary.length;
+    } else if (section === 'hsn') {
+      headers = [
+        'HSN/SAC',
+        'Description',
+        'UQC',
+        'Rate (%)',
+        'Total Quantity',
+        'Total Value (INR)',
+        'Taxable Value (INR)',
+        'Integrated Tax (IGST)',
+        'Central Tax (CGST)',
+        'State/UT Tax (SGST)',
+      ];
+      rows = dataset.hsnSummary.map((h) =>
+        [
+          h.hsnSac,
+          h.descriptions[0] || `HSN ${h.hsnSac}`,
+          'NOS',
+          h.gstRate,
+          h.totalQuantity,
+          h.totalValue,
+          h.taxableAmount,
+          h.igstAmount,
+          h.cgstAmount,
+          h.sgstAmount,
+        ]
+          .map(csvEscape)
+          .join(','),
+      );
+      rowCount = dataset.hsnSummary.length;
+    } else {
+      headers = [
+        'Invoice Number',
+        'Document Type',
+        'Invoice Date',
+        'Due Date',
+        'Status',
+        'Days Overdue',
+        'Buyer Name',
+        'Buyer GSTIN',
+        'Place of Supply',
+        'Tax Type',
+        'HSN/SAC Summary',
+        'GST Rate (%)',
+        'Taxable Value (INR)',
+        'CGST (INR)',
+        'SGST (INR)',
+        'IGST (INR)',
+        'Total GST (INR)',
+        'Grand Total (INR)',
+        'Amount Paid (INR)',
+        'TDS Deducted (INR)',
+        'Balance Due (INR)',
+        'Payment Method',
+      ];
+      rows = dataset.allPeriodDtos.map((dto) => {
+        const hsnCodes = Array.from(
+          new Set((dto.items || []).map((it) => it.hsnSac).filter(Boolean)),
+        ).join(' | ');
+        return [
+          dto.invoiceNumber,
+          dto.docType === 'proforma_quote' ? 'Proforma Quotation' : 'Tax Invoice',
+          dto.createdAt.slice(0, 10),
+          dto.dueDate || '',
+          dto.status.toUpperCase(),
+          dto.daysOverdue,
+          dto.clientName,
+          dto.gstin || 'URD / Unregistered',
+          dto.placeOfSupply,
+          dto.taxType === 'igst' ? 'IGST (Inter-State)' : 'CGST+SGST (Intra-State)',
+          hsnCodes || '998314',
+          dto.gstRate,
+          dto.taxableAmount,
+          dto.cgstAmount,
+          dto.sgstAmount,
+          dto.igstAmount,
+          dto.gstAmount,
+          dto.grandTotal,
+          dto.amountPaid,
+          dto.tdsDeducted,
+          dto.balanceDue,
+          dto.paymentMethod.toUpperCase(),
+        ]
+          .map(csvEscape)
+          .join(',');
+      });
+      rowCount = dataset.allPeriodDtos.length;
+    }
 
     const csv = [headers.map(csvEscape).join(','), ...rows].join('\r\n');
-    const filename = `Leadsetu-GSTR1-Tally-${new Date().toISOString().slice(0, 10)}.csv`;
+    const periodTag = dataset.period.month === 'all' ? new Date().toISOString().slice(0, 10) : dataset.period.month;
+    const filename = `Leadsetu-GSTR1-${section.toUpperCase()}-${periodTag}.csv`;
 
     await this.auditService?.record({
       tenantId: auth.tenantId,
@@ -767,12 +1450,14 @@ export class InvoicesService {
       entityType: 'invoice',
       entityId: auth.tenantId,
       entityLabel: filename,
-      summary: `Exported GSTR-1 / Tally CSV (${docs.length} invoice records)`,
+      summary: `Exported GSTR-1 ${section.toUpperCase()} CSV (${rowCount} rows, period: ${dataset.period.month})`,
     });
 
     return {
       filename,
-      rowCount: docs.length,
+      section,
+      month: dataset.period.month,
+      rowCount,
       csv,
     };
   }
@@ -1256,6 +1941,7 @@ export class InvoicesService {
       ];
     }
 
+    const prevStatus = doc.status;
     const updated = this.computeSettlement(doc);
     doc.amountPaid = updated.amountPaid;
     doc.tdsDeducted = updated.tdsDeducted;
@@ -1272,6 +1958,22 @@ export class InvoicesService {
       entityLabel: `${doc.invoiceNumber} · ${doc.clientName}`,
       summary: `Marked ${doc.invoiceNumber} (₹${doc.grandTotal.toLocaleString('en-IN')}) as PAID via ${doc.paymentMethod.toUpperCase()}`,
     });
+    if (prevStatus !== 'paid' && this.metaCapiService) {
+      await this.metaCapiService
+        .fireConversionEvent({
+          tenantId: auth.tenantId,
+          eventName: 'Purchase',
+          entityType: 'invoice',
+          entityId: doc._id.toString(),
+          entityLabel: `${doc.invoiceNumber} · ${doc.clientName}`,
+          phone: doc.phone,
+          email: doc.email,
+          valueInr: Number(doc.grandTotal || 0),
+          triggeredBy: 'auto_invoice_paid',
+          respectAutoToggle: true,
+        })
+        .catch(() => {});
+    }
 
     const maskPhones = this.auditService
       ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
@@ -1350,6 +2052,7 @@ export class InvoicesService {
       recordedAt: new Date().toISOString(),
     };
 
+    const prevStatus = doc.status;
     doc.payments = [...(Array.isArray(doc.payments) ? doc.payments : []), entry];
     const next = this.computeSettlement(doc);
     doc.amountPaid = next.amountPaid;
@@ -1364,6 +2067,23 @@ export class InvoicesService {
           : 'neft_rtgs';
 
     await doc.save();
+
+    if (prevStatus !== 'paid' && doc.status === 'paid' && this.metaCapiService) {
+      await this.metaCapiService
+        .fireConversionEvent({
+          tenantId: auth.tenantId,
+          eventName: 'Purchase',
+          entityType: 'invoice',
+          entityId: doc._id.toString(),
+          entityLabel: `${doc.invoiceNumber} · ${doc.clientName}`,
+          phone: doc.phone,
+          email: doc.email,
+          valueInr: Number(doc.grandTotal || 0),
+          triggeredBy: 'auto_invoice_paid',
+          respectAutoToggle: true,
+        })
+        .catch(() => {});
+    }
 
     await this.auditService?.record({
       tenantId: auth.tenantId,
@@ -2416,7 +3136,10 @@ export class InvoicesService {
     };
   }
 
-  async exportTallyXml(auth: { userId: string; tenantId: string; email: string }) {
+  async exportTallyXml(
+    auth: { userId: string; tenantId: string; email: string },
+    query?: { month?: string; includeMasters?: string },
+  ) {
     const db = this.invoiceModel.db;
     const tenantOid = new Types.ObjectId(auth.tenantId);
     if (db && Types.ObjectId.isValid(auth.userId)) {
@@ -2432,11 +3155,19 @@ export class InvoicesService {
       }
     }
 
+    const month = this.normalizeMonthParam(query?.month);
+    const includeMasters = query?.includeMasters !== 'false';
     const ownerScope = await resolveOwnerScopeFilter(db, auth);
-    const docs = await this.invoiceModel
+    const allDocs = await this.invoiceModel
       .find({ tenantId: tenantOid, ...ownerScope, docType: 'tax_invoice', status: { $ne: 'cancelled' } })
       .sort({ createdAt: -1 })
       .exec();
+
+    const allDtos = allDocs.map((d) => this.toDto(d, false));
+    const docs =
+      month === 'all'
+        ? allDtos
+        : allDtos.filter((d) => String(d.createdAt || '').slice(0, 7) === month);
 
     const xmlEscape = (v: unknown) =>
       String(v ?? '')
@@ -2451,11 +3182,26 @@ export class InvoicesService {
       return /^\d{8}$/.test(clean) ? clean : '20261115';
     };
 
+    const masterMessages: string[] = [];
+    const partyLedgersSeen = new Map<string, { gstin: string; pos: string }>();
+    const bankLedgersSeen = new Set<string>();
+
     const vouchers: string[] = [];
-    for (const d of docs) {
-      const dto = this.toDto(d, false);
+    let salesVoucherCount = 0;
+    let receiptVoucherCount = 0;
+
+    for (const dto of docs) {
       const vDate = tallyDate(dto.createdAt);
-      const party = xmlEscape(dto.clientName);
+      const partyRaw = String(dto.clientName || 'Sundry Customer').trim();
+      const party = xmlEscape(partyRaw);
+      const cleanGstin = String(dto.gstin || '').trim().toUpperCase();
+      const posName = String(dto.placeOfSupply || '09 - Uttar Pradesh')
+        .replace(/^\d{2}\s*-\s*/, '')
+        .trim();
+
+      if (!partyLedgersSeen.has(partyRaw)) {
+        partyLedgersSeen.set(partyRaw, { gstin: cleanGstin, pos: posName });
+      }
 
       // 1) Tally Sales Voucher
       const taxEntries =
@@ -2463,6 +3209,7 @@ export class InvoicesService {
           ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>Output IGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${dto.igstAmount.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>`
           : `<ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${dto.cgstAmount.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST><ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${dto.sgstAmount.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>`;
 
+      salesVoucherCount += 1;
       vouchers.push(`
     <TALLYMESSAGE xmlns:UDF="TallyUDF">
       <VOUCHER VCHTYPE="Sales" ACTION="Create">
@@ -2470,7 +3217,8 @@ export class InvoicesService {
         <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
         <VOUCHERNUMBER>${xmlEscape(dto.invoiceNumber)}</VOUCHERNUMBER>
         <PARTYLEDGERNAME>${party}</PARTYLEDGERNAME>
-        <PARTYGSTIN>${xmlEscape(dto.gstin || '')}</PARTYGSTIN>
+        <PARTYGSTIN>${xmlEscape(cleanGstin)}</PARTYGSTIN>
+        <PLACEOFSUPPLY>${xmlEscape(dto.placeOfSupply || '')}</PLACEOFSUPPLY>
         <NARRATION>${xmlEscape(`Leadsetu GST Sales ${dto.invoiceNumber} · ${dto.placeOfSupply}`)}</NARRATION>
         <ALLLEDGERENTRIES.LIST><LEDGERNAME>${party}</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-${dto.grandTotal.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>
         <ALLLEDGERENTRIES.LIST><LEDGERNAME>B2B Sales Account</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${dto.taxableAmount.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>
@@ -2481,15 +3229,17 @@ export class InvoicesService {
       // 2) Tally Receipt + TDS Vouchers for recorded settlements
       for (const p of dto.payments || []) {
         const pDate = tallyDate(p.paymentDate || p.recordedAt);
-        const bankLedger =
+        const bankLedgerRaw =
           p.paymentMode === 'Cash'
             ? 'Cash-in-Hand'
             : `Bank Receipt (${p.paymentMode})`;
+        bankLedgersSeen.add(bankLedgerRaw);
         const tdsEntry =
           p.tdsDeducted > 0
             ? `<ALLLEDGERENTRIES.LIST><LEDGERNAME>TDS Receivable (Buyer Deducted)</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-${p.tdsDeducted.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>`
             : '';
 
+        receiptVoucherCount += 1;
         vouchers.push(`
     <TALLYMESSAGE xmlns:UDF="TallyUDF">
       <VOUCHER VCHTYPE="Receipt" ACTION="Create">
@@ -2499,9 +3249,51 @@ export class InvoicesService {
         <PARTYLEDGERNAME>${party}</PARTYLEDGERNAME>
         <NARRATION>${xmlEscape(`Receipt against ${dto.invoiceNumber} · ${p.paymentMode} ${p.utrOrChequeNo || ''}`)}</NARRATION>
         <ALLLEDGERENTRIES.LIST><LEDGERNAME>${party}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${p.totalSettled.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>
-        <ALLLEDGERENTRIES.LIST><LEDGERNAME>${xmlEscape(bankLedger)}</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-${p.amountPaid.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>${xmlEscape(bankLedgerRaw)}</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-${p.amountPaid.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>
         ${tdsEntry}
       </VOUCHER>
+    </TALLYMESSAGE>`);
+      }
+    }
+
+    if (includeMasters && docs.length > 0) {
+      // Party Ledgers under Sundry Debtors
+      for (const [partyName, meta] of partyLedgersSeen.entries()) {
+        const isReg = InvoicesService.GSTIN_REGEX.test(meta.gstin);
+        masterMessages.push(`
+    <TALLYMESSAGE xmlns:UDF="TallyUDF">
+      <LEDGER NAME="${xmlEscape(partyName)}" ACTION="Create">
+        <NAME.LIST><NAME>${xmlEscape(partyName)}</NAME></NAME.LIST>
+        <PARENT>Sundry Debtors</PARENT>
+        <ISBILLWISEON>Yes</ISBILLWISEON>
+        <GSTREGISTRATIONTYPE>${isReg ? 'Regular' : 'Unregistered/Consumer'}</GSTREGISTRATIONTYPE>
+        ${isReg ? `<PARTYGSTIN>${xmlEscape(meta.gstin)}</PARTYGSTIN>` : ''}
+        <LEDSTATENAME>${xmlEscape(meta.pos || 'Uttar Pradesh')}</LEDSTATENAME>
+      </LEDGER>
+    </TALLYMESSAGE>`);
+      }
+
+      // Core Accounting & GST Ledgers
+      const systemLedgers: Array<{ name: string; parent: string; taxDuty?: string }> = [
+        { name: 'B2B Sales Account', parent: 'Sales Accounts' },
+        { name: 'Output CGST', parent: 'Duties & Taxes', taxDuty: 'CGST' },
+        { name: 'Output SGST', parent: 'Duties & Taxes', taxDuty: 'SGST' },
+        { name: 'Output IGST', parent: 'Duties & Taxes', taxDuty: 'IGST' },
+        { name: 'TDS Receivable (Buyer Deducted)', parent: 'Current Assets' },
+      ];
+      for (const b of bankLedgersSeen) {
+        if (b !== 'Cash-in-Hand') {
+          systemLedgers.push({ name: b, parent: 'Bank Accounts' });
+        }
+      }
+      for (const sys of systemLedgers) {
+        masterMessages.push(`
+    <TALLYMESSAGE xmlns:UDF="TallyUDF">
+      <LEDGER NAME="${xmlEscape(sys.name)}" ACTION="Create">
+        <NAME.LIST><NAME>${xmlEscape(sys.name)}</NAME></NAME.LIST>
+        <PARENT>${xmlEscape(sys.parent)}</PARENT>
+        ${sys.taxDuty ? `<TAXTYPE>GST</TAXTYPE><GSTDUTYHEAD>${sys.taxDuty}</GSTDUTYHEAD>` : ''}
+      </LEDGER>
     </TALLYMESSAGE>`);
       }
     }
@@ -2511,14 +3303,15 @@ export class InvoicesService {
   <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
   <BODY>
     <IMPORTDATA>
-      <REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME></REQUESTDESC>
-      <REQUESTDATA>${vouchers.join('\n')}
+      <REQUESTDESC><REPORTNAME>All Masters</REPORTNAME></REQUESTDESC>
+      <REQUESTDATA>${masterMessages.join('\n')}${vouchers.join('\n')}
       </REQUESTDATA>
     </IMPORTDATA>
   </BODY>
 </ENVELOPE>`;
 
-    const filename = `Leadsetu-TallyPrime-Vouchers-${new Date().toISOString().slice(0, 10)}.xml`;
+    const periodTag = month === 'all' ? new Date().toISOString().slice(0, 10) : month;
+    const filename = `Leadsetu-TallyPrime-Complete-${periodTag}.xml`;
 
     await this.auditService?.record({
       tenantId: auth.tenantId,
@@ -2528,12 +3321,16 @@ export class InvoicesService {
       entityType: 'invoice',
       entityId: auth.tenantId,
       entityLabel: filename,
-      summary: `Exported TallyPrime XML (${docs.length} Sales + Receipt vouchers)`,
+      summary: `Exported TallyPrime XML (${masterMessages.length} Masters + ${vouchers.length} Vouchers)`,
     });
 
     return {
       filename,
+      month,
+      ledgerMasterCount: masterMessages.length,
       voucherCount: vouchers.length,
+      salesVoucherCount,
+      receiptVoucherCount,
       xml,
     };
   }
