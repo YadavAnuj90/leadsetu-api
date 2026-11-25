@@ -43,6 +43,9 @@ export class Deal {
   @Prop({ trim: true, default: '' })
   contactPhone!: string;
 
+  @Prop({ trim: true })
+  normalizedPhone?: string;
+
   @Prop({ trim: true, default: '' })
   contactEmail!: string;
 
@@ -113,3 +116,7 @@ export class Deal {
 }
 
 export const DealSchema = SchemaFactory.createForClass(Deal);
+DealSchema.index(
+  { tenantId: 1, normalizedPhone: 1 },
+  { unique: true, sparse: true },
+);

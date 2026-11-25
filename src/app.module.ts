@@ -28,6 +28,8 @@ import { EmailCrmModule } from './modules/email-crm/email-crm.module';
 import { PortalModule } from './modules/portal/portal.module';
 import { MetaCapiModule } from './modules/meta-capi/meta-capi.module';
 import { MarketplaceSyncModule } from './modules/marketplace-sync/marketplace-sync.module';
+import { MetaLeadsModule } from './modules/meta-leads/meta-leads.module';
+import { UniversalWebhooksModule } from './modules/universal-webhooks/universal-webhooks.module';
 
 @Module({
   imports: [
@@ -77,6 +79,8 @@ import { MarketplaceSyncModule } from './modules/marketplace-sync/marketplace-sy
     PortalModule,
     MetaCapiModule,
     MarketplaceSyncModule,
+    MetaLeadsModule,
+    UniversalWebhooksModule,
   ],
 })
 export class AppModule {}

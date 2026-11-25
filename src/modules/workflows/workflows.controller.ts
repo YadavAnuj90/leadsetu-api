@@ -20,7 +20,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { CreateWorkflowDto } from './dto/workflows.dto';
+import { CreateWorkflowDto, UpdateWorkflowDto } from './dto/workflows.dto';
 import { WorkflowsService } from './workflows.service';
 
 @ApiTags('9. AI Workflows & Automation')
@@ -32,7 +32,7 @@ export class WorkflowsController {
   @Get()
   @ApiOperation({
     summary:
-      'List all AI Workflows & IF-THIS-THEN-THAT automation rules with execution stats',
+      'List all Visual AI Workflows & WhatsApp Drip Sequences with execution stats',
   })
   @ApiQuery({
     name: 'search',
@@ -52,13 +52,11 @@ export class WorkflowsController {
       'invoice.overdue',
       'whatsapp.inbound',
     ],
-    description: 'Filter by event trigger type',
   })
   @ApiQuery({
     name: 'active',
     required: false,
     enum: ['all', 'true', 'false'],
-    description: 'Filter by active/paused status',
   })
   @ApiResponse({
     status: 200,
@@ -76,7 +74,7 @@ export class WorkflowsController {
   @Post()
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
-    summary: 'Create a new Zero-Code AI Sales Automation Workflow',
+    summary: 'Create a new Visual Trigger -> Condition -> Delay -> Action Workflow',
   })
   @ApiBody({ type: CreateWorkflowDto })
   @ApiResponse({ status: 201, description: 'Workflow created.' })
@@ -88,25 +86,25 @@ export class WorkflowsController {
     return this.workflowsService.create(auth, dto);
   }
 
+  @Patch(':id')
+  @ApiOperation({
+    summary: 'Update a Visual Workflow & its ordered Trigger/Condition/Delay/Action nodes',
+  })
+  @ApiBody({ type: UpdateWorkflowDto })
+  async update(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() dto: UpdateWorkflowDto,
+  ) {
+    const auth = await this.workflowsService.verifyAuth(authorization);
+    return this.workflowsService.updateWorkflow(auth, id, dto);
+  }
+
   @Post('ai-draft')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Convert natural-language English/Hinglish instruction into structured workflow trigger, conditions, action & WhatsApp template',
-    description: 'Uses SetuAI to generate a structured CRM automation rule ready for saving.',
-  })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      required: ['prompt'],
-      properties: {
-        prompt: {
-          type: 'string',
-          example: 'Auto-send GST brochure on WhatsApp when an IndiaMART lead in Noida arrives and nudge after 24h',
-        },
-        language: { type: 'string', enum: ['english', 'hinglish', 'hindi'], example: 'english' },
-      },
-    },
+      'Convert natural-language English/Hinglish instruction into structured visual workflow nodes & WhatsApp drip template',
   })
   async draftWithAi(
     @Headers('authorization') authorization: string | undefined,
@@ -116,16 +114,58 @@ export class WorkflowsController {
     return this.workflowsService.draftWithAi(auth, body || {});
   }
 
+  @Get(':id/enrollments')
+  @ApiOperation({
+    summary: 'List live lead drip enrollments & step-by-step execution status for a workflow',
+  })
+  async listEnrollments(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+  ) {
+    const auth = await this.workflowsService.verifyAuth(authorization);
+    return this.workflowsService.listWorkflowEnrollments(auth, id);
+  }
+
+  @Post(':id/simulate-lead')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Simulate a lead entering the Visual Workflow (optionally fast-forwarding Delay nodes to test all steps immediately)',
+  })
+  async simulateLead(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() body?: { forceAdvance?: boolean; forceSkipDelays?: boolean },
+  ) {
+    const auth = await this.workflowsService.verifyAuth(authorization);
+    return this.workflowsService.simulateLeadThroughWorkflow(auth, id, {
+      forceSkipDelays: body?.forceAdvance ?? body?.forceSkipDelays ?? true,
+    });
+  }
+
+  @Post('process-due-drips')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Process all due multi-step WhatsApp drip & SLA escalation enrollments for the current workspace',
+  })
+  async processDueDrips(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body?: { workflowId?: string; forceAdvance?: boolean; forceSkipDelays?: boolean },
+  ) {
+    const auth = await this.workflowsService.verifyAuth(authorization);
+    return this.workflowsService.processDueEnrollments({
+      tenantId: auth.tenantId,
+      workflowId: body?.workflowId,
+      forceSkipDelays: body?.forceAdvance ?? body?.forceSkipDelays,
+    });
+  }
+
   @Patch(':id/toggle')
   @ApiOperation({
     summary: 'Toggle a workflow between Active and Paused',
   })
-  @ApiParam({
-    name: 'id',
-    description: 'Unique workflow record ID',
-    example: 'wf_01a2b3c4d5e6',
-  })
-  @ApiResponse({ status: 200, description: 'Workflow status toggled.' })
+  @ApiParam({ name: 'id', description: 'Unique workflow record ID' })
   async toggle(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,
@@ -152,14 +192,9 @@ export class WorkflowsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Execute / Test a workflow immediately (creates a real follow-up task & logs execution)',
+      'Execute / Test a workflow immediately (runs visual steps or creates a follow-up task & logs execution)',
   })
-  @ApiParam({
-    name: 'id',
-    description: 'Unique workflow record ID',
-    example: 'wf_01a2b3c4d5e6',
-  })
-  @ApiResponse({ status: 200, description: 'Workflow executed.' })
+  @ApiParam({ name: 'id', description: 'Unique workflow record ID' })
   async execute(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,
@@ -170,14 +205,9 @@ export class WorkflowsController {
 
   @Delete(':id')
   @ApiOperation({
-    summary: 'Delete an automation workflow',
+    summary: 'Delete an automation workflow and its drip enrollments',
   })
-  @ApiParam({
-    name: 'id',
-    description: 'Unique workflow record ID',
-    example: 'wf_01a2b3c4d5e6',
-  })
-  @ApiResponse({ status: 200, description: 'Workflow deleted.' })
+  @ApiParam({ name: 'id', description: 'Unique workflow record ID' })
   async remove(
     @Headers('authorization') authorization: string | undefined,
     @Param('id') id: string,

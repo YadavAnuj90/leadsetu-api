@@ -168,6 +168,9 @@ export class Contact {
   @Prop({ trim: true, default: '' })
   phone!: string;
 
+  @Prop({ trim: true })
+  normalizedPhone?: string;
+
   @Prop({ trim: true, lowercase: true, default: '' })
   email!: string;
 
@@ -239,6 +242,10 @@ export class Contact {
 }
 
 export const ContactSchema = SchemaFactory.createForClass(Contact);
+ContactSchema.index(
+  { tenantId: 1, normalizedPhone: 1 },
+  { unique: true, sparse: true },
+);
 
 @Injectable()
 export class ContactsService {

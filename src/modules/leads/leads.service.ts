@@ -561,6 +561,7 @@ export class LeadsService {
       speedToLeadSeconds:
         typeof doc.speedToLeadSeconds === 'number' ? doc.speedToLeadSeconds : -1,
       autoWhatsAppWelcomeSent: Boolean(doc.autoWhatsAppWelcomeSent),
+      metaLeadData: doc.metaLeadData || undefined,
       customFields: doc.customFields || {},
       activities: doc.activities || [],
       createdAt: raw.createdAt ? new Date(raw.createdAt).toISOString() : new Date().toISOString(),

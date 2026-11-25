@@ -17,10 +17,22 @@ export type LeadSource =
   | 'justdial'
   | 'tradeindia'
   | 'meta_ads'
+  | 'meta_lead_ads'
   | 'google_ads'
   | 'website'
   | 'referral'
   | 'manual';
+
+export interface MetaLeadData {
+  leadgenId: string;
+  pageId?: string;
+  pageName?: string;
+  formId?: string;
+  formName?: string;
+  adId?: string;
+  createdTime?: string;
+  rawFields?: Record<string, string>;
+}
 
 export interface LeadActivity {
   id: string;
@@ -54,6 +66,9 @@ export class Lead {
   @Prop({ trim: true, default: '' })
   phone!: string;
 
+  @Prop({ trim: true })
+  normalizedPhone?: string;
+
   @Prop({ trim: true, lowercase: true, default: '' })
   email!: string;
 
@@ -68,6 +83,7 @@ export class Lead {
       'justdial',
       'tradeindia',
       'meta_ads',
+      'meta_lead_ads',
       'google_ads',
       'website',
       'referral',
@@ -158,8 +174,19 @@ export class Lead {
   @Prop({ type: Boolean, default: false })
   autoWhatsAppWelcomeSent?: boolean;
 
+  @Prop({ type: Object })
+  metaLeadData?: MetaLeadData;
+
   @Prop({ type: Array, default: [] })
   activities!: LeadActivity[];
 }
 
 export const LeadSchema = SchemaFactory.createForClass(Lead);
+LeadSchema.index(
+  { tenantId: 1, 'metaLeadData.leadgenId': 1 },
+  { unique: true, sparse: true },
+);
+LeadSchema.index(
+  { tenantId: 1, normalizedPhone: 1 },
+  { unique: true, sparse: true },
+);

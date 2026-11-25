@@ -13,17 +13,29 @@ import {
   WorkflowSchema,
   WorkflowsService,
 } from './workflows.service';
+import {
+  WorkflowEnrollment,
+  WorkflowEnrollmentSchema,
+} from './schemas/workflow-enrollment.schema';
 
 export type { WorkflowDocument } from './workflows.service';
+export type { WorkflowEnrollmentDocument } from './schemas/workflow-enrollment.schema';
 export type {
   WorkflowTriggerType,
   WorkflowActionType,
+  WorkflowNodeKind,
+  WorkflowDelayUnit,
+  WorkflowConditionGuard,
+  WorkflowNodeActionKind,
+  WorkflowStepNodeDto,
 } from './dto/workflows.dto';
 export {
   Workflow,
   WorkflowSchema,
   WorkflowLogEntry,
   WorkflowLogEntrySchema,
+  WorkflowEnrollment,
+  WorkflowEnrollmentSchema,
   WorkflowsService,
   WorkflowsController,
   CreateWorkflowDto,
@@ -35,6 +47,7 @@ export {
     InboxModule,
     MongooseModule.forFeature([
       { name: Workflow.name, schema: WorkflowSchema },
+      { name: WorkflowEnrollment.name, schema: WorkflowEnrollmentSchema },
       { name: Lead.name, schema: LeadSchema },
     ]),
     JwtModule.registerAsync({
@@ -44,6 +57,7 @@ export {
         secret:
           config.get<string>('JWT_SECRET') ||
           'leadsetu_super_secret_access_key_2026_delhi_ncr',
+        signOptions: { expiresIn: '7d' },
       }),
     }),
   ],
