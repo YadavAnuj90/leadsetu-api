@@ -1,10 +1,11 @@
 import 'reflect-metadata';
-import type { RawBodyRequest } from '@nestjs/common';
+import { Logger, type RawBodyRequest } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { AppModule } from './app.module';
+import { createLeadsetuWinstonLogger } from './common/logger/winston-logger.config';
 import {
   convertOpenApiToPostmanCollection,
   sanitizeAndEnrichOpenApiDocument,
@@ -13,9 +14,12 @@ import {
 } from './swagger-postman.util';
 
 async function bootstrap() {
+  const winstonLogger = createLeadsetuWinstonLogger();
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     rawBody: true,
+    logger: winstonLogger,
   });
+  const bootLogger = new Logger('Bootstrap');
 
   // Allow uploading PDFs / certificates / brochures up to 10 MB via JSON payloads
   // while preserving req.rawBody for Meta X-Hub-Signature-256 verification.
@@ -154,9 +158,9 @@ async function bootstrap() {
   SwaggerModule.setup('v1/docs', app, document, swaggerUiOptions);
 
   await app.listen(port);
-  console.log(`🚀 Leadsetu API running on http://localhost:${port}/v1`);
-  console.log(`📘 Swagger API Docs live at http://localhost:${port}/docs`);
-  console.log(
+  bootLogger.log(`🚀 Leadsetu API running on http://localhost:${port}/v1`);
+  bootLogger.log(`📘 Swagger API Docs live at http://localhost:${port}/docs`);
+  bootLogger.log(
     `📮 Postman v2.1 Collection live at http://localhost:${port}/v1/docs-postman.json`,
   );
 }

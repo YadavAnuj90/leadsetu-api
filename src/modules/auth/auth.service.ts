@@ -223,6 +223,12 @@ export class AuthService {
         maskPhones: viewerMasked,
         twoFactorEnabled: Boolean(user.twoFactorEnabled),
         authProvider: user.authProvider || 'local',
+        availabilityStatus: user.availabilityStatus || 'available',
+        availableForLeads:
+          Boolean(user.isActive) && (user.availabilityStatus || 'available') === 'available',
+        shiftStart: user.shiftStart || '09:30',
+        shiftEnd: user.shiftEnd || '19:30',
+        leaveNote: user.leaveNote || '',
       },
       tenant: {
         id: tenant._id.toString(),
@@ -514,6 +520,12 @@ export class AuthService {
         maskPhones: viewerMasked,
         twoFactorEnabled: Boolean(user.twoFactorEnabled),
         authProvider: user.authProvider || 'local',
+        availabilityStatus: user.availabilityStatus || 'available',
+        availableForLeads:
+          Boolean(user.isActive) && (user.availabilityStatus || 'available') === 'available',
+        shiftStart: user.shiftStart || '09:30',
+        shiftEnd: user.shiftEnd || '19:30',
+        leaveNote: user.leaveNote || '',
         isImpersonation: Boolean(payload.isImpersonation),
         impersonatorEmail: payload.impersonatorEmail || '',
       },
@@ -775,7 +787,15 @@ export class AuthService {
 
   async updateSelfProfile(
     authHeader: string | undefined,
-    input: { name?: string; phone?: string; territory?: string },
+    input: {
+      name?: string;
+      phone?: string;
+      territory?: string;
+      availabilityStatus?: 'available' | 'away' | 'on_leave';
+      shiftStart?: string;
+      shiftEnd?: string;
+      leaveNote?: string;
+    },
   ) {
     const profile = await this.getProfileFromToken(authHeader);
     const user = await this.userModel.findById(profile.user.id).exec();
@@ -797,6 +817,23 @@ export class AuthService {
     }
     if (input.territory !== undefined) {
       user.territory = input.territory.trim();
+    }
+    if (
+      input.availabilityStatus === 'available' ||
+      input.availabilityStatus === 'away' ||
+      input.availabilityStatus === 'on_leave'
+    ) {
+      user.availabilityStatus = input.availabilityStatus;
+      user.availabilityUpdatedAt = new Date();
+    }
+    if (input.shiftStart !== undefined) {
+      user.shiftStart = input.shiftStart.trim() || '09:30';
+    }
+    if (input.shiftEnd !== undefined) {
+      user.shiftEnd = input.shiftEnd.trim() || '19:30';
+    }
+    if (input.leaveNote !== undefined) {
+      user.leaveNote = input.leaveNote.trim();
     }
     await user.save();
     return this.getProfileFromToken(authHeader);

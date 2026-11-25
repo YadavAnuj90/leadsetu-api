@@ -488,6 +488,17 @@ export class TeamService {
       territory: m.territory || '',
       monthlyTarget: target,
       maskPhones: Boolean(m.maskPhones),
+      twoFactorEnabled: Boolean(m.twoFactorEnabled),
+      sessionVersion: Number(m.sessionVersion || 1),
+      availabilityStatus: m.availabilityStatus || 'available',
+      availableForLeads:
+        m.isActive !== false && (m.availabilityStatus || 'available') === 'available',
+      shiftStart: m.shiftStart || '09:30',
+      shiftEnd: m.shiftEnd || '19:30',
+      leaveNote: m.leaveNote || '',
+      availabilityUpdatedAt: m.availabilityUpdatedAt
+        ? new Date(m.availabilityUpdatedAt).toISOString()
+        : null,
       aiDailyCallLimit: Math.max(0, Number(m.aiDailyCallLimit || 0)),
       aiCallsToday: m.aiCallsDayKey === todayKey ? Math.max(0, Number(m.aiCallsToday || 0)) : 0,
       featureAccess: normalizeUserFeatureAccess(m.featureAccess, m.role, workspaceLimits),
@@ -1176,6 +1187,298 @@ export class TeamService {
       data: reps,
     };
   }
+
+  /**
+   * Self or Admin update for Rep Shift / Availability ("available" | "away" | "on_leave").
+   * Never blocks CRM sign-in — instead tells Lead Routing & Workflows to skip off-duty reps.
+   */
+  async updateAvailability(
+    actor: Actor,
+    targetId: string | 'me',
+    dto: {
+      availabilityStatus?: 'available' | 'away' | 'on_leave';
+      shiftStart?: string;
+      shiftEnd?: string;
+      leaveNote?: string;
+    },
+  ) {
+    const isSelf =
+      targetId === 'me' || targetId === actor.user._id.toString();
+    const member = isSelf
+      ? actor.user
+      : await this.findMember(actor, targetId);
+
+    if (!isSelf) {
+      if (!this.canManageTeam(actor)) {
+        throw new ForbiddenException(
+          'Only Workspace Owners or Admins can update another rep’s shift availability.',
+        );
+      }
+      if (member.role === 'admin' && actor.user.role !== 'owner') {
+        throw new ForbiddenException(
+          'Only the workspace owner can modify an admin’s availability.',
+        );
+      }
+    }
+
+    const prevStatus = member.availabilityStatus || 'available';
+    if (
+      dto.availabilityStatus === 'available' ||
+      dto.availabilityStatus === 'away' ||
+      dto.availabilityStatus === 'on_leave'
+    ) {
+      member.availabilityStatus = dto.availabilityStatus;
+      member.availabilityUpdatedAt = new Date();
+    }
+    if (dto.shiftStart !== undefined) {
+      member.shiftStart = String(dto.shiftStart).trim() || '09:30';
+    }
+    if (dto.shiftEnd !== undefined) {
+      member.shiftEnd = String(dto.shiftEnd).trim() || '19:30';
+    }
+    if (dto.leaveNote !== undefined) {
+      member.leaveNote = String(dto.leaveNote).trim();
+    }
+
+    await member.save();
+
+    await this.auditService?.record({
+      tenantId: actor.tenant._id.toString(),
+      actorId: actor.user._id.toString(),
+      actorName: actor.user.name,
+      actorEmail: actor.user.email,
+      actorUserCode: actor.user.userCode,
+      actorRole: actor.user.role,
+      action: 'team.availability_updated',
+      entityType: 'team',
+      entityId: member._id.toString(),
+      entityLabel: `${member.name} (UID #${member.userCode})`,
+      summary: `Availability for ${member.name}: ${prevStatus.toUpperCase()} -> ${(member.availabilityStatus || 'available').toUpperCase()} (Shift ${member.shiftStart}–${member.shiftEnd})${member.leaveNote ? ` · "${member.leaveNote}"` : ''}`,
+    });
+
+    const [perfMap, workspaceLimits] = await Promise.all([
+      this.getPerformance(actor.tenant._id as Types.ObjectId),
+      Promise.resolve(this.getWorkspaceFeatureLimits(actor.tenant)),
+    ]);
+
+    return this.toMemberDto(
+      member,
+      perfMap.get(member._id.toString()),
+      workspaceLimits,
+    );
+  }
+
+  /**
+   * User 360° Scorecard & Security Audit Drawer payload:
+   * aggregates lastLoginAt, 2FA status, AI quota usage, open leads/deals/tasks/tickets,
+   * SLA response speed, call metrics, and recent audit events for that member.
+   */
+  async getMemberScorecard(actor: Actor, id: string) {
+    const member = await this.findMember(actor, id);
+    if (!this.canManageTeam(actor) && !member._id.equals(actor.user._id)) {
+      throw new ForbiddenException(
+        'Only Workspace Owners or Admins can inspect member 360° scorecards.',
+      );
+    }
+
+    const tenantId = actor.tenant._id as Types.ObjectId;
+    const memberId = member._id as Types.ObjectId;
+    const db = this.userModel.db;
+    const workspaceLimits = this.getWorkspaceFeatureLimits(actor.tenant);
+
+    const [
+      perfMap,
+      openLeadsCount,
+      newUncontactedLeadsCount,
+      pendingTasksCount,
+      openTicketsCount,
+      callStatsRows,
+      recentLeadsForSla,
+      recentAuditEvents,
+    ] = await Promise.all([
+      this.getPerformance(tenantId),
+      db.collection('leads').countDocuments({
+        tenantId,
+        ownerId: memberId,
+        status: { $nin: ['converted', 'lost'] },
+      }),
+      db.collection('leads').countDocuments({
+        tenantId,
+        ownerId: memberId,
+        status: 'new',
+      }),
+      db
+        .collection('tasks')
+        .countDocuments({ tenantId, ownerId: memberId, status: { $ne: 'done' } })
+        .catch(() => 0),
+      db
+        .collection('tickets')
+        .countDocuments({
+          tenantId,
+          $or: [{ ownerId: memberId }, { assignedToName: member.name }],
+          status: { $nin: ['resolved', 'closed'] },
+        })
+        .catch(() => 0),
+      db
+        .collection('call_logs')
+        .aggregate<{
+          _id: null;
+          totalCalls: number;
+          answeredCalls: number;
+          missedCalls: number;
+          totalDurationSec: number;
+        }>([
+          { $match: { tenantId, callerId: memberId } },
+          {
+            $group: {
+              _id: null,
+              totalCalls: { $sum: 1 },
+              answeredCalls: {
+                $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] },
+              },
+              missedCalls: {
+                $sum: { $cond: [{ $eq: ['$status', 'missed'] }, 1, 0] },
+              },
+              totalDurationSec: { $sum: { $ifNull: ['$durationSeconds', 0] } },
+            },
+          },
+        ])
+        .toArray()
+        .catch(() => []),
+      db
+        .collection('leads')
+        .find({ tenantId, ownerId: memberId })
+        .project({ createdAt: 1, status: 1, activities: 1 })
+        .sort({ createdAt: -1 })
+        .limit(25)
+        .toArray()
+        .catch(() => []),
+      db
+        .collection('audit_logs')
+        .find({
+          tenantId,
+          $or: [
+            { actorId: memberId.toString() },
+            { entityId: memberId.toString() },
+          ],
+        })
+        .sort({ createdAt: -1 })
+        .limit(15)
+        .toArray()
+        .catch(() => []),
+    ]);
+
+    // Estimate average first-response SLA speed (in minutes) across recent leads
+    let slaSampleCount = 0;
+    let totalResponseMins = 0;
+    for (const l of recentLeadsForSla) {
+      const createdMs = new Date(l.createdAt || 0).getTime();
+      const acts = Array.isArray(l.activities) ? l.activities : [];
+      const firstHumanAct = [...acts]
+        .reverse()
+        .find((a: { type?: string }) =>
+          a.type === 'call' || a.type === 'whatsapp' || a.type === 'status_change',
+        );
+      if (createdMs > 0 && firstHumanAct?.createdAt) {
+        const diffMin = Math.max(
+          1,
+          Math.round(
+            (new Date(firstHumanAct.createdAt).getTime() - createdMs) / 60_000,
+          ),
+        );
+        if (diffMin <= 1440) {
+          totalResponseMins += diffMin;
+          slaSampleCount += 1;
+        }
+      }
+    }
+    const avgSlaResponseMinutes =
+      slaSampleCount > 0 ? Math.round(totalResponseMins / slaSampleCount) : null;
+
+    const callStats = callStatsRows[0] || {
+      totalCalls: 0,
+      answeredCalls: 0,
+      missedCalls: 0,
+      totalDurationSec: 0,
+    };
+
+    const memberDto = this.toMemberDto(
+      member,
+      perfMap.get(memberId.toString()),
+      workspaceLimits,
+    );
+
+    return {
+      member: memberDto,
+      security: {
+        lastLoginAt: member.lastLoginAt
+          ? new Date(member.lastLoginAt).toISOString()
+          : null,
+        twoFactorEnabled: Boolean(member.twoFactorEnabled),
+        sessionVersion: Number(member.sessionVersion || 1),
+        maskPhones: Boolean(member.maskPhones),
+        authProvider: member.authProvider || 'local',
+        inviteStatus: member.inviteStatus || 'active',
+      },
+      workload: {
+        openLeadsCount,
+        newUncontactedLeadsCount,
+        pendingTasksCount,
+        openTicketsCount,
+        openPipelineInr: memberDto.performance.openPipeline,
+        wonDealsCount: memberDto.performance.wonDeals,
+        wonRevenueInr: memberDto.performance.wonRevenue,
+        avgSlaResponseMinutes,
+        calls: callStats,
+      },
+      recentAuditEvents: recentAuditEvents.map((ev) => ({
+        id: String(ev._id),
+        action: String(ev.action || ''),
+        entityType: String(ev.entityType || ''),
+        entityLabel: String(ev.entityLabel || ''),
+        summary: String(ev.summary || ''),
+        actorName: String(ev.actorName || ev.actorEmail || ''),
+        createdAt: ev.createdAt
+          ? new Date(ev.createdAt).toISOString()
+          : new Date().toISOString(),
+      })),
+    };
+  }
+
+  /**
+   * Increments `sessionVersion` and clears `refreshTokenHash` to force-revoke all active sessions
+   * for a compromised or offboarded member.
+   */
+  async revokeMemberSessions(actor: Actor, id: string) {
+    const member = await this.findMember(actor, id);
+    if (!member._id.equals(actor.user._id)) {
+      this.assertCanManageTarget(actor, member, 'revoke sessions for');
+    }
+
+    member.sessionVersion = Number(member.sessionVersion || 1) + 1;
+    member.refreshTokenHash = null;
+    await member.save();
+
+    await this.auditService?.record({
+      tenantId: actor.tenant._id.toString(),
+      actorId: actor.user._id.toString(),
+      actorName: actor.user.name,
+      actorEmail: actor.user.email,
+      actorUserCode: actor.user.userCode,
+      actorRole: actor.user.role,
+      action: 'security.sessions_revoked',
+      entityType: 'security',
+      entityId: member._id.toString(),
+      entityLabel: `${member.name} (UID #${member.userCode})`,
+      summary: `Force-revoked all active sessions (sessionVersion -> ${member.sessionVersion}) for ${member.name}`,
+    });
+
+    return {
+      success: true,
+      userId: member._id.toString(),
+      sessionVersion: member.sessionVersion,
+    };
+  }
 }
 
 // ─── Controller ──────────────────────────────────────────────────────────────
@@ -1245,11 +1548,77 @@ export class TeamController {
     return this.teamService.updateCommissionPolicy(actor, dto);
   }
 
+  @Patch('me/availability')
+  @ApiOperation({
+    summary:
+      'Update signed-in rep availability ("available" | "away" | "on_leave") and shift window without blocking login',
+  })
+  async updateMyAvailability(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    dto: {
+      availabilityStatus?: 'available' | 'away' | 'on_leave';
+      shiftStart?: string;
+      shiftEnd?: string;
+      leaveNote?: string;
+    },
+  ) {
+    const actor = await this.teamService.getActor(authorization);
+    return this.teamService.updateAvailability(actor, 'me', dto || {});
+  }
+
   @Get('my-team')
   @ApiOperation({ summary: 'Sales Manager view of reps in their territory with pipeline & target progress' })
   async getMyTeam(@Headers('authorization') authorization?: string) {
     const actor = await this.teamService.getActor(authorization);
     return this.teamService.getMyTeam(actor);
+  }
+
+  @Get(':id/scorecard')
+  @ApiOperation({
+    summary:
+      'Get User 360° Scorecard & Security Audit summary (lastLoginAt, 2FA, AI quota, workload, SLA speed & recent audit logs)',
+  })
+  async getScorecard(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+  ) {
+    const actor = await this.teamService.getActor(authorization);
+    return this.teamService.getMemberScorecard(actor, id);
+  }
+
+  @Patch(':id/availability')
+  @ApiOperation({
+    summary:
+      'Update a member availability status ("available" | "away" | "on_leave") & shift schedule (synced with Lead Routing)',
+  })
+  async setMemberAvailability(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body()
+    dto: {
+      availabilityStatus?: 'available' | 'away' | 'on_leave';
+      shiftStart?: string;
+      shiftEnd?: string;
+      leaveNote?: string;
+    },
+  ) {
+    const actor = await this.teamService.getActor(authorization);
+    return this.teamService.updateAvailability(actor, id, dto || {});
+  }
+
+  @Post(':id/revoke-sessions')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Force sign-out a team member across all devices by incrementing sessionVersion & clearing refresh tokens',
+  })
+  async revokeSessions(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+  ) {
+    const actor = await this.teamService.getActor(authorization);
+    return this.teamService.revokeMemberSessions(actor, id);
   }
 
   @Patch(':id')

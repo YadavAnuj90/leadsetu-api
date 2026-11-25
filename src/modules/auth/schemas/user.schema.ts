@@ -145,6 +145,26 @@ export class User {
 
   @Prop({ type: [String], default: [] })
   twoFactorBackupCodesHashes?: string[];
+
+  /** Rep shift & lead-routing availability status (does not block CRM sign-in). */
+  @Prop({
+    type: String,
+    default: 'available',
+    enum: ['available', 'away', 'on_leave'],
+  })
+  availabilityStatus?: 'available' | 'away' | 'on_leave';
+
+  @Prop({ type: String, trim: true, default: '09:30' })
+  shiftStart?: string;
+
+  @Prop({ type: String, trim: true, default: '19:30' })
+  shiftEnd?: string;
+
+  @Prop({ type: String, trim: true, default: '' })
+  leaveNote?: string;
+
+  @Prop({ type: Date, default: null })
+  availabilityUpdatedAt?: Date | null;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

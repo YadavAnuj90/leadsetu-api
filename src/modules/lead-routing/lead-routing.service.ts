@@ -49,6 +49,11 @@ export interface RepRuntimeCandidate {
   role: string;
   userCode: string;
   eligible: boolean;
+  availabilityStatus: 'available' | 'away' | 'on_leave';
+  availableForLeads: boolean;
+  shiftStart: string;
+  shiftEnd: string;
+  leaveNote: string;
   dailyCap: number;
   territories: string[];
   openLeadsCount: number;
@@ -196,6 +201,10 @@ export class LeadRoutingService {
       const defaultEligible = hasSalesSpecialists
         ? u.role === 'manager' || u.role === 'agent'
         : true;
+      const availabilityStatus =
+        u.availabilityStatus === 'away' || u.availabilityStatus === 'on_leave'
+          ? u.availabilityStatus
+          : 'available';
       return {
         userId: uid,
         name: u.name,
@@ -203,6 +212,11 @@ export class LeadRoutingService {
         role: u.role,
         userCode: u.userCode || '',
         eligible: saved ? Boolean(saved.eligible) : defaultEligible,
+        availabilityStatus,
+        availableForLeads: availabilityStatus === 'available',
+        shiftStart: u.shiftStart || '09:30',
+        shiftEnd: u.shiftEnd || '19:30',
+        leaveNote: u.leaveNote || '',
         dailyCap:
           saved && saved.dailyCap !== undefined
             ? Number(saved.dailyCap)
@@ -346,7 +360,13 @@ export class LeadRoutingService {
     const source = String(input.source || 'website').trim().toLowerCase();
     const estValue = Number(input.estimatedValue || 0) || 0;
 
-    let pool = reps.filter((r) => r.eligible);
+    let pool = reps.filter((r) => r.eligible && r.availableForLeads);
+    if (pool.length === 0) {
+      pool = reps.filter((r) => r.eligible);
+    }
+    if (pool.length === 0) {
+      pool = reps.filter((r) => r.availableForLeads);
+    }
     if (pool.length === 0) {
       pool = reps;
     }

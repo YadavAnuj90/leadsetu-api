@@ -1,6 +1,17 @@
-import { Module } from '@nestjs/common';
+import {
+  MiddlewareConsumer,
+  Module,
+  NestModule,
+} from '@nestjs/common';
+import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
+import { WinstonModule } from 'nest-winston';
+import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+import { createLeadsetuWinstonOptions } from './common/logger/winston-logger.config';
+import { HttpLoggingInterceptor } from './common/logger/http-logging.interceptor';
+import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
+import { HealthModule } from './modules/health/health.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { LeadsModule } from './modules/leads/leads.module';
 import { DealsModule } from './modules/deals/deals.module';
@@ -30,6 +41,7 @@ import { MetaCapiModule } from './modules/meta-capi/meta-capi.module';
 import { MarketplaceSyncModule } from './modules/marketplace-sync/marketplace-sync.module';
 import { MetaLeadsModule } from './modules/meta-leads/meta-leads.module';
 import { UniversalWebhooksModule } from './modules/universal-webhooks/universal-webhooks.module';
+import { TimelineModule } from './modules/timeline/timeline.module';
 
 @Module({
   imports: [
@@ -37,6 +49,7 @@ import { UniversalWebhooksModule } from './modules/universal-webhooks/universal-
       isGlobal: true,
       envFilePath: ['.env', '.env.local'],
     }),
+    WinstonModule.forRoot(createLeadsetuWinstonOptions()),
     MongooseModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -81,6 +94,22 @@ import { UniversalWebhooksModule } from './modules/universal-webhooks/universal-
     MarketplaceSyncModule,
     MetaLeadsModule,
     UniversalWebhooksModule,
+    TimelineModule,
+    HealthModule,
+  ],
+  providers: [
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: HttpLoggingInterceptor,
+    },
+    {
+      provide: APP_FILTER,
+      useClass: AllExceptionsFilter,
+    },
   ],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(RequestIdMiddleware).forRoutes('*');
+  }
+}

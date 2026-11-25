@@ -758,14 +758,21 @@ export class WorkflowsService implements OnModuleInit, OnModuleDestroy {
       .sort({ _id: 1 })
       .toArray();
 
-    let candidate =
-      users.find((u) => String(u._id) !== currentOwnerStr) || users[0];
+    const availableBackups = users.filter(
+      (u) =>
+        String(u._id) !== currentOwnerStr &&
+        u.availabilityStatus !== 'away' &&
+        u.availabilityStatus !== 'on_leave',
+    );
+    const anyBackups = users.filter((u) => String(u._id) !== currentOwnerStr);
+    const searchPool = availableBackups.length > 0 ? availableBackups : anyBackups;
+
+    let candidate = searchPool[0] || users[0];
 
     if (params.strategy === 'senior_closer') {
-      const senior = users.find(
+      const senior = searchPool.find(
         (u) =>
-          (u.role === 'admin' || u.role === 'owner' || u.role === 'manager') &&
-          String(u._id) !== currentOwnerStr,
+          u.role === 'admin' || u.role === 'owner' || u.role === 'manager',
       );
       if (senior) candidate = senior;
     }

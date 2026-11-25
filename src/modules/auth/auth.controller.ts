@@ -365,12 +365,25 @@ export class AuthController {
         name: { type: 'string', example: 'Anjali Yadav' },
         phone: { type: 'string', example: '+91 9811001122' },
         territory: { type: 'string', example: 'Noida Sector 62' },
+        availabilityStatus: { type: 'string', enum: ['available', 'away', 'on_leave'], example: 'available' },
+        shiftStart: { type: 'string', example: '09:30' },
+        shiftEnd: { type: 'string', example: '19:30' },
+        leaveNote: { type: 'string', example: 'Client visit until 3 PM' },
       },
     },
   })
   async updateProfile(
     @Headers('authorization') authorization: string | undefined,
-    @Body() body: { name?: string; phone?: string; territory?: string },
+    @Body()
+    body: {
+      name?: string;
+      phone?: string;
+      territory?: string;
+      availabilityStatus?: 'available' | 'away' | 'on_leave';
+      shiftStart?: string;
+      shiftEnd?: string;
+      leaveNote?: string;
+    },
   ) {
     return this.authService.updateSelfProfile(authorization, body);
   }

@@ -1,2 +1,25 @@
-﻿// Customer 360 timeline — all activities in one place
-// TODO: implement
+﻿import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { JwtModule } from '@nestjs/jwt';
+import { TimelineController } from './timeline.controller';
+import { TimelineService } from './timeline.service';
+
+@Module({
+  imports: [
+    ConfigModule,
+    JwtModule.registerAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        secret:
+          config.get<string>('JWT_SECRET') ||
+          'leadsetu_super_secret_access_key_2026_delhi_ncr',
+        signOptions: { expiresIn: '7d' },
+      }),
+    }),
+  ],
+  controllers: [TimelineController],
+  providers: [TimelineService],
+  exports: [TimelineService],
+})
+export class TimelineModule {}
