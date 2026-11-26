@@ -26,6 +26,7 @@ import {
   CreateLeadDto,
   LeadsQuery,
   LeadsService,
+  MergeLeadsDto,
   UpdateLeadDto,
 } from './leads.service';
 import { LeadActivity, LeadSource, LeadStatus } from './schemas/lead.schema';
@@ -231,18 +232,27 @@ export class LeadsController {
   @Post('bulk-import')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
-    summary: 'Bulk import & de-duplicate CSV lead rows with AI scoring',
+    summary: 'Bulk import & de-duplicate CSV/Excel lead rows with AI scoring',
     description:
-      'Imports up to 500 CSV rows, normalizes +91 Indian mobile numbers, de-duplicates matching phones/emails into timeline notes, and AI-scores new leads.',
+      'Imports up to 500 CSV/Excel rows, normalizes +91 Indian mobile numbers, supports skip/update duplicate strategies, custom fields, and optional lead routing.',
   })
   @ApiBody({
     schema: {
       type: 'object',
       required: ['rows'],
       properties: {
+        duplicateMode: {
+          type: 'string',
+          enum: ['update', 'skip'],
+          default: 'update',
+        },
+        autoRoute: {
+          type: 'boolean',
+          default: false,
+        },
         rows: {
           type: 'array',
-          description: 'Array of parsed CSV lead objects',
+          description: 'Array of parsed CSV/Excel lead objects',
           items: { type: 'object' },
           example: [{ name: 'Rajesh Sharma', company: 'RS Electricals', phone: '+91 9811001122', city: 'Noida', source: 'indiamart', estimatedValue: 250000 }],
         },
@@ -252,10 +262,44 @@ export class LeadsController {
   @ApiResponse({ status: 201, description: 'Bulk import completed.' })
   async bulkImport(
     @Headers('authorization') authorization: string | undefined,
-    @Body() body: { rows: CreateLeadSwaggerDto[] },
+    @Body()
+    body: {
+      rows: CreateLeadSwaggerDto[];
+      duplicateMode?: 'update' | 'skip';
+      autoRoute?: boolean;
+    },
   ) {
     const auth = await this.leadsService.verifyAuth(authorization);
-    return this.leadsService.bulkImport(auth, body?.rows ?? []);
+    return this.leadsService.bulkImport(auth, body?.rows ?? [], {
+      duplicateMode: body?.duplicateMode,
+      autoRoute: body?.autoRoute,
+    });
+  }
+
+  @Get('duplicates')
+  @ApiOperation({
+    summary: 'Detect duplicate lead clusters matching normalized phone (+91) or email',
+  })
+  @ApiResponse({ status: 200, description: 'Returns grouped duplicate lead clusters.' })
+  async findDuplicates(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.leadsService.verifyAuth(authorization);
+    return this.leadsService.findDuplicates(auth);
+  }
+
+  @Post('merge')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Merge duplicate leads into a single master record preserving history & relations',
+  })
+  @ApiResponse({ status: 200, description: 'Duplicate leads merged into master record.' })
+  async mergeLeads(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: MergeLeadsDto,
+  ) {
+    const auth = await this.leadsService.verifyAuth(authorization);
+    return this.leadsService.mergeLeads(auth, body);
   }
 
   @Get('webhook/config')

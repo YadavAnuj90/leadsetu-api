@@ -372,6 +372,16 @@ export class BillingService {
     }
 
     const spec = PLAN_CATALOG[tenant.plan || 'growth'] || PLAN_CATALOG.growth;
+    const trialEndsAt = String(tenant.trialEndsAt || '').trim();
+    const expiresMs = trialEndsAt ? Date.parse(trialEndsAt) : NaN;
+    const hasValidExpiry = Boolean(trialEndsAt) && Number.isFinite(expiresMs);
+    const daysUntilExpiry = hasValidExpiry
+      ? Math.ceil((expiresMs - Date.now()) / 86400000)
+      : null;
+    const planExpired =
+      !tenant.isPlatformHq &&
+      (tenant.status === 'suspended' ||
+        (hasValidExpiry && Date.now() > expiresMs));
     const [activeSeats, totalSeats] = await Promise.all([
       this.userModel
         .countDocuments({
@@ -403,6 +413,9 @@ export class BillingService {
         phone: tenant.phone || '',
         email: tenant.email || '',
         address: tenant.address || '',
+        trialEndsAt,
+        planExpired,
+        daysUntilExpiry,
         subscriptionInvoices: tenant.subscriptionInvoices || [],
       },
       usage: {
@@ -1255,9 +1268,48 @@ export class BillingService {
       tenant.quotas = currentQuotas;
       tenant.markModified('quotas');
     } else {
+      const prevPlan = tenant.plan;
+      let matrixSpec =
+        DEFAULT_PLAN_MATRIX[order.plan] || DEFAULT_PLAN_MATRIX.growth;
+      try {
+        if (this.platformConfigModel) {
+          const cfg = await this.platformConfigModel
+            .findOne({ key: 'global' })
+            .lean()
+            .exec();
+          if (cfg?.planMatrix?.[order.plan]) {
+            matrixSpec = cfg.planMatrix[order.plan];
+          }
+        }
+      } catch {
+        // fallback to DEFAULT_PLAN_MATRIX
+      }
+
       tenant.plan = order.plan;
       tenant.status = 'active';
       tenant.trialEndsAt = periodEndDate.toISOString();
+      tenant.lastExpiryReminderDate = '';
+
+      // Single active plan rule: switching/renewing strictly replaces quotas with the new plan's limits
+      // so previous plan benefits/limits no longer remain active.
+      tenant.quotas = {
+        maxMonthlyAiCalls: matrixSpec.maxMonthlyAiCalls,
+        maxMonthlyWhatsapp: matrixSpec.maxMonthlyWhatsapp,
+        aiCallsUsed: 0,
+        whatsappUsed: 0,
+        maxStorageMb: matrixSpec.maxStorageMb,
+        aiCostInr: 0,
+        whatsappCostInr: 0,
+        addonAiCalls: 0,
+        addonWhatsapp: 0,
+        lastMeterResetAt: now.toISOString(),
+      };
+      tenant.markModified('quotas');
+
+      if (prevPlan !== order.plan) {
+        tenant.seatLimitOverride = null;
+      }
+
       tenant.subscriptionLifecycle = {
         autoRenew: true,
         cancelAtPeriodEnd: false,

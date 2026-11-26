@@ -3,11 +3,13 @@ import {
   Module,
   NestModule,
 } from '@nestjs/common';
-import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { JwtModule } from '@nestjs/jwt';
 import { MongooseModule } from '@nestjs/mongoose';
 import { WinstonModule } from 'nest-winston';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+import { PlanExpiryGuard } from './common/guards/plan-expiry.guard';
 import { createLeadsetuWinstonOptions } from './common/logger/winston-logger.config';
 import { HttpLoggingInterceptor } from './common/logger/http-logging.interceptor';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
@@ -65,6 +67,15 @@ import { TimelineModule } from './modules/timeline/timeline.module';
         };
       },
     }),
+    JwtModule.registerAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        secret:
+          config.get<string>('JWT_SECRET') ||
+          'leadsetu_super_secret_access_key_2026_delhi_ncr',
+      }),
+    }),
     AiBridgeModule,
     AuditModule,
     AuthModule,
@@ -98,6 +109,10 @@ import { TimelineModule } from './modules/timeline/timeline.module';
     HealthModule,
   ],
   providers: [
+    {
+      provide: APP_GUARD,
+      useClass: PlanExpiryGuard,
+    },
     {
       provide: APP_INTERCEPTOR,
       useClass: HttpLoggingInterceptor,

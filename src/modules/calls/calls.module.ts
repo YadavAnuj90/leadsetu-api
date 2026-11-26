@@ -11,6 +11,7 @@ import { Lead, LeadSchema } from '../leads/schemas/lead.schema';
 import { TaskItem, TaskItemSchema } from '../tasks/tasks.service';
 import { Ticket, TicketSchema } from '../tickets/tickets.service';
 import { InboxModule } from '../inbox/inbox.module';
+import { AiBridgeModule } from '../ai-bridge/ai-bridge.module';
 import { CallsController } from './calls.controller';
 import { CallsGateway } from './calls.gateway';
 import { CallsService } from './calls.service';
@@ -25,6 +26,7 @@ import {
     ConfigModule,
     AuditModule,
     InboxModule,
+    AiBridgeModule,
     MongooseModule.forFeature([
       { name: CallLog.name, schema: CallLogSchema },
       { name: CallTelemetrySample.name, schema: CallTelemetrySampleSchema },

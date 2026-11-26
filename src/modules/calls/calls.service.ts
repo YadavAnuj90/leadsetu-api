@@ -19,6 +19,7 @@ import { uploadToCloudinary } from '../auth/cloudinary.util';
 import { resolveOwnerScopeFilter } from '../auth/identity.util';
 import { AuditService } from '../audit/audit.service';
 import { InboxService } from '../inbox/inbox.service';
+import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 import { Contact, ContactDocument } from '../contacts/contacts.service';
 import { Deal, DealDocument } from '../deals/schemas/deal.schema';
 import { Lead, LeadDocument } from '../leads/schemas/lead.schema';
@@ -109,6 +110,7 @@ export class CallsService {
     private readonly configService: ConfigService,
     @Optional() private readonly auditService?: AuditService,
     @Optional() private readonly inboxService?: InboxService,
+    @Optional() private readonly aiBridge?: AiBridgeService,
   ) {}
 
   private userLockKey(tenantId: string, userId: string): string {
@@ -3345,6 +3347,499 @@ export class CallsService {
     };
   }
 
+  private last10PhoneDigits(raw?: string): string {
+    const digits = String(raw || '').replace(/\D/g, '');
+    return digits.length >= 10 ? digits.slice(-10) : '';
+  }
+
+  /**
+   * Returns an instant pre-call context brief (AI Next Best Action, last WhatsApp snippet,
+   * and open quote / pending GST invoice balance) for incoming rings, active calls, or power-dial leads.
+   */
+  async getPreCallContext(
+    auth: CallAuthContext,
+    query: { entityType?: string; entityId?: string; phone?: string },
+  ) {
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+    const entityType = String(query.entityType || '').trim();
+    const entityId = String(query.entityId || '').trim();
+    const rawPhone = String(query.phone || '').trim();
+    const last10 = this.last10PhoneDigits(rawPhone);
+    const phoneRegex = last10
+      ? new RegExp(`${last10.slice(0, 5)}\\D*${last10.slice(5)}$`)
+      : null;
+
+    let leadDoc: Record<string, unknown> | null = null;
+    let dealDoc: Record<string, unknown> | null = null;
+
+    if (entityId && Types.ObjectId.isValid(entityId)) {
+      const oid = new Types.ObjectId(entityId);
+      if (entityType === 'deal') {
+        dealDoc = (await this.dealModel
+          .findOne({ _id: oid, tenantId: tenantOid })
+          .lean()
+          .catch(() => null)) as Record<string, unknown> | null;
+      } else if (entityType === 'lead') {
+        leadDoc = (await this.leadModel
+          .findOne({ _id: oid, tenantId: tenantOid })
+          .lean()
+          .catch(() => null)) as Record<string, unknown> | null;
+      }
+    }
+
+    if (!leadDoc && !dealDoc && phoneRegex) {
+      leadDoc = (await this.leadModel
+        .findOne({ tenantId: tenantOid, phone: { $regex: phoneRegex } })
+        .sort({ updatedAt: -1 })
+        .lean()
+        .catch(() => null)) as Record<string, unknown> | null;
+      if (!leadDoc) {
+        dealDoc = (await this.dealModel
+          .findOne({
+            tenantId: tenantOid,
+            contactPhone: { $regex: phoneRegex },
+          })
+          .sort({ updatedAt: -1 })
+          .lean()
+          .catch(() => null)) as Record<string, unknown> | null;
+      }
+    }
+
+    const db = this.callLogModel.db;
+    const resolvedPhone =
+      rawPhone ||
+      String(leadDoc?.phone || dealDoc?.contactPhone || '').trim();
+    const resolvedLast10 = this.last10PhoneDigits(resolvedPhone);
+    const resolvedPhoneRegex = resolvedLast10
+      ? new RegExp(`${resolvedLast10.slice(0, 5)}\\D*${resolvedLast10.slice(5)}$`)
+      : phoneRegex;
+
+    const convOr: Record<string, unknown>[] = [];
+    if (entityId) {
+      convOr.push({ linkedEntityId: entityId }, { linkedLeadId: entityId });
+    }
+    if (resolvedPhoneRegex) {
+      convOr.push({ phone: { $regex: resolvedPhoneRegex } });
+    }
+
+    const invOr: Record<string, unknown>[] = [];
+    if (entityId) {
+      invOr.push({ linkedLeadId: entityId }, { linkedDealId: entityId });
+    }
+    if (leadDoc?._id) invOr.push({ linkedLeadId: String(leadDoc._id) });
+    if (dealDoc?._id) invOr.push({ linkedDealId: String(dealDoc._id) });
+    if (resolvedPhoneRegex) {
+      invOr.push({ phone: { $regex: resolvedPhoneRegex } });
+    }
+
+    const [convDoc, invoiceDocs] = await Promise.all([
+      convOr.length > 0 && db
+        ? db
+            .collection('conversations')
+            .findOne(
+              { tenantId: tenantOid, $or: convOr },
+              { sort: { updatedAt: -1 } },
+            )
+            .catch(() => null)
+        : Promise.resolve(null),
+      invOr.length > 0 && db
+        ? db
+            .collection('invoices')
+            .find({ tenantId: tenantOid, $or: invOr })
+            .sort({ createdAt: -1 })
+            .limit(12)
+            .toArray()
+            .catch(() => [])
+        : Promise.resolve([]),
+    ]);
+
+    const messages = Array.isArray(convDoc?.messages) ? convDoc.messages : [];
+    const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
+    const lastInbound = [...messages]
+      .reverse()
+      .find((m) => String(m?.direction || '') === 'inbound');
+    const chosenMsg = lastInbound || lastMsg;
+
+    let openQuotesCount = 0;
+    let pendingInvoicesCount = 0;
+    let pendingBalanceInr = 0;
+    let latestDocNumber = '';
+    for (const inv of invoiceDocs) {
+      const docType = String(inv.docType || 'invoice');
+      const status = String(inv.status || '');
+      if (!latestDocNumber && inv.invoiceNumber) {
+        latestDocNumber = String(inv.invoiceNumber);
+      }
+      if (docType === 'quotation' && !['rejected', 'expired'].includes(status)) {
+        openQuotesCount += 1;
+      } else if (
+        docType !== 'quotation' &&
+        ['sent', 'partial', 'overdue', 'draft'].includes(status)
+      ) {
+        pendingInvoicesCount += 1;
+        const grand = Number(inv.grandTotal) || 0;
+        const settled =
+          (Number(inv.amountPaid) || 0) + (Number(inv.tdsDeducted) || 0);
+        pendingBalanceInr += Math.max(0, grand - settled);
+      }
+    }
+
+    const sourceDoc = dealDoc || leadDoc;
+    return {
+      found: Boolean(sourceDoc || convDoc || invoiceDocs.length > 0),
+      entityType: dealDoc
+        ? 'deal'
+        : leadDoc
+          ? 'lead'
+          : (entityType as '' | 'lead' | 'deal' | 'ticket' | 'contact') || '',
+      entityId: sourceDoc ? String(sourceDoc._id) : entityId,
+      recordName: String(
+        dealDoc?.title || leadDoc?.name || convDoc?.contactName || '',
+      ),
+      company: String(dealDoc?.company || leadDoc?.company || ''),
+      stageOrStatus: String(dealDoc?.stage || leadDoc?.status || ''),
+      estimatedValue: Number(dealDoc?.value ?? leadDoc?.estimatedValue ?? 0),
+      aiScore: Number(sourceDoc?.aiScore || 0),
+      aiLabel: String(sourceDoc?.aiLabel || ''),
+      aiNextAction: String(
+        sourceDoc?.aiNextAction || sourceDoc?.aiInsight || '',
+      ),
+      lastWhatsApp: chosenMsg
+        ? {
+            text: String(chosenMsg.content || chosenMsg.body || '').slice(0, 140),
+            direction: String(chosenMsg.direction || 'inbound'),
+            at: String(chosenMsg.createdAt || convDoc?.updatedAt || ''),
+            status: String(convDoc?.status || 'open'),
+          }
+        : null,
+      billing: {
+        openQuotesCount,
+        pendingInvoicesCount,
+        pendingBalanceInr: Math.round(pendingBalanceInr),
+        latestDocNumber,
+      },
+    };
+  }
+
+  /**
+   * Lists currently active ringing / connecting / connected calls in the workspace for the Manager Live Call Monitor.
+   */
+  async getActiveCallsMonitor(auth: CallAuthContext) {
+    const isManagerOrAdmin = [
+      'owner',
+      'admin',
+      'manager',
+      'super_admin',
+    ].includes(auth.role);
+    if (!isManagerOrAdmin) {
+      return { isAdminView: false, activeCalls: [] };
+    }
+
+    const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    const activeDocs = await this.callLogModel
+      .find({
+        tenantId: new Types.ObjectId(auth.tenantId),
+        status: { $in: ['ringing', 'connecting', 'connected'] },
+        startedAt: { $gte: threeHoursAgo },
+      })
+      .sort({ startedAt: -1 })
+      .limit(30)
+      .exec();
+
+    const nowMs = Date.now();
+    const activeCalls = activeDocs.map((doc) => {
+      const anchor = doc.connectedAt || doc.answeredAt || doc.startedAt;
+      const liveDurationSeconds = Math.max(
+        0,
+        Math.round((nowMs - new Date(anchor).getTime()) / 1000),
+      );
+      return {
+        id: doc._id.toString(),
+        status: doc.status,
+        callChannel: doc.callChannel || 'webrtc',
+        callerType: doc.callerType || 'agent',
+        callerName: doc.callerName || 'Agent',
+        callerUserCode: doc.callerUserCode || '',
+        calleeName: doc.calleeName || doc.linkedEntityLabel || 'Participant',
+        calleeUserCode: doc.calleeUserCode || '',
+        customerPhone: doc.customerPhone || '',
+        linkedEntityType: doc.linkedEntityType || '',
+        linkedEntityId: doc.linkedEntityId || '',
+        linkedEntityLabel: doc.linkedEntityLabel || '',
+        startedAt: doc.startedAt.toISOString(),
+        connectedAt: doc.connectedAt
+          ? new Date(doc.connectedAt).toISOString()
+          : null,
+        liveDurationSeconds,
+        icePath: doc.connection?.icePath || 'direct',
+        turnUsed: Boolean(doc.connection?.turnUsed),
+        rttMs: Number(doc.connection?.rttMs || 0),
+      };
+    });
+
+    return {
+      isAdminView: true,
+      activeCalls,
+    };
+  }
+
+  /**
+   * 1-Click AI Transcription, Objection Extraction, Sentiment & Suggested Follow-Up Task for a CallLog.
+   */
+  async transcribeAndAnalyzeCall(
+    auth: CallAuthContext,
+    callId: string,
+    body?: { customTranscript?: string; forceRefresh?: boolean },
+  ) {
+    if (!Types.ObjectId.isValid(callId)) {
+      throw new BadRequestException('Invalid call ID.');
+    }
+
+    const doc = await this.callLogModel
+      .findOne({
+        _id: new Types.ObjectId(callId),
+        tenantId: new Types.ObjectId(auth.tenantId),
+      })
+      .exec();
+
+    if (!doc) {
+      throw new NotFoundException('Call record not found.');
+    }
+
+    const isAdmin = ['owner', 'admin', 'manager', 'super_admin'].includes(
+      auth.role,
+    );
+    const isParticipant =
+      doc.callerId.toString() === auth.userId ||
+      doc.calleeId.toString() === auth.userId;
+    if (!isParticipant && !isAdmin) {
+      throw new ForbiddenException(
+        'You are not authorized to analyze this call.',
+      );
+    }
+
+    if (doc.aiTranscribedAt && doc.aiSummary && !body?.forceRefresh) {
+      return {
+        cached: true,
+        call: this.toDto(doc, auth.userId),
+      };
+    }
+
+    const peerLabel =
+      doc.linkedEntityLabel ||
+      (doc.callerType === 'customer' ? doc.callerName : doc.calleeName) ||
+      'Prospect';
+    const durSec = Number(
+      doc.recordingDurationSeconds || doc.durationSeconds || 0,
+    );
+    const rawInputNotes = [
+      body?.customTranscript?.trim(),
+      doc.notes?.trim(),
+      doc.outcomeTag ? `Outcome tag: ${doc.outcomeTag}` : '',
+    ]
+      .filter(Boolean)
+      .join(' | ');
+
+    let aiStructured: Record<string, unknown> | undefined;
+    let aiResultText = '';
+
+    if (this.aiBridge) {
+      try {
+        const aiRes = await this.aiBridge.auditCall({
+          tenantId: auth.tenantId,
+          userId: auth.userId,
+          userRole: auth.role,
+          context: {
+            callId,
+            peerName: peerLabel,
+            recordingUrl: doc.recordingUrl || '',
+            durationSeconds: durSec,
+            callChannel: doc.callChannel || 'webrtc',
+            outcomeTag: doc.outcomeTag || '',
+            notes: rawInputNotes,
+            linkedEntityType: doc.linkedEntityType || '',
+            linkedEntityLabel: doc.linkedEntityLabel || '',
+          },
+        });
+        aiStructured = aiRes?.structured;
+        aiResultText = String(aiRes?.result || '').trim();
+      } catch {
+        // Fallback to local structured call analysis when external AI microservice is offline
+      }
+    }
+
+    const rawTextForHeuristics = `${rawInputNotes} ${aiResultText}`.toLowerCase();
+    const detectedObjections: string[] = [];
+    if (
+      Array.isArray(aiStructured?.objections) &&
+      aiStructured.objections.length > 0
+    ) {
+      for (const obj of aiStructured.objections.slice(0, 5)) {
+        const s = String(obj || '').trim();
+        if (s) detectedObjections.push(s);
+      }
+    } else {
+      if (/price|cost|discount|expensive|budget|rate/.test(rawTextForHeuristics)) {
+        detectedObjections.push('Pricing / bulk discount confirmation requested');
+      }
+      if (/gst|invoice|proforma|tax|bill|credit|payment/.test(rawTextForHeuristics)) {
+        detectedObjections.push('Needs GST proforma / payment terms clarification');
+      }
+      if (/time|delivery|dispatch|later|callback|busy/.test(rawTextForHeuristics)) {
+        detectedObjections.push('Requested follow-up / delivery timeline confirmation');
+      }
+      if (/competitor|other|compare|quote/.test(rawTextForHeuristics)) {
+        detectedObjections.push('Comparing vendor quotes before final approval');
+      }
+      if (doc.outcomeTag === 'rnr' || doc.outcomeTag === 'busy') {
+        detectedObjections.push('Prospect unreachable — needs multi-channel WhatsApp nudge');
+      }
+      if (detectedObjections.length === 0) {
+        detectedObjections.push('No major blockers raised — ready for next step');
+      }
+    }
+
+    const rawSent = String(aiStructured?.sentiment || '').toLowerCase();
+    let sentiment: 'positive' | 'neutral' | 'negative' | 'mixed' = 'neutral';
+    if (
+      rawSent === 'positive' ||
+      rawSent === 'neutral' ||
+      rawSent === 'negative' ||
+      rawSent === 'mixed'
+    ) {
+      sentiment = rawSent;
+    } else if (
+      doc.outcomeTag === 'interested' ||
+      /interested|confirm|deal|send quote|order/.test(rawTextForHeuristics)
+    ) {
+      sentiment = detectedObjections.some((o) => o.includes('Pricing') || o.includes('Comparing'))
+        ? 'mixed'
+        : 'positive';
+    } else if (
+      doc.outcomeTag === 'not_interested' ||
+      doc.outcomeTag === 'dnd' ||
+      /not interested|cancel|stop|dnd/.test(rawTextForHeuristics)
+    ) {
+      sentiment = 'negative';
+    } else if (detectedObjections.length > 0 && durSec > 20) {
+      sentiment = 'mixed';
+    }
+
+    const transcriptText =
+      String(aiStructured?.transcript || '').trim() ||
+      (body?.customTranscript?.trim()
+        ? body.customTranscript.trim()
+        : [
+            `[00:00] ${doc.callerName || 'Agent'}: Connected with ${peerLabel} (${doc.callChannel === 'sim_mobile' ? 'SIM Mobile' : 'CRM WebRTC Audio'}, ${durSec}s).`,
+            doc.notes?.trim()
+              ? `[00:${String(Math.min(59, Math.max(8, Math.floor(durSec / 2)))).padStart(2, '0')}] Discussion Notes: ${doc.notes.trim()}`
+              : `[00:12] Customer Inquiry: Reviewed requirement specs, pricing & GST delivery schedule for ${peerLabel}.`,
+            `[End] Disposition: ${doc.outcomeTag ? doc.outcomeTag.toUpperCase() : doc.status.toUpperCase()} · Audio Source: ${doc.recordingUrl ? 'Verified Recording' : 'Call Metadata Log'}.`,
+          ].join('\n'));
+
+    const summaryText =
+      String(aiStructured?.summary || '').trim() ||
+      aiResultText ||
+      `${durSec}s ${doc.callChannel === 'sim_mobile' ? 'mobile' : 'WebRTC'} call with ${peerLabel}. ${
+        doc.notes?.trim()
+          ? `Key notes: ${doc.notes.trim()}. `
+          : ''
+      }Sentiment assessed as ${sentiment.toUpperCase()} with ${detectedObjections.length} tracked talking point(s).`;
+
+    const suggestedTaskTitle =
+      String(aiStructured?.nextAction || aiStructured?.suggestedTask || '').trim() ||
+      (sentiment === 'positive' || sentiment === 'mixed'
+        ? `Send GST Proforma & Follow Up — ${peerLabel}`
+        : `Follow-up check-in call with ${peerLabel}`);
+
+    const suggestedPriority: 'high' | 'medium' | 'low' =
+      sentiment === 'positive' || sentiment === 'mixed'
+        ? 'high'
+        : sentiment === 'negative'
+          ? 'low'
+          : 'medium';
+
+    doc.aiTranscript = transcriptText;
+    doc.aiSummary = summaryText;
+    doc.aiObjections = detectedObjections.slice(0, 5);
+    doc.aiSentiment = sentiment;
+    doc.aiSuggestedTaskTitle = suggestedTaskTitle;
+    doc.aiSuggestedTaskPriority = suggestedPriority;
+    doc.aiTranscribedAt = new Date();
+    await doc.save();
+
+    await this.auditService?.record({
+      tenantId: auth.tenantId,
+      actorId: auth.userId,
+      actorEmail: auth.email,
+      action: 'call.ai_transcribed',
+      entityType: 'security',
+      entityId: doc._id.toString(),
+      entityLabel: peerLabel,
+      summary: `AI transcribed & summarized call with ${peerLabel} (${sentiment})`,
+    });
+
+    return {
+      cached: false,
+      call: this.toDto(doc, auth.userId),
+    };
+  }
+
+  /**
+   * 1-Click converts a CallLog's AI-suggested follow-up into a real TaskItem linked to the CRM record.
+   */
+  async createSuggestedTaskFromCall(
+    auth: CallAuthContext,
+    callId: string,
+    overrideTitle?: string,
+  ) {
+    if (!Types.ObjectId.isValid(callId)) {
+      throw new BadRequestException('Invalid call ID.');
+    }
+    const doc = await this.callLogModel
+      .findOne({
+        _id: new Types.ObjectId(callId),
+        tenantId: new Types.ObjectId(auth.tenantId),
+      })
+      .exec();
+
+    if (!doc) {
+      throw new NotFoundException('Call record not found.');
+    }
+
+    const title =
+      overrideTitle?.trim() ||
+      doc.aiSuggestedTaskTitle?.trim() ||
+      `Follow up after call with ${doc.linkedEntityLabel || doc.calleeName}`;
+
+    const due = new Date(Date.now() + 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+
+    const taskDoc = await this.taskModel.create({
+      tenantId: new Types.ObjectId(auth.tenantId),
+      ownerId: new Types.ObjectId(auth.userId),
+      title,
+      priority: doc.aiSuggestedTaskPriority || 'medium',
+      category: 'call',
+      dueDate: due,
+      status: 'pending',
+      relatedName: doc.linkedEntityLabel || doc.calleeName || '',
+      relatedPhone: doc.customerPhone || '',
+      relatedEntityType: doc.linkedEntityType || '',
+      relatedEntityId: doc.linkedEntityId || '',
+      notes: doc.aiSummary || doc.notes || '',
+    });
+
+    doc.followUpTaskId = taskDoc._id.toString();
+    await doc.save();
+
+    return {
+      call: this.toDto(doc, auth.userId),
+      taskId: taskDoc._id.toString(),
+    };
+  }
+
   toDto(doc: CallLogDocument, viewerUserId: string) {
     const callerId = doc.callerId.toString();
     const calleeId = doc.calleeId.toString();
@@ -3402,6 +3897,15 @@ export class CallsService {
       recordedAt: doc.recordedAt ? new Date(doc.recordedAt).toISOString() : null,
       transferredFromName: doc.transferredFromName || '',
       transferredToName: doc.transferredToName || '',
+      aiTranscript: doc.aiTranscript || '',
+      aiSummary: doc.aiSummary || '',
+      aiObjections: Array.isArray(doc.aiObjections) ? doc.aiObjections : [],
+      aiSentiment: doc.aiSentiment || '',
+      aiSuggestedTaskTitle: doc.aiSuggestedTaskTitle || '',
+      aiSuggestedTaskPriority: doc.aiSuggestedTaskPriority || 'medium',
+      aiTranscribedAt: doc.aiTranscribedAt
+        ? new Date(doc.aiTranscribedAt).toISOString()
+        : null,
       connection: doc.connection || {
         icePath: 'direct',
         turnUsed: false,

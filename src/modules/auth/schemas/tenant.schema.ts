@@ -617,9 +617,13 @@ export class Tenant {
   @Prop({ type: Number, default: null })
   seatLimitOverride?: number | null;
 
-  /** ISO timestamp when 14-day / extended trial expires. */
+  /** ISO timestamp when 14-day / extended trial or current billing period expires. */
   @Prop({ trim: true, default: '' })
   trialEndsAt?: string;
+
+  /** Calendar date key (YYYY-MM-DD) when daily 7-day expiry reminder was last dispatched. */
+  @Prop({ trim: true, default: '' })
+  lastExpiryReminderDate?: string;
 
   /** Internal account note visible only in Leadsetu Super Admin panel. */
   @Prop({ trim: true, default: '' })

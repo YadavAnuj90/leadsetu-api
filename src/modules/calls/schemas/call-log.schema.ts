@@ -194,6 +194,31 @@ export class CallLog {
   @Prop({ trim: true, default: '' })
   transferredToName!: string;
 
+  @Prop({ trim: true, default: '' })
+  aiTranscript?: string;
+
+  @Prop({ trim: true, default: '' })
+  aiSummary?: string;
+
+  @Prop({ type: [String], default: [] })
+  aiObjections?: string[];
+
+  @Prop({
+    trim: true,
+    default: '',
+    enum: ['', 'positive', 'neutral', 'negative', 'mixed'],
+  })
+  aiSentiment?: 'positive' | 'neutral' | 'negative' | 'mixed' | '';
+
+  @Prop({ trim: true, default: '' })
+  aiSuggestedTaskTitle?: string;
+
+  @Prop({ trim: true, default: 'medium', enum: ['high', 'medium', 'low'] })
+  aiSuggestedTaskPriority?: 'high' | 'medium' | 'low';
+
+  @Prop({ type: Date, default: null })
+  aiTranscribedAt?: Date | null;
+
   @Prop({ type: CallConnectionSummarySchema, default: () => ({}) })
   connection!: CallConnectionSummary;
 }

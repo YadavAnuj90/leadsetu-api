@@ -8,6 +8,7 @@ import { InjectConnection } from '@nestjs/mongoose';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { Connection, Types } from 'mongoose';
+import { dispatchMentionNotifications } from '../../common/mentions/mention-notifications.util';
 
 export type TimelineEntityType = 'lead' | 'contact' | 'deal';
 
@@ -641,6 +642,28 @@ export class TimelineService {
     if (res.matchedCount === 0) {
       throw new NotFoundException(`${entityType} record not found.`);
     }
+
+    const targetDoc = await col
+      .findOne(
+        { _id: new Types.ObjectId(entityId) },
+        { projection: { name: 1, title: 1, company: 1 } },
+      )
+      .catch(() => null);
+    const label = String(
+      targetDoc?.name || targetDoc?.title || targetDoc?.company || entityType,
+    );
+
+    await dispatchMentionNotifications({
+      db,
+      tenantId: auth.tenantId,
+      authorUserId: auth.userId,
+      authorName: auth.name || 'Sales Desk',
+      entityType,
+      entityId,
+      entityLabel: label,
+      noteText: text,
+      activityId: entry.id,
+    }).catch(() => {});
 
     return this.getCustomer360Timeline(auth, entityType, entityId);
   }

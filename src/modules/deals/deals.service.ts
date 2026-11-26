@@ -24,6 +24,7 @@ import { PipelinesService } from '../pipelines/pipelines.service';
 import { DEFAULT_PIPELINE_STAGES } from '../pipelines/schemas/pipeline.schema';
 import { CustomFieldsService } from '../custom-fields/custom-fields.service';
 import { MetaCapiService } from '../meta-capi/meta-capi.service';
+import { dispatchMentionNotifications } from '../../common/mentions/mention-notifications.util';
 
 export interface CreateDealDto {
   title: string;
@@ -991,6 +992,21 @@ export class DealsService {
     };
     doc.activities = [activity, ...(doc.activities || [])];
     await doc.save();
+
+    if (this.dealModel.db?.db) {
+      await dispatchMentionNotifications({
+        db: this.dealModel.db.db,
+        tenantId: auth.tenantId,
+        authorUserId: auth.userId,
+        authorName: auth.email.split('@')[0],
+        entityType: 'deal',
+        entityId: doc._id.toString(),
+        entityLabel: `${doc.title}${doc.company ? ` (${doc.company})` : ''}`,
+        noteText: activity.description,
+        activityId: activity.id,
+      }).catch(() => {});
+    }
+
     const maskPhones = this.auditService
       ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
       : false;

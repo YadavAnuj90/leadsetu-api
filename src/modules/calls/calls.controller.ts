@@ -127,6 +127,37 @@ export class CallsController {
     return this.callsService.listLinkableCrmEntities(auth, q);
   }
 
+  @Get('context')
+  @ApiOperation({
+    summary:
+      'Fetch pre-call CRM context screen-pop (AI Next Action, last WhatsApp reply, open quote & pending GST balance)',
+  })
+  async getPreCallContext(
+    @Headers('authorization') authorization: string | undefined,
+    @Query('entityType') entityType?: string,
+    @Query('entityId') entityId?: string,
+    @Query('phone') phone?: string,
+  ) {
+    const auth = await this.callsService.verifyAuthHeader(authorization);
+    return this.callsService.getPreCallContext(auth, {
+      entityType,
+      entityId,
+      phone,
+    });
+  }
+
+  @Get('active')
+  @ApiOperation({
+    summary:
+      'Manager Live Call Monitor: list currently ringing, connecting, or active calls across the workspace',
+  })
+  async getActiveCallsMonitor(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.callsService.verifyAuthHeader(authorization);
+    return this.callsService.getActiveCallsMonitor(auth);
+  }
+
   @Post('share-link')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -329,6 +360,39 @@ export class CallsController {
   ) {
     const auth = await this.callsService.verifyAuthHeader(authorization);
     return this.callsService.saveCallRecording(auth, id, dto);
+  }
+
+  @Post(':id/ai-transcribe')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      '1-Click AI transcription, buyer objection extraction, sentiment analysis & follow-up task suggestion',
+  })
+  async aiTranscribeCall(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() body?: { customTranscript?: string; forceRefresh?: boolean },
+  ) {
+    const auth = await this.callsService.verifyAuthHeader(authorization);
+    return this.callsService.transcribeAndAnalyzeCall(auth, id, body);
+  }
+
+  @Post(':id/ai-create-task')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Create a follow-up task directly from AI call summary suggestion',
+  })
+  async aiCreateSuggestedTask(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() body?: { title?: string },
+  ) {
+    const auth = await this.callsService.verifyAuthHeader(authorization);
+    return this.callsService.createSuggestedTaskFromCall(
+      auth,
+      id,
+      body?.title,
+    );
   }
 
   @Post(':id/telemetry')

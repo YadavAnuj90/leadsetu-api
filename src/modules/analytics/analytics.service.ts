@@ -887,41 +887,150 @@ export class AnalyticsService {
     }
 
     const ownerScope = await resolveOwnerScopeFilter(db, auth);
-    const [hotLeads, pendingTasks, unpaidInvoices, openThreads, openTickets] =
-      await Promise.all([
-        db
-          .collection('leads')
-          .find({ tenantId, ...ownerScope, status: { $in: ['new', 'contacted'] } })
-          .sort({ createdAt: -1 })
-          .limit(5)
-          .toArray(),
-        db
-          .collection('tasks')
-          .find({ tenantId, ...ownerScope, status: { $ne: 'done' } })
-          .sort({ createdAt: -1 })
-          .limit(5)
-          .toArray(),
-        db
-          .collection('invoices')
-          .find({ tenantId, ...ownerScope, status: { $in: ['sent', 'partial', 'overdue'] } })
-          .sort({ createdAt: -1 })
-          .limit(5)
-          .toArray(),
-        db
-          .collection('conversations')
-          .find({ tenantId, ...ownerScope, status: 'open' })
-          .sort({ updatedAt: -1 })
-          .limit(4)
-          .toArray(),
-        db
-          .collection('tickets')
-          .find({ tenantId, ...ownerScope, status: { $in: ['open', 'in_progress'] } })
-          .sort({ createdAt: -1 })
-          .limit(4)
-          .toArray(),
-      ]);
+    const userOid = Types.ObjectId.isValid(auth.userId)
+      ? new Types.ObjectId(auth.userId)
+      : auth.userId;
+
+    const [
+      tenantDoc,
+      mentions,
+      hotLeads,
+      pendingTasks,
+      unpaidInvoices,
+      openThreads,
+      openTickets,
+    ] = await Promise.all([
+      db
+        .collection('tenants')
+        .findOne(
+          { _id: tenantId },
+          {
+            projection: {
+              plan: 1,
+              status: 1,
+              trialEndsAt: 1,
+              isPlatformHq: 1,
+              lastExpiryReminderDate: 1,
+            },
+          },
+        )
+        .catch(() => null),
+      db
+        .collection('mention_notifications')
+        .find({
+          tenantId,
+          $or: [{ mentionedUserId: userOid }, { mentionedUserId: auth.userId }],
+        })
+        .sort({ createdAt: -1 })
+        .limit(8)
+        .toArray()
+        .catch(() => []),
+      db
+        .collection('leads')
+        .find({ tenantId, ...ownerScope, status: { $in: ['new', 'contacted'] } })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .toArray(),
+      db
+        .collection('tasks')
+        .find({ tenantId, ...ownerScope, status: { $ne: 'done' } })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .toArray(),
+      db
+        .collection('invoices')
+        .find({
+          tenantId,
+          ...ownerScope,
+          status: { $in: ['sent', 'partial', 'overdue'] },
+        })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .toArray(),
+      db
+        .collection('conversations')
+        .find({ tenantId, ...ownerScope, status: 'open' })
+        .sort({ updatedAt: -1 })
+        .limit(4)
+        .toArray(),
+      db
+        .collection('tickets')
+        .find({
+          tenantId,
+          ...ownerScope,
+          status: { $in: ['open', 'in_progress'] },
+        })
+        .sort({ createdAt: -1 })
+        .limit(4)
+        .toArray(),
+    ]);
+
+    const billingAlerts: Array<{
+      id: string;
+      category: 'billing';
+      severity: 'urgent' | 'high' | 'medium' | 'info';
+      title: string;
+      subtitle: string;
+      href: string;
+      createdAt: string;
+    }> = [];
+
+    if (tenantDoc && !tenantDoc.isPlatformHq) {
+      const trialEndsAt = String(tenantDoc.trialEndsAt || '').trim();
+      const expiresMs = trialEndsAt ? Date.parse(trialEndsAt) : NaN;
+      if (trialEndsAt && Number.isFinite(expiresMs)) {
+        const daysRemaining = Math.ceil((expiresMs - Date.now()) / 86400000);
+        const todayKey = new Date().toISOString().slice(0, 10);
+        const endDateLabel = trialEndsAt.slice(0, 10);
+        const planLabel = String(tenantDoc.plan || 'growth').toUpperCase();
+
+        if (Date.now() > expiresMs || tenantDoc.status === 'suspended') {
+          billingAlerts.push({
+            id: `notif-billing-expired-${todayKey}`,
+            category: 'billing',
+            severity: 'urgent',
+            title: 'Plan Expired — Features Paused',
+            subtitle: `${planLabel} expired (${endDateLabel}). Data is safe; Admin must renew in Platform Billing to resume.`,
+            href: '/settings/billing',
+            createdAt: new Date().toISOString(),
+          });
+        } else if (daysRemaining >= 0 && daysRemaining <= 7) {
+          billingAlerts.push({
+            id: `notif-billing-expiry-${todayKey}`,
+            category: 'billing',
+            severity: daysRemaining <= 2 ? 'urgent' : 'high',
+            title: `Daily Renewal Reminder: ${daysRemaining} Day(s) Left`,
+            subtitle: `${planLabel} plan expires on ${endDateLabel}. Renew now to prevent automatic feature lock.`,
+            href: '/settings/billing',
+            createdAt: new Date().toISOString(),
+          });
+
+          if (tenantDoc.lastExpiryReminderDate !== todayKey) {
+            await db
+              .collection('tenants')
+              .updateOne(
+                { _id: tenantId },
+                { $set: { lastExpiryReminderDate: todayKey } },
+              )
+              .catch(() => {});
+          }
+        }
+      }
+    }
 
     const items = [
+      ...billingAlerts,
+      ...mentions.map((m) => ({
+        id: `notif-mention-${String(m._id)}`,
+        category: 'mention' as const,
+        severity: 'high' as const,
+        title: `@Mention from ${String(m.authorName || 'Teammate')}: ${String(m.entityLabel || m.entityType || 'Record')}`,
+        subtitle: String(m.excerpt || ''),
+        href: String(m.href || '/leads'),
+        createdAt: m.createdAt
+          ? new Date(m.createdAt as Date).toISOString()
+          : new Date().toISOString(),
+      })),
       ...hotLeads.map((l) => ({
         id: `notif-lead-${String(l._id)}`,
         category: 'lead' as const,

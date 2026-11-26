@@ -452,6 +452,12 @@ export class SuperAdminService implements OnModuleInit {
     }
 
     const kills = config.globalKillSwitches || DEFAULT_GLOBAL_KILL_SWITCHES;
+    const trialEndsAt = String(tenant.trialEndsAt || '').trim();
+    const expiresMs = trialEndsAt ? Date.parse(trialEndsAt) : NaN;
+    const planExpired =
+      !tenant.isPlatformHq &&
+      (tenant.status === 'suspended' ||
+        (Boolean(trialEndsAt) && Number.isFinite(expiresMs) && Date.now() > expiresMs));
 
     return {
       effectiveFeatures,
@@ -459,6 +465,7 @@ export class SuperAdminService implements OnModuleInit {
       globalKillSwitches: kills,
       maintenanceMode: Boolean(config.maintenanceMode),
       maintenanceBanner: config.maintenanceBanner || '',
+      planExpired,
       blockCsvExport: Boolean(
         kills.bulkExportsEnabled === false ||
           tenant.securityPolicy?.lockAgentExport ||
@@ -625,6 +632,19 @@ export class SuperAdminService implements OnModuleInit {
     if (state.maintenanceMode) {
       throw new ServiceUnavailableException(
         state.maintenanceBanner || 'Leadsetu Cloud is currently in maintenance mode.',
+      );
+    }
+
+    if (state.planExpired) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.PAYMENT_REQUIRED,
+          error: 'Payment Required',
+          code: 'PLAN_EXPIRED',
+          message:
+            'Your workspace subscription plan has expired. Your data is safe, but all manual and AI features are paused until the Workspace Admin renews the plan.',
+        },
+        HttpStatus.PAYMENT_REQUIRED,
       );
     }
 

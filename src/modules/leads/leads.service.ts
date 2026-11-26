@@ -30,6 +30,7 @@ import { CustomFieldsService } from '../custom-fields/custom-fields.service';
 import { LeadRoutingService } from '../lead-routing/lead-routing.service';
 import { MetaCapiService } from '../meta-capi/meta-capi.service';
 import { MarketplaceSyncService } from '../marketplace-sync/marketplace-sync.service';
+import { dispatchMentionNotifications } from '../../common/mentions/mention-notifications.util';
 
 export interface CreateLeadDto {
   name: string;
@@ -50,6 +51,28 @@ export interface CreateLeadDto {
   adSourceUrl?: string;
   customFields?: Record<string, unknown>;
   autoAssign?: boolean;
+}
+
+export interface BulkImportOptions {
+  duplicateMode?: 'update' | 'skip';
+  autoRoute?: boolean;
+}
+
+export interface MergeLeadsDto {
+  primaryId: string;
+  secondaryIds: string[];
+  fieldOverrides?: {
+    name?: string;
+    company?: string;
+    phone?: string;
+    email?: string;
+    city?: string;
+    source?: LeadSource;
+    status?: LeadStatus;
+    accountKind?: 'business' | 'consumer';
+    estimatedValue?: number;
+    notes?: string;
+  };
 }
 
 export interface UpdateLeadDto extends Partial<CreateLeadDto> {
@@ -1076,6 +1099,21 @@ export class LeadsService {
 
     doc.activities = [activity, ...(doc.activities || [])];
     await doc.save();
+
+    if (this.leadModel.db?.db) {
+      await dispatchMentionNotifications({
+        db: this.leadModel.db.db,
+        tenantId: auth.tenantId,
+        authorUserId: auth.userId,
+        authorName: auth.email.split('@')[0],
+        entityType: 'lead',
+        entityId: doc._id.toString(),
+        entityLabel: `${doc.name}${doc.company ? ` (${doc.company})` : ''}`,
+        noteText: activity.description,
+        activityId: activity.id,
+      }).catch(() => {});
+    }
+
     const maskPhones = this.auditService
       ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
       : false;
@@ -1224,22 +1262,585 @@ export class LeadsService {
       .exec();
   }
 
-  async bulkImport(auth: AuthContext, rows: CreateLeadDto[]) {
+  async findDuplicates(auth: AuthContext) {
+    const tenantObjectId = new Types.ObjectId(auth.tenantId);
+    const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
+    const [docs, maskPhones, userRows] = await Promise.all([
+      this.leadModel
+        .find({ tenantId: tenantObjectId, ...ownerScope })
+        .sort({ createdAt: -1 })
+        .exec(),
+      this.auditService
+        ? this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
+        : Promise.resolve(false),
+      this.leadModel.db
+        .collection('users')
+        .find(
+          { tenantId: tenantObjectId },
+          { projection: { _id: 1, name: 1, email: 1 } },
+        )
+        .toArray()
+        .catch(() => []),
+    ]);
+
+    const userNameById = new Map<string, string>();
+    for (const u of userRows) {
+      userNameById.set(
+        String(u._id),
+        String(u.name || u.email || 'Sales Rep'),
+      );
+    }
+
+    const parent = docs.map((_, i) => i);
+    const findRoot = (i: number): number => {
+      let cur = i;
+      while (parent[cur] !== cur) {
+        parent[cur] = parent[parent[cur]];
+        cur = parent[cur];
+      }
+      return cur;
+    };
+    const union = (a: number, b: number) => {
+      const ra = findRoot(a);
+      const rb = findRoot(b);
+      if (ra !== rb) parent[rb] = ra;
+    };
+
+    const phoneMap = new Map<string, number>();
+    const emailMap = new Map<string, number>();
+
+    docs.forEach((doc, idx) => {
+      const ten = this.last10Digits(doc.normalizedPhone || doc.phone);
+      if (ten) {
+        const firstIdx = phoneMap.get(ten);
+        if (firstIdx !== undefined) {
+          union(firstIdx, idx);
+        } else {
+          phoneMap.set(ten, idx);
+        }
+      }
+      const cleanEmail = String(doc.email || '').trim().toLowerCase();
+      if (cleanEmail) {
+        const firstIdx = emailMap.get(cleanEmail);
+        if (firstIdx !== undefined) {
+          union(firstIdx, idx);
+        } else {
+          emailMap.set(cleanEmail, idx);
+        }
+      }
+    });
+
+    const clusters = new Map<number, number[]>();
+    docs.forEach((_, idx) => {
+      const root = findRoot(idx);
+      const list = clusters.get(root);
+      if (list) list.push(idx);
+      else clusters.set(root, [idx]);
+    });
+
+    const dupClusters = Array.from(clusters.values()).filter(
+      (indices) => indices.length >= 2,
+    );
+
+    const dupLeadIds = dupClusters.flat().map((i) => docs[i]._id);
+    const dupLeadIdStrings = dupLeadIds.map((id) => id.toString());
+
+    const [dealsRows, tasksRows] =
+      dupLeadIds.length > 0
+        ? await Promise.all([
+            this.leadModel.db
+              .collection('deals')
+              .find(
+                {
+                  tenantId: tenantObjectId,
+                  $or: [
+                    { leadId: { $in: dupLeadIds } },
+                    { leadId: { $in: dupLeadIdStrings } },
+                  ],
+                },
+                { projection: { leadId: 1 } },
+              )
+              .toArray()
+              .catch(() => []),
+            this.leadModel.db
+              .collection('tasks')
+              .find(
+                {
+                  tenantId: tenantObjectId,
+                  $or: [
+                    { relatedEntityId: { $in: dupLeadIds } },
+                    { relatedEntityId: { $in: dupLeadIdStrings } },
+                  ],
+                },
+                { projection: { relatedEntityId: 1 } },
+              )
+              .toArray()
+              .catch(() => []),
+          ])
+        : [[], []];
+
+    const dealsCountByLead = new Map<string, number>();
+    for (const d of dealsRows) {
+      const k = String(d.leadId || '');
+      if (k) dealsCountByLead.set(k, (dealsCountByLead.get(k) || 0) + 1);
+    }
+    const tasksCountByLead = new Map<string, number>();
+    for (const t of tasksRows) {
+      const k = String(t.relatedEntityId || '');
+      if (k) tasksCountByLead.set(k, (tasksCountByLead.get(k) || 0) + 1);
+    }
+
+    const groups = dupClusters.map((indices, gIdx) => {
+      const groupDocs = indices.map((i) => docs[i]);
+      const phones = new Set<string>();
+      const emails = new Set<string>();
+      for (const d of groupDocs) {
+        const ten = this.last10Digits(d.normalizedPhone || d.phone);
+        if (ten) phones.add(ten);
+        const em = String(d.email || '').trim().toLowerCase();
+        if (em) emails.add(em);
+      }
+      const phoneCounts = new Map<string, number>();
+      const emailCounts = new Map<string, number>();
+      for (const d of groupDocs) {
+        const ten = this.last10Digits(d.normalizedPhone || d.phone);
+        if (ten) phoneCounts.set(ten, (phoneCounts.get(ten) || 0) + 1);
+        const em = String(d.email || '').trim().toLowerCase();
+        if (em) emailCounts.set(em, (emailCounts.get(em) || 0) + 1);
+      }
+      const matchedPhones = Array.from(phoneCounts.entries()).filter(
+        ([, c]) => c >= 2,
+      );
+      const matchedEmails = Array.from(emailCounts.entries()).filter(
+        ([, c]) => c >= 2,
+      );
+
+      const matchReason: 'phone' | 'email' | 'phone_and_email' =
+        matchedPhones.length > 0 && matchedEmails.length > 0
+          ? 'phone_and_email'
+          : matchedEmails.length > 0
+          ? 'email'
+          : 'phone';
+
+      const rawKey =
+        matchedPhones[0]?.[0]
+          ? `+91 ${matchedPhones[0][0]}`
+          : matchedEmails[0]?.[0] ||
+            Array.from(phones)[0] ||
+            Array.from(emails)[0] ||
+            'Match';
+      const matchKey =
+        matchedPhones[0]?.[0] && maskPhones
+          ? maskPhoneNumber(rawKey)
+          : rawKey;
+
+      const enrichedLeads = groupDocs.map((d) => {
+        const dto = this.toDto(d, maskPhones);
+        const idStr = d._id.toString();
+        const dealsCount = dealsCountByLead.get(idStr) || 0;
+        const tasksCount = tasksCountByLead.get(idStr) || 0;
+        const activitiesCount = Array.isArray(d.activities)
+          ? d.activities.length
+          : 0;
+        return {
+          ...dto,
+          ownerName: userNameById.get(dto.ownerId) || 'Sales Rep',
+          dealsCount,
+          tasksCount,
+          activitiesCount,
+        };
+      });
+
+      let suggestedPrimaryId = enrichedLeads[0].id;
+      let bestScore = -1;
+      for (const item of enrichedLeads) {
+        const richness =
+          item.dealsCount * 30 +
+          item.tasksCount * 10 +
+          item.activitiesCount * 8 +
+          (item.aiScore || 0) +
+          (item.estimatedValue > 0 ? 15 : 0) +
+          (item.email ? 5 : 0) +
+          (item.company ? 5 : 0);
+        if (richness > bestScore) {
+          bestScore = richness;
+          suggestedPrimaryId = item.id;
+        }
+      }
+
+      return {
+        groupId: `dup_${gIdx + 1}_${suggestedPrimaryId}`,
+        matchReason,
+        matchKey,
+        suggestedPrimaryId,
+        leads: enrichedLeads,
+      };
+    });
+
+    const totalDuplicateRecords = groups.reduce(
+      (acc, g) => acc + g.leads.length,
+      0,
+    );
+
+    return {
+      totalGroups: groups.length,
+      totalDuplicateRecords,
+      groups,
+    };
+  }
+
+  async mergeLeads(auth: AuthContext, dto: MergeLeadsDto) {
+    const primaryId = String(dto?.primaryId || '').trim();
+    const rawSecondaryIds = Array.isArray(dto?.secondaryIds)
+      ? dto.secondaryIds
+      : [];
+    const secondaryIds = Array.from(
+      new Set(
+        rawSecondaryIds
+          .map((id) => String(id || '').trim())
+          .filter((id) => id && id !== primaryId),
+      ),
+    );
+
+    if (!Types.ObjectId.isValid(primaryId) || secondaryIds.length === 0) {
+      throw new BadRequestException(
+        'Provide a valid primaryId and at least one duplicate secondaryId.',
+      );
+    }
+    if (secondaryIds.some((id) => !Types.ObjectId.isValid(id))) {
+      throw new BadRequestException('One or more secondary lead IDs are invalid.');
+    }
+
+    const tenantObjectId = new Types.ObjectId(auth.tenantId);
+    const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
+
+    const primaryDoc = await this.leadModel
+      .findOne({
+        _id: new Types.ObjectId(primaryId),
+        tenantId: tenantObjectId,
+        ...ownerScope,
+      })
+      .exec();
+
+    if (!primaryDoc) {
+      throw new NotFoundException('Primary lead record not found.');
+    }
+
+    const secondaryObjectIds = secondaryIds.map((id) => new Types.ObjectId(id));
+    const secondaryDocs = await this.leadModel
+      .find({
+        _id: { $in: secondaryObjectIds },
+        tenantId: tenantObjectId,
+        ...ownerScope,
+      })
+      .exec();
+
+    if (secondaryDocs.length === 0) {
+      throw new NotFoundException('No matching duplicate leads found to merge.');
+    }
+
+    const foundSecondaryObjectIds = secondaryDocs.map((d) => d._id);
+    const foundSecondaryStrings = secondaryDocs.map((d) => d._id.toString());
+    const ov = dto.fieldOverrides || {};
+
+    const pickFirstNonEmpty = (values: Array<string | undefined>): string => {
+      for (const v of values) {
+        const s = String(v || '').trim();
+        if (s) return s;
+      }
+      return '';
+    };
+
+    const mergedName =
+      ov.name?.trim() ||
+      pickFirstNonEmpty([primaryDoc.name, ...secondaryDocs.map((d) => d.name)]);
+    const mergedCompany =
+      ov.company !== undefined
+        ? ov.company.trim()
+        : pickFirstNonEmpty([
+            primaryDoc.company,
+            ...secondaryDocs.map((d) => d.company),
+          ]);
+    const mergedPhoneRaw =
+      ov.phone !== undefined
+        ? ov.phone.trim()
+        : pickFirstNonEmpty([
+            primaryDoc.phone,
+            ...secondaryDocs.map((d) => d.phone),
+          ]);
+    const mergedPhone =
+      normalizeIndianPhone(mergedPhoneRaw) || mergedPhoneRaw;
+    const mergedEmail = (
+      ov.email !== undefined
+        ? ov.email
+        : pickFirstNonEmpty([
+            primaryDoc.email,
+            ...secondaryDocs.map((d) => d.email),
+          ])
+    )
+      .trim()
+      .toLowerCase();
+    const mergedCity =
+      ov.city !== undefined
+        ? ov.city.trim() || 'Delhi-NCR'
+        : pickFirstNonEmpty([
+            primaryDoc.city,
+            ...secondaryDocs.map((d) => d.city),
+          ]) || 'Delhi-NCR';
+    const mergedSource = ov.source || primaryDoc.source;
+    const mergedStatus = ov.status || primaryDoc.status;
+    const mergedAccountKind = ov.accountKind || primaryDoc.accountKind;
+
+    const allValues = [primaryDoc, ...secondaryDocs].map(
+      (d) => Number(d.estimatedValue) || 0,
+    );
+    const mergedEstimatedValue =
+      typeof ov.estimatedValue === 'number' && !Number.isNaN(ov.estimatedValue)
+        ? Math.max(0, ov.estimatedValue)
+        : Math.max(...allValues);
+
+    // Combine distinct notes
+    const mergedNotes =
+      ov.notes !== undefined
+        ? ov.notes.trim()
+        : Array.from(
+            new Set(
+              [primaryDoc, ...secondaryDocs]
+                .map((d) => String(d.notes || '').trim())
+                .filter(Boolean),
+            ),
+          ).join('\n---\n');
+
+    // Merge tags & customFields
+    const tagSet = new Set<string>();
+    for (const d of [primaryDoc, ...secondaryDocs]) {
+      for (const t of d.tags || []) {
+        const clean = String(t || '').trim();
+        if (clean) tagSet.add(clean);
+      }
+    }
+
+    const mergedCustomFields: Record<string, unknown> = {};
+    for (const d of [...secondaryDocs].reverse()) {
+      Object.assign(mergedCustomFields, d.customFields || {});
+    }
+    for (const [k, v] of Object.entries(primaryDoc.customFields || {})) {
+      if (v !== undefined && v !== null && v !== '') {
+        mergedCustomFields[k] = v;
+      } else if (!(k in mergedCustomFields)) {
+        mergedCustomFields[k] = v;
+      }
+    }
+
+    // Merge activities sorted newest first and deduplicated
+    const seenActivityKeys = new Set<string>();
+    const combinedActivities: LeadActivity[] = [];
+    for (const d of [primaryDoc, ...secondaryDocs]) {
+      for (const act of d.activities || []) {
+        const key = `${act.type}:${act.createdAt}:${act.description}`;
+        if (seenActivityKeys.has(key)) continue;
+        seenActivityKeys.add(key);
+        combinedActivities.push(act);
+      }
+    }
+    combinedActivities.sort((a, b) =>
+      String(b.createdAt || '').localeCompare(String(a.createdAt || '')),
+    );
+
+    const mergeNote: LeadActivity = {
+      id: randomBytes(6).toString('hex'),
+      type: 'note',
+      description: `Merged ${secondaryDocs.length} duplicate lead(s): ${secondaryDocs
+        .map((s) => s.name)
+        .join(', ')} into master record with full history preserved.`,
+      authorName: auth.email.split('@')[0],
+      createdAt: new Date().toISOString(),
+    };
+
+    // Preserve highest AI score
+    const richestScoreDoc = [primaryDoc, ...secondaryDocs].reduce(
+      (best, cur) => ((cur.aiScore || 0) > (best.aiScore || 0) ? cur : best),
+      primaryDoc,
+    );
+
+    // Repoint linked collections before removing duplicates
+    const db = this.leadModel.db;
+    const primaryOid = primaryDoc._id;
+    const primaryIdStr = primaryOid.toString();
+
+    const repoint = async (
+      colName: string,
+      field: string,
+      targetValue: unknown,
+      matchValues: unknown[],
+      extraFilter: Record<string, unknown> = {},
+    ): Promise<number> => {
+      try {
+        const res = await db.collection(colName).updateMany(
+          {
+            tenantId: tenantObjectId,
+            [field]: { $in: matchValues },
+            ...extraFilter,
+          },
+          { $set: { [field]: targetValue } },
+        );
+        return res.modifiedCount || 0;
+      } catch {
+        return 0;
+      }
+    };
+
+    const allMatchRefs = [...foundSecondaryObjectIds, ...foundSecondaryStrings];
+
+    const [
+      dealsMoved,
+      tasksMoved,
+      callsLeadIdMoved,
+      callsEntityIdMoved,
+      convsEntityMoved,
+      convsLeadMoved,
+      invoicesMoved,
+      bookingsMoved,
+      metaCapiMoved,
+    ] = await Promise.all([
+      repoint('deals', 'leadId', primaryOid, allMatchRefs),
+      repoint('tasks', 'relatedEntityId', primaryIdStr, allMatchRefs),
+      repoint('calls', 'leadId', primaryIdStr, allMatchRefs),
+      repoint('calls', 'entityId', primaryIdStr, allMatchRefs),
+      repoint('conversations', 'linkedEntityId', primaryIdStr, allMatchRefs, {
+        linkedEntityType: 'lead',
+      }),
+      repoint('conversations', 'linkedLeadId', primaryIdStr, allMatchRefs),
+      repoint('invoices', 'linkedLeadId', primaryIdStr, allMatchRefs),
+      repoint('booking_appointments', 'leadId', primaryOid, allMatchRefs),
+      repoint('meta_capi_events', 'leadId', primaryIdStr, allMatchRefs),
+    ]);
+
+    // Move workflow enrollments safely without triggering duplicate index conflicts
+    try {
+      const enrollments = await db
+        .collection('workflow_enrollments')
+        .find({
+          tenantId: tenantObjectId,
+          leadId: { $in: foundSecondaryObjectIds },
+        })
+        .toArray();
+      for (const enr of enrollments) {
+        const existsOnPrimary = await db
+          .collection('workflow_enrollments')
+          .findOne({
+            tenantId: tenantObjectId,
+            workflowId: enr.workflowId,
+            leadId: primaryOid,
+          });
+        if (existsOnPrimary) {
+          await db.collection('workflow_enrollments').deleteOne({ _id: enr._id });
+        } else {
+          await db
+            .collection('workflow_enrollments')
+            .updateOne({ _id: enr._id }, { $set: { leadId: primaryOid } });
+        }
+      }
+    } catch {
+      // Ignore enrollment cleanup issues
+    }
+
+    // Delete secondary duplicate records BEFORE updating normalizedPhone on primary
+    await this.leadModel
+      .deleteMany({
+        _id: { $in: foundSecondaryObjectIds },
+        tenantId: tenantObjectId,
+      })
+      .exec();
+
+    const ten = this.last10Digits(mergedPhone);
+    primaryDoc.name = mergedName;
+    primaryDoc.company = mergedAccountKind === 'consumer' ? '' : mergedCompany;
+    primaryDoc.phone = mergedPhone;
+    if (ten) {
+      primaryDoc.normalizedPhone = `+91${ten}`;
+    }
+    primaryDoc.email = mergedEmail;
+    primaryDoc.city = mergedCity;
+    primaryDoc.source = mergedSource;
+    primaryDoc.status = mergedStatus;
+    primaryDoc.accountKind = mergedAccountKind;
+    primaryDoc.estimatedValue = mergedEstimatedValue;
+    primaryDoc.notes = mergedNotes;
+    primaryDoc.tags = Array.from(tagSet);
+    primaryDoc.customFields = mergedCustomFields;
+    primaryDoc.aiScore = richestScoreDoc.aiScore;
+    primaryDoc.aiLabel = richestScoreDoc.aiLabel;
+    if (!primaryDoc.aiInsight && richestScoreDoc.aiInsight) {
+      primaryDoc.aiInsight = richestScoreDoc.aiInsight;
+    }
+    primaryDoc.activities = [mergeNote, ...combinedActivities].slice(0, 120);
+
+    const savedPrimary = await primaryDoc.save();
+
+    const repointedCounts = {
+      deals: dealsMoved,
+      tasks: tasksMoved,
+      calls: callsLeadIdMoved + callsEntityIdMoved,
+      conversations: convsEntityMoved + convsLeadMoved,
+      invoices: invoicesMoved,
+      appointments: bookingsMoved,
+      metaCapiEvents: metaCapiMoved,
+    };
+
+    await this.auditService?.record({
+      tenantId: auth.tenantId,
+      actorId: auth.userId,
+      actorEmail: auth.email,
+      action: 'lead.merged',
+      entityType: 'lead',
+      entityId: primaryIdStr,
+      entityLabel: `${savedPrimary.name}${savedPrimary.company ? ` (${savedPrimary.company})` : ''}`,
+      summary: `Merged ${secondaryDocs.length} duplicate lead(s) into ${savedPrimary.name}`,
+    });
+
+    const maskPhones = this.auditService
+      ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
+      : false;
+
+    return {
+      merged: true,
+      mergedCount: secondaryDocs.length,
+      repointedCounts,
+      primaryLead: this.toDto(savedPrimary, maskPhones),
+    };
+  }
+
+  async bulkImport(
+    auth: AuthContext,
+    rows: CreateLeadDto[],
+    options: BulkImportOptions = {},
+  ) {
     if (!Array.isArray(rows) || rows.length === 0) {
       throw new BadRequestException('Provide at least one CSV lead row to import.');
     }
+    const duplicateMode = options.duplicateMode === 'skip' ? 'skip' : 'update';
+    const autoRoute = Boolean(options.autoRoute);
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
     const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
     const batch = rows.slice(0, 500);
     const data = [];
+    const errors: Array<{ rowNumber: number; name: string; reason: string }> = [];
     let importedCount = 0;
     let duplicateUpdatedCount = 0;
     let skippedCount = 0;
+    let routedCount = 0;
 
-    for (const row of batch) {
+    for (let idx = 0; idx < batch.length; idx += 1) {
+      const row = batch[idx];
       const name = String(row?.name ?? '').trim();
       if (!name) {
         skippedCount += 1;
+        errors.push({
+          rowNumber: idx + 1,
+          name: '',
+          reason: 'Missing buyer name',
+        });
         continue;
       }
 
@@ -1255,9 +1856,19 @@ export class LeadsService {
       );
 
       if (existing) {
+        if (duplicateMode === 'skip') {
+          skippedCount += 1;
+          errors.push({
+            rowNumber: idx + 1,
+            name,
+            reason: 'Skipped matching existing phone/email lead',
+          });
+          continue;
+        }
+
         const noteText = row.notes?.trim()
-          ? `CSV Bulk Import refresh: ${row.notes.trim()}`
-          : 'CSV Bulk Import match — refreshed inquiry timestamp.';
+          ? `CSV/Excel Import refresh: ${row.notes.trim()}`
+          : 'CSV/Excel Import match — refreshed inquiry timestamp.';
         existing.activities.unshift({
           id: randomBytes(6).toString('hex'),
           type: 'note',
@@ -1267,6 +1878,29 @@ export class LeadsService {
         });
         if (!existing.company && row.company) existing.company = row.company.trim();
         if (!existing.email && email) existing.email = email;
+        if (!existing.city && row.city) existing.city = row.city.trim();
+        if (
+          typeof row.estimatedValue === 'number' &&
+          row.estimatedValue > (existing.estimatedValue || 0)
+        ) {
+          existing.estimatedValue = row.estimatedValue;
+        }
+        if (Array.isArray(row.tags) && row.tags.length > 0) {
+          existing.tags = Array.from(new Set([...(existing.tags || []), ...row.tags]));
+        }
+        if (row.customFields && typeof row.customFields === 'object') {
+          const sanitizedCf = this.customFieldsService
+            ? await this.customFieldsService.sanitizeEntityValues(
+                auth.tenantId,
+                'lead',
+                row.customFields,
+              )
+            : row.customFields;
+          existing.customFields = {
+            ...(existing.customFields || {}),
+            ...sanitizedCf,
+          };
+        }
         await existing.save();
         duplicateUpdatedCount += 1;
         data.push(await this.findOne(auth, String(existing._id)));
@@ -1275,15 +1909,21 @@ export class LeadsService {
 
       const created = await this.create(auth, {
         name,
+        accountKind: row.accountKind,
         company: row.company?.trim() ?? '',
         phone: formattedPhone,
         email,
         city: row.city?.trim() || 'Delhi-NCR',
         source: row.source || 'manual',
+        status: row.status,
         estimatedValue: Number(row.estimatedValue ?? 0) || 0,
+        tags: Array.isArray(row.tags) ? row.tags : undefined,
         notes: row.notes?.trim() ?? '',
+        customFields: row.customFields,
+        autoAssign: autoRoute,
       });
       importedCount += 1;
+      if (autoRoute) routedCount += 1;
       data.push(created);
     }
 
@@ -1294,15 +1934,17 @@ export class LeadsService {
       action: 'lead.bulk_imported',
       entityType: 'lead',
       entityId: auth.tenantId,
-      entityLabel: 'CSV Bulk Import',
-      summary: `CSV bulk import: ${importedCount} created, ${duplicateUpdatedCount} deduplicated, ${skippedCount} skipped`,
+      entityLabel: 'CSV/Excel Bulk Import',
+      summary: `Bulk import (${duplicateMode}): ${importedCount} created, ${duplicateUpdatedCount} updated, ${skippedCount} skipped`,
     });
 
     return {
       importedCount,
       duplicateUpdatedCount,
       skippedCount,
+      routedCount,
       totalProcessed: batch.length,
+      errors,
       data,
     };
   }

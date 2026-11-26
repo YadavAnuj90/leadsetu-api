@@ -132,6 +132,25 @@ export class AuthService {
     };
   }
 
+  private buildExpiryPayload(tenant: TenantDocument) {
+    const trialEndsAt = String(tenant.trialEndsAt || '').trim();
+    const expiresMs = trialEndsAt ? Date.parse(trialEndsAt) : NaN;
+    const hasValidExpiry = Boolean(trialEndsAt) && Number.isFinite(expiresMs);
+    const daysUntilExpiry = hasValidExpiry
+      ? Math.ceil((expiresMs - Date.now()) / 86400000)
+      : null;
+    const planExpired =
+      !tenant.isPlatformHq &&
+      (tenant.status === 'suspended' ||
+        (hasValidExpiry && Date.now() > expiresMs));
+
+    return {
+      trialEndsAt,
+      planExpired,
+      daysUntilExpiry,
+    };
+  }
+
   private async issueTokens(user: UserDocument, tenant: TenantDocument) {
     await this.ensureIdentityCodes(user, tenant);
 
@@ -258,6 +277,7 @@ export class AuthService {
         globalKillSwitches: effectiveState?.globalKillSwitches,
         maintenanceMode: effectiveState?.maintenanceMode ?? false,
         sessionTtlHours: tenant.securityPolicy?.sessionTtlHours || 24,
+        ...this.buildExpiryPayload(tenant),
         ...(this.buildQuotaPayload(tenant) || {}),
       },
     };
@@ -558,6 +578,7 @@ export class AuthService {
             globalKillSwitches: effectiveState?.globalKillSwitches,
             maintenanceMode: effectiveState?.maintenanceMode ?? false,
             sessionTtlHours: tenant.securityPolicy?.sessionTtlHours || 24,
+            ...this.buildExpiryPayload(tenant),
             ...(this.buildQuotaPayload(tenant) || {}),
           }
         : null,
