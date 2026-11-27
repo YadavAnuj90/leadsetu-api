@@ -633,6 +633,19 @@ export class Tenant {
   @Prop({ type: TenantQuotasSchema, default: () => ({}) })
   quotas?: TenantQuotas;
 
+  /** Prepaid INR Wallet for outbound WhatsApp Business Calling (6-sec pulse deduction). */
+  @Prop({ type: Number })
+  callingWalletBalanceInr?: number;
+
+  @Prop({ type: Number, default: 0 })
+  callingWalletTotalTopupInr?: number;
+
+  @Prop({ type: Number, default: 0 })
+  callingWalletTotalSpentInr?: number;
+
+  @Prop({ type: Boolean, default: false })
+  callingWalletStarterGranted?: boolean;
+
   /** Platform-enforced security & compliance policies for this tenant. */
   @Prop({ type: TenantSecurityPolicySchema, default: () => ({}) })
   securityPolicy?: TenantSecurityPolicy;

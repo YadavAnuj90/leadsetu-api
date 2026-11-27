@@ -262,6 +262,23 @@ export class InboxService {
       | 'conversation.updated',
   ) => void;
 
+  private whatsappCallingWebhookHandler?: {
+    handleCallsWebhook: (params: {
+      tenant: TenantDocument;
+      phoneNumberId: string;
+      calls: Array<Record<string, unknown>>;
+      contactsMeta?: Array<{ wa_id?: string; profile?: { name?: string } }>;
+    }) => Promise<number>;
+    handlePermissionReplyWebhook: (params: {
+      tenant: TenantDocument;
+      phoneNumberId: string;
+      fromPhone: string;
+      response: 'accept' | 'reject';
+      leadId?: Types.ObjectId;
+      conversationId?: Types.ObjectId;
+    }) => Promise<unknown>;
+  };
+
   constructor(
     @InjectModel(ConversationThread.name)
     private readonly convModel: Model<ConversationDocument>,
@@ -304,6 +321,25 @@ export class InboxService {
     ) => void,
   ) {
     this.realtimeEmitter = emitter;
+  }
+
+  registerWhatsappCallingWebhookHandler(handler: {
+    handleCallsWebhook: (params: {
+      tenant: TenantDocument;
+      phoneNumberId: string;
+      calls: Array<Record<string, unknown>>;
+      contactsMeta?: Array<{ wa_id?: string; profile?: { name?: string } }>;
+    }) => Promise<number>;
+    handlePermissionReplyWebhook: (params: {
+      tenant: TenantDocument;
+      phoneNumberId: string;
+      fromPhone: string;
+      response: 'accept' | 'reject';
+      leadId?: Types.ObjectId;
+      conversationId?: Types.ObjectId;
+    }) => Promise<unknown>;
+  }) {
+    this.whatsappCallingWebhookHandler = handler;
   }
 
   private emitRealtimeConversationUpdate(
@@ -3871,6 +3907,7 @@ export class InboxService {
   private extractInboundMetaContent(msg: Record<string, unknown>): {
     text: string;
     attachment?: ChatAttachment;
+    callPermissionReply?: 'accept' | 'reject';
   } {
     const type = String(msg.type || 'text').toLowerCase();
     if (type === 'text') {
@@ -3884,10 +3921,36 @@ export class InboxService {
     if (type === 'interactive') {
       const interactive = msg.interactive as
         | {
+            type?: string;
+            response?: string;
+            call_permission_reply?: {
+              response?: string;
+              expiration_timestamp?: number;
+            };
             button_reply?: { title?: string };
             list_reply?: { title?: string };
           }
         | undefined;
+      if (interactive?.type === 'call_permission_reply') {
+        const rawResp = String(
+          interactive.call_permission_reply?.response ||
+            interactive.response ||
+            '',
+        )
+          .trim()
+          .toLowerCase();
+        const isAccepted =
+          rawResp === 'accept' ||
+          rawResp === 'accepted' ||
+          rawResp === 'approve' ||
+          rawResp === 'approved';
+        return {
+          text: isAccepted
+            ? '✅ [WhatsApp Call Permission Granted — Callback Permitted for 7 Days]'
+            : '🚫 [WhatsApp Call Permission Declined by Buyer]',
+          callPermissionReply: isAccepted ? ('accept' as const) : ('reject' as const),
+        };
+      }
       return {
         text:
           interactive?.button_reply?.title ||
@@ -3961,6 +4024,7 @@ export class InboxService {
 
     let processedMessages = 0;
     let processedStatuses = 0;
+    let processedCalls = 0;
     const platform = await this.resolvePlatformProvider();
 
     for (const entry of entries) {
@@ -4092,6 +4156,24 @@ export class InboxService {
               profile?: { name?: string };
             }>)
           : [];
+
+        // 2a) Process Meta WhatsApp Business Calling API webhook events (`value.calls`)
+        const calls = Array.isArray(value.calls)
+          ? (value.calls as Array<Record<string, unknown>>)
+          : [];
+        if (
+          calls.length > 0 &&
+          tenant &&
+          this.whatsappCallingWebhookHandler
+        ) {
+          processedCalls +=
+            await this.whatsappCallingWebhookHandler.handleCallsWebhook({
+              tenant,
+              phoneNumberId,
+              calls,
+              contactsMeta,
+            });
+        }
 
         for (const msg of messages) {
           const from = String(msg.from || '').trim();
@@ -4343,6 +4425,27 @@ export class InboxService {
             );
           }
 
+          if (
+            extracted.callPermissionReply &&
+            tenant &&
+            this.whatsappCallingWebhookHandler
+          ) {
+            await this.whatsappCallingWebhookHandler.handlePermissionReplyWebhook(
+              {
+                tenant,
+                phoneNumberId,
+                fromPhone: from,
+                response: extracted.callPermissionReply,
+                leadId:
+                  conv.linkedEntityType === 'lead' &&
+                  Types.ObjectId.isValid(conv.linkedEntityId)
+                    ? new Types.ObjectId(conv.linkedEntityId)
+                    : undefined,
+                conversationId: conv._id,
+              },
+            );
+          }
+
           processedMessages++;
         }
       }
@@ -4352,6 +4455,7 @@ export class InboxService {
       received: true,
       processedMessages,
       processedStatuses,
+      processedCalls,
     };
   }
 }

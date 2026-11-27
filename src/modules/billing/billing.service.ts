@@ -37,11 +37,13 @@ export type TopupPackId =
   | 'ai_5000'
   | 'wa_2500'
   | 'wa_10000'
+  | 'wa_call_500'
+  | 'wa_call_2000'
   | 'storage_5gb';
 
 export interface TopupPackSpec {
   id: TopupPackId;
-  resource: 'ai' | 'whatsapp' | 'storage';
+  resource: 'ai' | 'whatsapp' | 'calling' | 'storage';
   name: string;
   description: string;
   quantity: number;
@@ -49,6 +51,7 @@ export interface TopupPackSpec {
   priceInr: number;
   addonAiCalls: number;
   addonWhatsapp: number;
+  addonCallingInr?: number;
   addonStorageMb: number;
   badge?: string;
 }
@@ -107,6 +110,35 @@ export const TOPUP_PACK_CATALOG: Record<TopupPackId, TopupPackSpec> = {
     addonWhatsapp: 10000,
     addonStorageMb: 0,
     badge: 'Best Value',
+  },
+  wa_call_500: {
+    id: 'wa_call_500',
+    resource: 'calling',
+    name: '+₹500 WhatsApp Calling Wallet Pack',
+    description:
+      'Prepaid INR voice balance (~1,111 mins @ ₹0.45/min billed in 6s pulses; inbound calls are free).',
+    quantity: 500,
+    unitLabel: 'INR Calling Credit',
+    priceInr: 500,
+    addonAiCalls: 0,
+    addonWhatsapp: 0,
+    addonCallingInr: 500,
+    addonStorageMb: 0,
+  },
+  wa_call_2000: {
+    id: 'wa_call_2000',
+    resource: 'calling',
+    name: '+₹2,000 WhatsApp Calling Scale Pack',
+    description:
+      'High-capacity prepaid calling wallet (~4,444 mins @ ₹0.45/min 6-second pulses) for busy sales floors.',
+    quantity: 2000,
+    unitLabel: 'INR Calling Credit',
+    priceInr: 2000,
+    addonAiCalls: 0,
+    addonWhatsapp: 0,
+    addonCallingInr: 2000,
+    addonStorageMb: 0,
+    badge: 'Popular',
   },
   storage_5gb: {
     id: 'storage_5gb',
@@ -167,6 +199,7 @@ export interface BillingCheckoutOrderDoc {
   topupPackId?: TopupPackId;
   addonAiCalls?: number;
   addonWhatsapp?: number;
+  addonCallingInr?: number;
   addonStorageMb?: number;
   tenantId: Types.ObjectId;
   userId: string;
@@ -1028,6 +1061,7 @@ export class BillingService {
             topupPackId: topupPack.id,
             addonAiCalls: topupPack.addonAiCalls,
             addonWhatsapp: topupPack.addonWhatsapp,
+            addonCallingInr: topupPack.addonCallingInr || 0,
             addonStorageMb: topupPack.addonStorageMb,
           }
         : {}),
@@ -1254,6 +1288,7 @@ export class BillingService {
       };
       const addAi = Math.max(0, Number(order.addonAiCalls || 0));
       const addWa = Math.max(0, Number(order.addonWhatsapp || 0));
+      const addCallInr = Math.max(0, Number(order.addonCallingInr || 0));
       const addMb = Math.max(0, Number(order.addonStorageMb || 0));
 
       currentQuotas.maxMonthlyAiCalls =
@@ -1267,6 +1302,33 @@ export class BillingService {
 
       tenant.quotas = currentQuotas;
       tenant.markModified('quotas');
+
+      if (addCallInr > 0) {
+        const starterDefault = tenant.callingWalletStarterGranted ? 0 : 25;
+        const prevBal = Number(
+          tenant.callingWalletBalanceInr ?? starterDefault,
+        );
+        const nextBal = Number((prevBal + addCallInr).toFixed(4));
+        tenant.callingWalletBalanceInr = nextBal;
+        tenant.callingWalletTotalTopupInr = Number(
+          ((tenant.callingWalletTotalTopupInr || 0) + addCallInr).toFixed(4),
+        );
+        tenant.callingWalletStarterGranted = true;
+
+        await this.tenantModel.db
+          .collection('calling_wallet_transactions')
+          .insertOne({
+            tenantId: tenant._id,
+            type: 'razorpay_topup',
+            amountInr: addCallInr,
+            balanceAfterInr: nextBal,
+            referenceId: newInvoice.invoiceNumber,
+            description: `${order.planName} via ${newInvoice.paymentMode}`,
+            actorEmail: order.userEmail,
+            createdAt: now,
+            updatedAt: now,
+          });
+      }
     } else {
       const prevPlan = tenant.plan;
       let matrixSpec =

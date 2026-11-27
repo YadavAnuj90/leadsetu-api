@@ -4,6 +4,7 @@ import {
   NestModule,
 } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { BullModule } from '@nestjs/bull';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { MongooseModule } from '@nestjs/mongoose';
@@ -44,12 +45,42 @@ import { MarketplaceSyncModule } from './modules/marketplace-sync/marketplace-sy
 import { MetaLeadsModule } from './modules/meta-leads/meta-leads.module';
 import { UniversalWebhooksModule } from './modules/universal-webhooks/universal-webhooks.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
+import { WhatsappCallingModule } from './modules/whatsapp-calling/whatsapp-calling.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: ['.env', '.env.local'],
+    }),
+    BullModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => {
+        const redisUrl =
+          config.get<string>('REDIS_URL')?.trim() || 'redis://127.0.0.1:6379';
+        try {
+          const parsed = new URL(redisUrl);
+          return {
+            redis: {
+              host: parsed.hostname || '127.0.0.1',
+              port: Number(parsed.port || 6379),
+              ...(parsed.password ? { password: parsed.password } : {}),
+              maxRetriesPerRequest: 2,
+              enableReadyCheck: false,
+            },
+          };
+        } catch {
+          return {
+            redis: {
+              host: '127.0.0.1',
+              port: 6379,
+              maxRetriesPerRequest: 2,
+              enableReadyCheck: false,
+            },
+          };
+        }
+      },
     }),
     WinstonModule.forRoot(createLeadsetuWinstonOptions()),
     MongooseModule.forRootAsync({
@@ -106,6 +137,7 @@ import { TimelineModule } from './modules/timeline/timeline.module';
     MetaLeadsModule,
     UniversalWebhooksModule,
     TimelineModule,
+    WhatsappCallingModule,
     HealthModule,
   ],
   providers: [

@@ -483,6 +483,44 @@ export class AiBridgeService {
     });
   }
 
+  async processWhatsappCallAudio(input: {
+    tenantId: string;
+    userId: string;
+    userRole?: string;
+    context: {
+      recordingUrl?: string;
+      audioDataUrl?: string;
+      transcript?: string;
+      buyerName?: string;
+      company?: string;
+      agentName?: string;
+      direction?: 'inbound' | 'outbound';
+      durationSeconds?: number;
+    };
+  }) {
+    return this.postAi<{
+      transcript?: string;
+      sttProvider?: string;
+      languageDetected?: string;
+      summaryBullets?: string[];
+      aiSummary?: string;
+      bantUpdates?: {
+        budget?: string | null;
+        authority?: string | null;
+        need?: string | null;
+        timeline?: string | null;
+        nextFollowUpDate?: string | null;
+        sentiment?: string;
+        objections?: string[];
+        commitments?: string[];
+      };
+    }>(
+      '/ai/pillars/whatsapp-call-postprocess',
+      input as unknown as Record<string, unknown>,
+      45000,
+    );
+  }
+
   async parseDealerRfq(input: {
     tenantId: string;
     userId: string;

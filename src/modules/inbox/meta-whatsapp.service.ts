@@ -486,4 +486,188 @@ export class MetaWhatsAppService {
       },
     });
   }
+
+  /**
+   * Enable WhatsApp Business Calling API on a WABA Phone Number via Meta Graph API:
+   * POST /{phoneNumberId}/settings
+   */
+  async enableCallingSettings(params: {
+    phoneNumberId: string;
+    accessToken: string;
+    callIconVisibility?: 'DEFAULT' | 'DISABLE_ALL';
+    callbackPermissionStatus?: 'ENABLED' | 'DISABLED';
+  }): Promise<{
+    ok: boolean;
+    simulated?: boolean;
+    error?: string;
+  }> {
+    if (!params.phoneNumberId || !params.accessToken) {
+      return {
+        ok: true,
+        simulated: true,
+      };
+    }
+
+    const url = `${this.getGraphBaseUrl()}/${encodeURIComponent(params.phoneNumberId)}/settings`;
+    try {
+      await axios.post(
+        url,
+        {
+          calling: {
+            status: 'ENABLED',
+            call_icon_visibility: params.callIconVisibility || 'DEFAULT',
+            callback_permission_status:
+              params.callbackPermissionStatus || 'ENABLED',
+          },
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${params.accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 15000,
+        },
+      );
+      return { ok: true };
+    } catch (err) {
+      const msg = this.extractGraphError(err);
+      this.logger.warn(
+        `Meta calling settings enable failed (${params.phoneNumberId}): ${msg}`,
+      );
+      return { ok: false, error: msg };
+    }
+  }
+
+  /**
+   * Send Meta interactive `call_permission_request` message to a buyer on WhatsApp.
+   */
+  async sendCallPermissionRequest(params: {
+    phoneNumberId: string;
+    accessToken: string;
+    toPhone: string;
+    bodyText?: string;
+  }): Promise<MetaSendResult & { simulated?: boolean }> {
+    const to = this.formatRecipientDigits(params.toPhone);
+    if (!to || to.length < 10) {
+      return {
+        ok: false,
+        error: 'Recipient phone number is invalid for WhatsApp.',
+      };
+    }
+
+    if (!params.phoneNumberId || !params.accessToken) {
+      return {
+        ok: true,
+        simulated: true,
+        externalMessageId: `wamid.sim_perm_${Date.now()}`,
+      };
+    }
+
+    const bodyText =
+      (params.bodyText || '').trim() ||
+      'Namaste! Can our team call you on WhatsApp to assist with your inquiry?';
+
+    return this.postGraphMessage(params.phoneNumberId, params.accessToken, {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'call_permission_request',
+        action: {
+          name: 'call_permission_request',
+        },
+        body: {
+          text: bodyText,
+        },
+      },
+    });
+  }
+
+  /**
+   * Perform Meta WhatsApp Cloud API WebRTC call signaling:
+   * POST /{phoneNumberId}/calls (`connect` | `pre_accept` | `accept` | `reject` | `terminate`)
+   */
+  async signalWhatsAppCall(params: {
+    phoneNumberId: string;
+    accessToken: string;
+    action: 'connect' | 'pre_accept' | 'accept' | 'reject' | 'terminate';
+    toPhone?: string;
+    callId?: string;
+    session?: {
+      sdp_type: 'offer' | 'answer';
+      sdp: string;
+    };
+  }): Promise<{
+    ok: boolean;
+    metaCallId?: string;
+    sdpAnswer?: string;
+    simulated?: boolean;
+    error?: string;
+  }> {
+    if (!params.phoneNumberId || !params.accessToken) {
+      return {
+        ok: true,
+        simulated: true,
+        metaCallId: params.callId || `wacall_sim_${Date.now()}`,
+        ...(params.action === 'connect' && params.session?.sdp
+          ? { sdpAnswer: params.session.sdp }
+          : {}),
+      };
+    }
+
+    const url = `${this.getGraphBaseUrl()}/${encodeURIComponent(params.phoneNumberId)}/calls`;
+    const payload: Record<string, unknown> = {
+      messaging_product: 'whatsapp',
+      action: params.action,
+    };
+
+    if (params.toPhone) {
+      payload.to = this.formatRecipientDigits(params.toPhone);
+    }
+    if (params.callId) {
+      payload.call_id = params.callId;
+    }
+    if (params.session) {
+      payload.session = params.session;
+    }
+
+    try {
+      const { data } = await axios.post<{
+        calls?: Array<{
+          id?: string;
+          session?: { sdp?: string; sdp_type?: string };
+        }>;
+        call_id?: string;
+        id?: string;
+        session?: { sdp?: string; sdp_type?: string };
+      }>(url, payload, {
+        headers: {
+          Authorization: `Bearer ${params.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 15000,
+      });
+
+      const firstCall = Array.isArray(data?.calls) ? data.calls[0] : undefined;
+      const metaCallId =
+        firstCall?.id || data?.call_id || data?.id || params.callId;
+      const sdpAnswer = firstCall?.session?.sdp || data?.session?.sdp;
+
+      return {
+        ok: true,
+        metaCallId,
+        ...(sdpAnswer ? { sdpAnswer } : {}),
+      };
+    } catch (err) {
+      const msg = this.extractGraphError(err);
+      this.logger.warn(
+        `Meta WhatsApp call signal (${params.action}) failed (${params.phoneNumberId}): ${msg}`,
+      );
+      return {
+        ok: false,
+        error: msg,
+      };
+    }
+  }
 }
