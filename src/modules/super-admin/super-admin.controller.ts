@@ -785,6 +785,100 @@ export class SuperAdminController {
     return this.superAdminService.testRazorpayGateway(body);
   }
 
+  @Get('gstin-provider')
+  @ApiOperation({
+    summary:
+      'Get GSTIN Verification Provider Vault config & cross-tenant GSTIN trust verification telemetry',
+  })
+  async getGstinProvider(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.getGstinProvider();
+  }
+
+  @Patch('gstin-provider')
+  @ApiOperation({
+    summary:
+      'Update GSTIN Verification API URL & encrypted API key (overriding .env GST_VERIFY_API_URL / GST_VERIFY_API_KEY)',
+  })
+  async updateGstinProvider(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    body: {
+      enabled?: boolean;
+      providerName?: string;
+      apiUrlTemplate?: string;
+      apiKey?: string;
+      clearApiKey?: boolean;
+    },
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.updateGstinProvider(actor, body, clientIp(req));
+  }
+
+  @Post('gstin-provider/test')
+  @ApiOperation({
+    summary: 'Verify GSTIN provider connectivity & Mod-36 checksum validation',
+  })
+  async testGstinProvider(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    body?: { apiUrlTemplate?: string; apiKey?: string; sampleGstin?: string },
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.testGstinProvider(body);
+  }
+
+  @Get('ai-provider')
+  @ApiOperation({
+    summary:
+      'Get Central OpenAI Whisper STT, Gemini & Claude API key vault status (overriding .env)',
+  })
+  async getAiProvider(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.getAiProvider();
+  }
+
+  @Patch('ai-provider')
+  @ApiOperation({
+    summary:
+      'Update Central encrypted OpenAI (Whisper STT), Gemini & Claude API keys',
+  })
+  async updateAiProvider(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    body: {
+      enabled?: boolean;
+      openaiApiKey?: string;
+      geminiApiKey?: string;
+      claudeApiKey?: string;
+      clearOpenaiKey?: boolean;
+      clearGeminiKey?: boolean;
+      clearClaudeKey?: boolean;
+    },
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.updateAiProvider(actor, body, clientIp(req));
+  }
+
+  @Post('ai-provider/test')
+  @ApiOperation({
+    summary: 'Verify OpenAI Whisper STT, Gemini & Claude keys live from Super Admin',
+  })
+  async testAiProvider(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    body?: { openaiApiKey?: string; geminiApiKey?: string; claudeApiKey?: string },
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.testAiProvider(body);
+  }
+
   @Post('workspaces/provision')
   @ApiOperation({
     summary:

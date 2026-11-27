@@ -189,7 +189,10 @@ export class AuditService {
       ]);
       if (!user) return false;
       if (user.maskPhones === true) return true;
-      return Boolean(tenant?.maskPhoneForAgents && user.role === 'agent');
+      return Boolean(
+        tenant?.maskPhoneForAgents &&
+          (user.role === 'agent' || user.role === 'support'),
+      );
     } catch {
       return false;
     }
@@ -327,7 +330,9 @@ export class AuditService {
         ? true
         : Boolean(tenant.blockAgentExport);
     const viewerMasked = Boolean(
-      viewer?.maskPhones || (maskPhoneForAgents && viewerRole === 'agent'),
+      viewer?.maskPhones ||
+        (maskPhoneForAgents &&
+          (viewerRole === 'agent' || viewerRole === 'support')),
     );
 
     return {
@@ -448,7 +453,10 @@ export class AuditService {
     const viewerRole = String(viewer?.role || auth.role || 'owner');
 
     const baseScope: Record<string, unknown> = { tenantId: tenantObjectId };
-    if (viewerRole === 'agent' && Types.ObjectId.isValid(auth.userId)) {
+    if (
+      (viewerRole === 'agent' || viewerRole === 'support') &&
+      Types.ObjectId.isValid(auth.userId)
+    ) {
       baseScope.actorId = new Types.ObjectId(auth.userId);
     } else if (viewerRole === 'manager' && db && Types.ObjectId.isValid(auth.userId)) {
       const teamMembers = await db

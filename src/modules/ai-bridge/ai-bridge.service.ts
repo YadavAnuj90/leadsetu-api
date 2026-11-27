@@ -15,6 +15,7 @@ import { Tenant, TenantDocument } from '../auth/schemas/tenant.schema';
 import { User, UserDocument } from '../auth/schemas/user.schema';
 import { resolveOwnerScopeFilter } from '../auth/identity.util';
 import { SuperAdminService } from '../super-admin/super-admin.service';
+import { resolveEffectiveAiProviderConfig } from '../super-admin/platform-vaults.util';
 import type { FeatureKey } from '../super-admin/schemas/platform-config.schema';
 
 export interface AiGatewayResponse<T = Record<string, unknown>> {
@@ -97,7 +98,10 @@ export class AiBridgeService {
       if (!user.isActive) {
         return { allowed: false, reason: 'User account is inactive.' };
       }
-      if (input.task === 'workflow_draft' && user.role === 'agent') {
+      if (
+        input.task === 'workflow_draft' &&
+        (user.role === 'agent' || user.role === 'support')
+      ) {
         return {
           allowed: false,
           reason: `Role '${user.role}' cannot generate workflows.`,
@@ -197,7 +201,12 @@ export class AiBridgeService {
         .findById(userId)
         .select('role featureAccess aiDailyCallLimit aiCallsToday aiCallsDayKey')
         .lean();
-      if (user && (user.role === 'manager' || user.role === 'agent')) {
+      if (
+        user &&
+        (user.role === 'manager' ||
+          user.role === 'agent' ||
+          user.role === 'support')
+      ) {
         const fa = (user.featureAccess || {}) as Record<string, boolean | undefined>;
         if (fa['aiScoring'] === false || fa[pillarKey] === false) {
           throw new ForbiddenException(
@@ -262,16 +271,36 @@ export class AiBridgeService {
   ): Promise<AiGatewayResponse<T> | null> {
     const tenantId = typeof payload.tenantId === 'string' ? payload.tenantId : '';
     const userId = typeof payload.userId === 'string' ? payload.userId : '';
-    const pillarKey = this.resolvePillarFeatureKey(path);
+    const pillarKey: FeatureKey =
+      payload.mode === 'voice_rfq'
+        ? 'aiVoiceQuote'
+        : this.resolvePillarFeatureKey(path);
     if (!options?.skipMetering && (tenantId || userId)) {
       await this.assertTenantAiBalanceAvailable(tenantId, userId, pillarKey);
     }
+
+    const effAi = await resolveEffectiveAiProviderConfig(
+      this.tenantModel.db,
+      this.configService,
+    );
+    const enrichedPayload =
+      effAi.enabled &&
+      (effAi.openaiApiKey || effAi.geminiApiKey || effAi.claudeApiKey)
+        ? {
+            ...payload,
+            providerKeys: {
+              ...(effAi.openaiApiKey ? { openaiApiKey: effAi.openaiApiKey } : {}),
+              ...(effAi.geminiApiKey ? { geminiApiKey: effAi.geminiApiKey } : {}),
+              ...(effAi.claudeApiKey ? { claudeApiKey: effAi.claudeApiKey } : {}),
+            },
+          }
+        : payload;
 
     const secret = this.getInternalSecret();
     try {
       const res = await axios.post<AiGatewayResponse<T>>(
         `${this.getAiUrl()}${path}`,
-        payload,
+        enrichedPayload,
         {
           headers: {
             'Content-Type': 'application/json',
@@ -531,6 +560,75 @@ export class AiBridgeService {
       ...input,
       mode: 'rfq',
     });
+  }
+
+  async parseVoiceNoteToQuote(input: {
+    tenantId: string;
+    userId: string;
+    userRole?: string;
+    context: {
+      audioUrl?: string;
+      audioDataUrl?: string;
+      transcript?: string;
+      dealerName?: string;
+      dealerCity?: string;
+      companyName?: string;
+    };
+  }) {
+    const tenantFilterValues: Array<string | Types.ObjectId> = [input.tenantId];
+    if (Types.ObjectId.isValid(input.tenantId)) {
+      tenantFilterValues.push(new Types.ObjectId(input.tenantId));
+    }
+
+    let catalogProducts: Array<{
+      id: string;
+      name: string;
+      sku?: string;
+      hsnSac?: string;
+      unitPrice: number;
+      gstRate?: number;
+      category?: string;
+      unit?: string;
+    }> = [];
+
+    try {
+      const docs = await this.tenantModel.db
+        .collection('products')
+        .find({
+          tenantId: { $in: tenantFilterValues },
+          isActive: { $ne: false },
+        })
+        .sort({ updatedAt: -1 })
+        .limit(80)
+        .toArray();
+      catalogProducts = docs.map((p) => ({
+        id: String(p._id),
+        name: String(p.name || ''),
+        sku: String(p.sku || ''),
+        hsnSac: String(p.hsnSac || '850440'),
+        unitPrice: Number(p.unitPrice || 0),
+        gstRate: Number(p.gstRate ?? 18),
+        category: String(p.category || ''),
+        unit: String(p.unit || 'pcs'),
+      }));
+    } catch {
+      // ignore catalog lookup fallback
+    }
+
+    return this.postAi(
+      '/ai/pillars/dealer-desk',
+      {
+        tenantId: input.tenantId,
+        userId: input.userId,
+        userRole: input.userRole,
+        mode: 'voice_rfq',
+        context: {
+          ...input.context,
+          catalogProducts,
+        },
+      },
+      45000,
+    );
   }
 
   async buildBeatPlan(input: {

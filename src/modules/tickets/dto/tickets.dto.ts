@@ -77,6 +77,9 @@ export class CreateTicketDto {
   @ApiPropertyOptional({ example: 'IND-STAB-150 · SN#260489' })
   productSerialOrSku?: string;
 
+  @ApiPropertyOptional({ example: '660f1a...' })
+  assignedToUserId?: string;
+
   @ApiPropertyOptional({ example: 'Er. Pradeep Verma (NCR Field Lead)' })
   assignedToName?: string;
 

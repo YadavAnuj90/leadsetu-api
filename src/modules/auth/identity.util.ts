@@ -186,6 +186,26 @@ export const USER_FEATURE_LABELS: Record<UserFeatureKey, string> = {
  * When `input` is omitted for managers/agents on creation or legacy profiles, defaults to true
  * unless `workspaceEffective` explicitly disables a workspace-level entitlement.
  */
+export const SUPPORT_DEFAULT_FEATURE_ACCESS: Record<UserFeatureKey, boolean> = {
+  leads: false,
+  aiScoring: false,
+  contacts: true,
+  deals: false,
+  whatsappCloud: true,
+  whatsappBroadcasts: false,
+  tasks: true,
+  slaTickets: true,
+  aiWorkflows: false,
+  analytics: false,
+  products: false,
+  gstBilling: false,
+  documentVault: true,
+  aiCreditRisk: false,
+  aiVoiceCrm: true,
+  aiDealerDesk: false,
+  aiCopilot: true,
+};
+
 export function normalizeUserFeatureAccess(
   input: Record<string, unknown> | undefined | null,
   role: string,
@@ -205,10 +225,13 @@ export function normalizeUserFeatureAccess(
       continue;
     }
 
+    const defaultForRole =
+      role === 'support' ? SUPPORT_DEFAULT_FEATURE_ACCESS[key] : true;
+
     const requested =
       input && typeof input === 'object' && key in input
         ? Boolean(input[key])
-        : true;
+        : defaultForRole;
     out[key] = workspaceAllowed && requested;
   }
   return out;

@@ -31,6 +31,8 @@ import { LeadRoutingService } from '../lead-routing/lead-routing.service';
 import { MetaCapiService } from '../meta-capi/meta-capi.service';
 import { MarketplaceSyncService } from '../marketplace-sync/marketplace-sync.service';
 import { dispatchMentionNotifications } from '../../common/mentions/mention-notifications.util';
+import { resolveEffectiveGstinProviderConfig } from '../super-admin/platform-vaults.util';
+import { evaluateGstinTrustProfile, type LeadGstinProfile } from './gstin.util';
 
 export interface CreateLeadDto {
   name: string;
@@ -39,6 +41,7 @@ export interface CreateLeadDto {
   phone?: string;
   email?: string;
   city?: string;
+  gstin?: string;
   source?: LeadSource;
   status?: LeadStatus;
   estimatedValue?: number;
@@ -562,6 +565,8 @@ export class LeadsService {
       phone: maskPhones ? maskPhoneNumber(doc.phone) : doc.phone || '',
       email: doc.email || '',
       city: doc.city || 'Delhi-NCR',
+      gstin: doc.gstin || '',
+      gstinProfile: doc.gstinProfile || undefined,
       source: doc.source,
       status: doc.status,
       estimatedValue: doc.estimatedValue || 0,
@@ -825,6 +830,18 @@ export class LeadsService {
       phone: dto.phone?.trim() || '',
       email: dto.email?.trim().toLowerCase() || '',
       city: dto.city?.trim() || 'New Delhi',
+      gstin: dto.gstin?.trim().toUpperCase() || '',
+      ...(dto.gstin?.trim()
+        ? {
+            gstinProfile: await this.buildGstinProfileForTenant(
+              auth.tenantId,
+              dto.gstin,
+              dto.company,
+              dto.city,
+              dto.phone,
+            ),
+          }
+        : {}),
       source: dto.source || 'whatsapp',
       status: dto.status || 'new',
       estimatedValue: Number(dto.estimatedValue) || 0,
@@ -932,6 +949,20 @@ export class LeadsService {
     if (dto.phone !== undefined) doc.phone = dto.phone.trim();
     if (dto.email !== undefined) doc.email = dto.email.trim().toLowerCase();
     if (dto.city !== undefined) doc.city = dto.city.trim();
+    if (dto.gstin !== undefined) {
+      const cleanedGstin = dto.gstin.trim().toUpperCase();
+      doc.gstin = cleanedGstin;
+      doc.gstinProfile = cleanedGstin
+        ? await this.buildGstinProfileForTenant(
+            auth.tenantId,
+            cleanedGstin,
+            doc.company,
+            doc.city,
+            doc.phone,
+          )
+        : undefined;
+      doc.markModified('gstinProfile');
+    }
     if (dto.source !== undefined) doc.source = dto.source;
     if (dto.status !== undefined) doc.status = dto.status;
     if (dto.estimatedValue !== undefined)
@@ -2302,6 +2333,155 @@ export class LeadsService {
 
     return {
       routing: routed,
+      lead: this.toDto(doc, maskPhones),
+    };
+  }
+
+  private async buildGstinProfileForTenant(
+    tenantId: string,
+    gstin: string,
+    company?: string,
+    city?: string,
+    phone?: string,
+  ): Promise<LeadGstinProfile> {
+    let overdueInvoicesCount = 0;
+    let overdueAmountInr = 0;
+    try {
+      const tenantObjectId = new Types.ObjectId(tenantId);
+      const orClauses: Record<string, unknown>[] = [];
+      const cleanGstin = gstin.trim().toUpperCase();
+      if (cleanGstin) orClauses.push({ clientGstin: cleanGstin });
+      if (company?.trim()) {
+        orClauses.push({
+          clientName: {
+            $regex: company.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+            $options: 'i',
+          },
+        });
+      }
+      const digits = this.last10Digits(phone);
+      if (digits.length === 10) {
+        orClauses.push({ phone: { $regex: `${digits.slice(0, 5)}\\D*${digits.slice(5)}$` } });
+      }
+      if (orClauses.length > 0) {
+        const overdueDocs = await this.leadModel.db
+          .collection('invoices')
+          .find({
+            tenantId: tenantObjectId,
+            $or: orClauses,
+            status: { $in: ['overdue', 'partial', 'unpaid'] },
+          })
+          .limit(10)
+          .toArray();
+        const now = Date.now();
+        for (const inv of overdueDocs) {
+          const bal = Number(inv.balanceDue ?? inv.grandTotal ?? 0);
+          const isOverdue =
+            String(inv.status) === 'overdue' ||
+            (inv.dueDate && new Date(String(inv.dueDate)).getTime() < now);
+          if (isOverdue && bal > 0) {
+            overdueInvoicesCount += 1;
+            overdueAmountInr += bal;
+          }
+        }
+      }
+    } catch {
+      // ignore optional invoice exposure check
+    }
+
+    const effGstin = await resolveEffectiveGstinProviderConfig(
+      this.leadModel.db,
+      this.configService,
+    );
+
+    return evaluateGstinTrustProfile({
+      gstin,
+      company,
+      city,
+      overdueInvoicesCount,
+      overdueAmountInr,
+      liveApiUrl: effGstin.isLiveConfigured ? effGstin.apiUrlTemplate : undefined,
+      liveApiKey: effGstin.isLiveConfigured ? effGstin.apiKey : undefined,
+    });
+  }
+
+  async verifyGstinPreview(
+    auth: AuthContext,
+    payload: { gstin: string; company?: string; city?: string; phone?: string },
+  ): Promise<LeadGstinProfile> {
+    await this.superAdminService?.assertFeatureEnabled(auth.tenantId, 'gstinTrustGuard');
+    if (!payload.gstin?.trim()) {
+      throw new BadRequestException('GSTIN is required for verification.');
+    }
+    return this.buildGstinProfileForTenant(
+      auth.tenantId,
+      payload.gstin,
+      payload.company,
+      payload.city,
+      payload.phone,
+    );
+  }
+
+  async verifyLeadGstin(
+    auth: AuthContext,
+    id: string,
+    payload?: { gstin?: string },
+  ) {
+    await this.superAdminService?.assertFeatureEnabled(auth.tenantId, 'gstinTrustGuard');
+    if (!Types.ObjectId.isValid(id)) {
+      throw new NotFoundException('Lead not found.');
+    }
+    const ownerScope = await resolveOwnerScopeFilter(this.leadModel.db, auth);
+    const doc = await this.leadModel
+      .findOne({
+        _id: new Types.ObjectId(id),
+        tenantId: new Types.ObjectId(auth.tenantId),
+        ...ownerScope,
+      })
+      .exec();
+    if (!doc) {
+      throw new NotFoundException('Lead not found.');
+    }
+
+    const targetGstin = (payload?.gstin ?? doc.gstin ?? '').trim().toUpperCase();
+    if (!targetGstin) {
+      throw new BadRequestException(
+        'Enter a 15-character buyer GSTIN before verifying.',
+      );
+    }
+
+    const profile = await this.buildGstinProfileForTenant(
+      auth.tenantId,
+      targetGstin,
+      doc.company,
+      doc.city,
+      doc.phone,
+    );
+    doc.gstin = profile.gstin;
+    doc.gstinProfile = profile;
+    if (profile.checksumValid && profile.trustScore >= 75 && doc.aiScore < 85) {
+      doc.aiScore = Math.min(99, Math.max(doc.aiScore || 70, doc.aiScore + 8));
+      doc.aiLabel = doc.aiScore >= 80 ? 'Hot' : doc.aiScore >= 58 ? 'Warm' : 'Cold';
+    }
+    doc.activities = [
+      {
+        id: randomBytes(6).toString('hex'),
+        type: 'ai_score',
+        description: `GSTIN Trust Check (${profile.gstin}): ${profile.status} · Score ${profile.trustScore}/100 · ${profile.entityType || 'Business'} (${profile.stateName || 'India'}). ${profile.creditAdvice}`,
+        authorName: auth.email.split('@')[0],
+        createdAt: new Date().toISOString(),
+      },
+      ...(doc.activities || []),
+    ];
+    doc.markModified('gstinProfile');
+    await doc.save();
+
+    const maskPhones = this.auditService
+      ? await this.auditService.shouldMaskViewerPhones(auth.tenantId, auth.userId)
+      : false;
+
+    return {
+      profile,
       lead: this.toDto(doc, maskPhones),
     };
   }

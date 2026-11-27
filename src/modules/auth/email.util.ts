@@ -44,6 +44,7 @@ const logger = new Logger('AuthEmailService');
 function formatRoleLabel(role: string): string {
   if (role === 'manager') return 'Sales Manager';
   if (role === 'agent') return 'Sales User';
+  if (role === 'support') return 'Support Engineer';
   if (role === 'admin') return 'Workspace Admin';
   return role;
 }

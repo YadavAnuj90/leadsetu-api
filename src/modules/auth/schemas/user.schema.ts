@@ -8,7 +8,8 @@ export type UserRole =
   | 'owner'
   | 'admin'
   | 'manager'
-  | 'agent';
+  | 'agent'
+  | 'support';
 
 @Schema({ timestamps: true, collection: 'users' })
 export class User {
@@ -36,7 +37,7 @@ export class User {
 
   @Prop({
     default: 'owner',
-    enum: ['super_admin', 'owner', 'admin', 'manager', 'agent'],
+    enum: ['super_admin', 'owner', 'admin', 'manager', 'agent', 'support'],
   })
   role!: UserRole;
 

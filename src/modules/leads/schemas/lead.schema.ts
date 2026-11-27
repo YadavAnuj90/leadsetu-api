@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
+import type { LeadGstinProfile } from '../gstin.util';
 
 export type LeadDocument = HydratedDocument<Lead>;
 
@@ -74,6 +75,12 @@ export class Lead {
 
   @Prop({ trim: true, default: 'Delhi-NCR' })
   city!: string;
+
+  @Prop({ trim: true, uppercase: true, default: '', index: true })
+  gstin?: string;
+
+  @Prop({ type: Object })
+  gstinProfile?: LeadGstinProfile;
 
   @Prop({
     default: 'whatsapp',

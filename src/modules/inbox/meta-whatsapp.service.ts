@@ -428,11 +428,55 @@ export class MetaWhatsAppService {
     });
   }
 
+  async downloadMediaAsDataUrl(params: {
+    mediaId: string;
+    accessToken: string;
+    fallbackMimeType?: string;
+  }): Promise<{ dataUrl: string; mimeType: string } | null> {
+    if (!params.mediaId || !params.accessToken) return null;
+    try {
+      const metaInfoUrl = `${this.getGraphBaseUrl()}/${encodeURIComponent(params.mediaId)}`;
+      const metaRes = await axios.get<{ url?: string; mime_type?: string }>(
+        metaInfoUrl,
+        {
+          headers: { Authorization: `Bearer ${params.accessToken}` },
+          timeout: 10000,
+        },
+      );
+      const downloadUrl = metaRes.data?.url;
+      if (!downloadUrl) return null;
+      const fileRes = await axios.get<ArrayBuffer>(downloadUrl, {
+        headers: { Authorization: `Bearer ${params.accessToken}` },
+        responseType: 'arraybuffer',
+        timeout: 20000,
+      });
+      const mimeType = (
+        metaRes.data?.mime_type ||
+        String(fileRes.headers['content-type'] || '') ||
+        params.fallbackMimeType ||
+        'audio/ogg'
+      )
+        .split(';')[0]
+        .trim();
+      const b64 = Buffer.from(fileRes.data).toString('base64');
+      if (!b64) return null;
+      return {
+        dataUrl: `data:${mimeType};base64,${b64}`,
+        mimeType,
+      };
+    } catch (err) {
+      this.logger.warn(
+        `Meta media download failed (${params.mediaId}): ${this.extractGraphError(err)}`,
+      );
+      return null;
+    }
+  }
+
   async sendAttachment(params: {
     phoneNumberId: string;
     accessToken: string;
     toPhone: string;
-    type: 'document' | 'image';
+    type: 'document' | 'image' | 'audio';
     url: string;
     filename?: string;
     mimeType?: string;
@@ -471,6 +515,16 @@ export class MetaWhatsAppService {
           ...mediaRef,
           ...(params.caption ? { caption: params.caption } : {}),
         },
+      });
+    }
+
+    if (params.type === 'audio') {
+      return this.postGraphMessage(params.phoneNumberId, params.accessToken, {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to,
+        type: 'audio',
+        audio: mediaRef,
       });
     }
 

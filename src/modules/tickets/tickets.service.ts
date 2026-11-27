@@ -122,6 +122,9 @@ export class Ticket {
   @Prop({ trim: true, default: '' })
   productSerialOrSku!: string;
 
+  @Prop({ trim: true, default: '', index: true })
+  assignedToUserId!: string;
+
   @Prop({ trim: true, default: '' })
   assignedToName!: string;
 
@@ -230,6 +233,7 @@ export class TicketsService {
       linkedContactId: doc.linkedContactId || '',
       linkedInvoiceNumber: doc.linkedInvoiceNumber || '',
       productSerialOrSku: doc.productSerialOrSku || '',
+      assignedToUserId: doc.assignedToUserId || '',
       assignedToName: doc.assignedToName || '',
       assignedToPhone: doc.assignedToPhone || '',
       slaDueAt: doc.slaDueAt || '',
@@ -249,6 +253,115 @@ export class TicketsService {
     };
   }
 
+    private async resolveViewerRole(auth: TicketAuthContext): Promise<string> {
+    if (!Types.ObjectId.isValid(auth.userId)) return '';
+    try {
+      const userDoc = await this.ticketModel.db
+        .collection('users')
+        .findOne(
+          { _id: new Types.ObjectId(auth.userId) },
+          { projection: { role: 1 } },
+        );
+      return String(userDoc?.role || '');
+    } catch {
+      return '';
+    }
+  }
+
+  private async resolveTicketScopeFilter(
+    auth: TicketAuthContext,
+    assignedOnly = false,
+  ): Promise<Record<string, unknown>> {
+    const liveRole = await this.resolveViewerRole(auth);
+    if (
+      liveRole === 'super_admin' ||
+      liveRole === 'owner' ||
+      liveRole === 'admin'
+    ) {
+      return assignedOnly ? { assignedToUserId: auth.userId } : {};
+    }
+    if (!Types.ObjectId.isValid(auth.userId)) {
+      return { ownerId: null };
+    }
+    if (assignedOnly) {
+      return { assignedToUserId: auth.userId };
+    }
+    const userObjId = new Types.ObjectId(auth.userId);
+    if (liveRole === 'support') {
+      return {
+        $or: [
+          { assignedToUserId: auth.userId },
+          { ownerId: userObjId },
+          {
+            $and: [
+              {
+                $or: [
+                  { assignedToUserId: '' },
+                  { assignedToUserId: { $exists: false } },
+                ],
+              },
+              {
+                $or: [
+                  { assignedToName: '' },
+                  { assignedToName: { $exists: false } },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+    }
+    return {
+      $or: [{ ownerId: userObjId }, { assignedToUserId: auth.userId }],
+    };
+  }
+
+  async listAssignees(auth: TicketAuthContext) {
+    const tenantObjectId = new Types.ObjectId(auth.tenantId);
+    const users = await this.ticketModel.db
+      .collection('users')
+      .find(
+        { tenantId: tenantObjectId, isActive: { $ne: false } },
+        {
+          projection: {
+            _id: 1,
+            name: 1,
+            phone: 1,
+            role: 1,
+            userCode: 1,
+            territory: 1,
+          },
+        },
+      )
+      .toArray();
+
+    const priorityOrder: Record<string, number> = {
+      support: 0,
+      agent: 1,
+      manager: 2,
+      admin: 3,
+      owner: 4,
+    };
+
+    const sorted = users
+      .map((u) => ({
+        id: u._id.toString(),
+        name: String(u.name || ''),
+        phone: String(u.phone || ''),
+        role: String(u.role || 'agent'),
+        userCode: String(u.userCode || ''),
+        territory: String(u.territory || ''),
+      }))
+      .sort((a, b) => {
+        const pa = priorityOrder[a.role] ?? 5;
+        const pb = priorityOrder[b.role] ?? 5;
+        if (pa !== pb) return pa - pb;
+        return a.name.localeCompare(b.name);
+      });
+
+    return { data: sorted };
+  }
+
   async findAll(
     auth: TicketAuthContext,
     query: {
@@ -256,39 +369,54 @@ export class TicketsService {
       priority?: string;
       category?: string;
       slaBreached?: string;
+      assignedOnly?: string;
       search?: string;
     },
   ) {
     const tenantObjectId = new Types.ObjectId(auth.tenantId);
-    const ownerScope = await resolveOwnerScopeFilter(this.ticketModel.db, auth);
+    const assignedOnly = query.assignedOnly === 'true';
+    const [allTicketScope, filteredScope] = await Promise.all([
+      this.resolveTicketScopeFilter(auth, false),
+      this.resolveTicketScopeFilter(auth, assignedOnly),
+    ]);
     const baseScope: Record<string, unknown> = {
       tenantId: tenantObjectId,
-      ...ownerScope,
+      ...allTicketScope,
     };
-    const filter: Record<string, unknown> = { ...baseScope };
+    const andClauses: Record<string, unknown>[] = [
+      { tenantId: tenantObjectId },
+    ];
+    if (Object.keys(filteredScope).length > 0) {
+      andClauses.push(filteredScope);
+    }
 
     if (query.status && query.status !== 'all') {
-      filter.status = query.status;
+      andClauses.push({ status: query.status });
     }
     if (query.priority && query.priority !== 'all') {
-      filter.priority = query.priority;
+      andClauses.push({ priority: query.priority });
     }
     if (query.category && query.category !== 'all') {
-      filter.category = query.category;
+      andClauses.push({ category: query.category });
     }
     if (query.search?.trim()) {
       const rx = new RegExp(query.search.trim(), 'i');
-      filter.$or = [
-        { ticketNumber: rx },
-        { subject: rx },
-        { customerName: rx },
-        { company: rx },
-        { linkedInvoiceNumber: rx },
-        { productSerialOrSku: rx },
-        { assignedToName: rx },
-        { siteAddress: rx },
-      ];
+      andClauses.push({
+        $or: [
+          { ticketNumber: rx },
+          { subject: rx },
+          { customerName: rx },
+          { company: rx },
+          { linkedInvoiceNumber: rx },
+          { productSerialOrSku: rx },
+          { assignedToName: rx },
+          { siteAddress: rx },
+        ],
+      });
     }
+
+    const filter: Record<string, unknown> =
+      andClauses.length === 1 ? andClauses[0] : { $and: andClauses };
 
     const [docs, allDocs, maskPhones] = await Promise.all([
       this.ticketModel.find(filter).sort({ createdAt: -1 }).exec(),
@@ -340,7 +468,7 @@ export class TicketsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Ticket not found.');
     }
-    const ownerScope = await resolveOwnerScopeFilter(this.ticketModel.db, auth);
+    const ownerScope = await this.resolveTicketScopeFilter(auth);
     const doc = await this.ticketModel
       .findOne({
         _id: new Types.ObjectId(id),
@@ -410,6 +538,7 @@ export class TicketsService {
       linkedContactId: dto.linkedContactId?.trim() || '',
       linkedInvoiceNumber: dto.linkedInvoiceNumber?.trim() || '',
       productSerialOrSku: dto.productSerialOrSku?.trim() || '',
+      assignedToUserId: dto.assignedToUserId?.trim() || '',
       assignedToName: dto.assignedToName?.trim() || '',
       assignedToPhone: dto.assignedToPhone?.trim() || '',
       slaDueAt: dto.slaDueAt || defaultSla,
@@ -441,7 +570,7 @@ export class TicketsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Ticket not found.');
     }
-    const ownerScope = await resolveOwnerScopeFilter(this.ticketModel.db, auth);
+    const ownerScope = await this.resolveTicketScopeFilter(auth);
     const doc = await this.ticketModel
       .findOne({
         _id: new Types.ObjectId(id),
@@ -487,6 +616,9 @@ export class TicketsService {
     }
     if (dto.productSerialOrSku !== undefined) {
       doc.productSerialOrSku = dto.productSerialOrSku.trim();
+    }
+    if (dto.assignedToUserId !== undefined) {
+      doc.assignedToUserId = dto.assignedToUserId.trim();
     }
     if (dto.assignedToName !== undefined) {
       doc.assignedToName = dto.assignedToName.trim();
@@ -567,7 +699,10 @@ export class TicketsService {
     if (!dto.message?.trim()) {
       throw new BadRequestException('Comment message is required.');
     }
-    const ownerScope = await resolveOwnerScopeFilter(this.ticketModel.db, auth);
+    const [ownerScope, liveRole] = await Promise.all([
+      this.resolveTicketScopeFilter(auth),
+      this.resolveViewerRole(auth),
+    ]);
     const doc = await this.ticketModel
       .findOne({
         _id: new Types.ObjectId(id),
@@ -580,6 +715,7 @@ export class TicketsService {
     }
 
     const nowIso = new Date().toISOString();
+    const defaultRole = liveRole === 'support' ? 'engineer' : 'agent';
     const entry: TicketComment = {
       id: `cmt-${Date.now()}-${randomBytes(2).toString('hex')}`,
       authorName:
@@ -587,7 +723,7 @@ export class TicketsService {
         auth.name ||
         auth.email ||
         'Support Engineer',
-      authorRole: dto.authorRole || 'agent',
+      authorRole: dto.authorRole || defaultRole,
       message: dto.message.trim(),
       isInternal: Boolean(dto.isInternal),
       createdAt: nowIso,
@@ -630,7 +766,7 @@ export class TicketsService {
     if (!Types.ObjectId.isValid(id)) {
       throw new NotFoundException('Ticket not found.');
     }
-    const ownerScope = await resolveOwnerScopeFilter(this.ticketModel.db, auth);
+    const ownerScope = await this.resolveTicketScopeFilter(auth);
     const doc = await this.ticketModel
       .findOneAndDelete({
         _id: new Types.ObjectId(id),

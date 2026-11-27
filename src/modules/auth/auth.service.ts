@@ -210,7 +210,7 @@ export class AuthService {
     const viewerMasked = Boolean(
       user.maskPhones ||
         ((tenant.maskPhoneForAgents || effectiveState?.forcePhoneMasking) &&
-          user.role === 'agent'),
+          (user.role === 'agent' || user.role === 'support')),
     );
 
     const rawUser = user.toObject() as unknown as { createdAt?: Date };
@@ -510,7 +510,7 @@ export class AuthService {
     const viewerMasked = Boolean(
       user.maskPhones ||
         ((tenant?.maskPhoneForAgents || effectiveState?.forcePhoneMasking) &&
-          user.role === 'agent'),
+          (user.role === 'agent' || user.role === 'support')),
     );
 
     const rawUser = user.toObject() as unknown as { createdAt?: Date };

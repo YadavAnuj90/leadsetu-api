@@ -62,9 +62,9 @@ import {
   type CommissionBasis,
 } from './commission.util';
 
-type Role = 'owner' | 'admin' | 'manager' | 'agent';
+type Role = 'owner' | 'admin' | 'manager' | 'agent' | 'support';
 type AssignableRole = Exclude<Role, 'owner'>;
-const ASSIGNABLE_ROLES: AssignableRole[] = ['admin', 'manager', 'agent'];
+const ASSIGNABLE_ROLES: AssignableRole[] = ['admin', 'manager', 'agent', 'support'];
 
 /** Collections whose `ownerId` is re-assigned when a member is removed. */
 const OWNED_COLLECTIONS = ['leads', 'deals', 'tasks', 'contacts'];
@@ -578,6 +578,7 @@ export class TeamService {
         admins: byRole('admin'),
         managers: byRole('manager'),
         agents: byRole('agent'),
+        supports: byRole('support'),
         totalMonthlyTarget: all.reduce((s, m) => s + (m.monthlyTarget || 0), 0),
         totalWonRevenue: all.reduce((s, m) => s + (perf.get(m._id.toString())?.wonRevenue || 0), 0),
       },
@@ -650,6 +651,7 @@ export class TeamService {
           phone,
           passwordHash: hashSecret(password),
           role,
+          departmentPreset: role === 'support' ? 'service' : 'sales',
           featureAccess,
           inviteTokenHash: invite.tokenHash,
           inviteExpiresAt,
@@ -773,6 +775,17 @@ export class TeamService {
     if (dto.role !== undefined) {
       this.assertRoleAssignable(actor, dto.role);
       member.role = dto.role;
+      if (dto.role === 'support') {
+        member.departmentPreset = 'service';
+        if (dto.featureAccess === undefined) {
+          member.featureAccess = normalizeUserFeatureAccess(
+            undefined,
+            'support',
+            workspaceLimits,
+          );
+          member.markModified('featureAccess');
+        }
+      }
     }
     if (dto.territory !== undefined) member.territory = dto.territory.trim();
     if (dto.monthlyTarget !== undefined) member.monthlyTarget = this.validateTarget(dto.monthlyTarget);

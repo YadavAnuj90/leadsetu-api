@@ -1853,7 +1853,12 @@ export class InboxService {
     const normalizedAttachment: ChatAttachment | undefined =
       params.attachment?.url?.trim()
         ? {
-            type: params.attachment.type === 'image' ? 'image' : 'document',
+            type:
+              params.attachment.type === 'image'
+                ? 'image'
+                : params.attachment.type === 'audio'
+                  ? 'audio'
+                  : 'document',
             url: params.attachment.url.trim(),
             filename: params.attachment.filename?.trim() || undefined,
             mimeType: params.attachment.mimeType?.trim() || undefined,
@@ -3987,6 +3992,20 @@ export class InboxService {
         },
       };
     }
+    if (type === 'audio' || type === 'voice') {
+      const audioObj = (msg.audio || msg.voice) as
+        | { id?: string; mime_type?: string; voice?: boolean }
+        | undefined;
+      return {
+        text: '[Voice Note received via WhatsApp]',
+        attachment: {
+          type: 'audio',
+          url: audioObj?.id ? `meta-media://${audioObj.id}` : '',
+          filename: 'whatsapp-voice-note.ogg',
+          mimeType: audioObj?.mime_type || 'audio/ogg',
+        },
+      };
+    }
     return { text: `[${type} message received via WhatsApp]` };
   }
 
@@ -4190,6 +4209,49 @@ export class InboxService {
             '';
           const extracted = this.extractInboundMetaContent(msg);
           const nowIso = new Date().toISOString();
+
+          // Resolve inbound WhatsApp voice notes (`meta-media://<id>`) so reps can play & Whisper-transcribe directly
+          if (
+            extracted.attachment?.type === 'audio' &&
+            extracted.attachment.url.startsWith('meta-media://') &&
+            tenant
+          ) {
+            try {
+              const runtimeForMedia = this.resolveTenantWhatsAppRuntime(
+                tenant,
+                platform,
+              );
+              if (runtimeForMedia.accessToken) {
+                const mediaId = extracted.attachment.url.slice(
+                  'meta-media://'.length,
+                );
+                const downloaded =
+                  await this.metaWhatsAppService.downloadMediaAsDataUrl({
+                    mediaId,
+                    accessToken: runtimeForMedia.accessToken,
+                    fallbackMimeType: extracted.attachment.mimeType,
+                  });
+                if (downloaded?.dataUrl) {
+                  let finalAudioUrl = downloaded.dataUrl;
+                  try {
+                    finalAudioUrl = await uploadToCloudinary(downloaded.dataUrl, {
+                      folder: `leadsetu/${tenant._id.toString()}/voice-notes`,
+                      resourceType: 'auto',
+                    });
+                  } catch {
+                    // keep inline audio dataUrl when Cloudinary isn't active
+                  }
+                  extracted.attachment = {
+                    ...extracted.attachment,
+                    url: finalAudioUrl,
+                    mimeType: downloaded.mimeType,
+                  };
+                }
+              }
+            } catch {
+              // preserve metadata placeholder cleanly
+            }
+          }
 
           // Extract Meta Click-to-WhatsApp (CTWA) Ad referral payload when present
           const referral = (msg.referral && typeof msg.referral === 'object'

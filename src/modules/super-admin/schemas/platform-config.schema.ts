@@ -20,13 +20,16 @@ export type FeatureKey =
   | 'aiCreditRisk'
   | 'aiVoiceCrm'
   | 'aiDealerDesk'
-  | 'aiCopilot';
+  | 'aiCopilot'
+  | 'aiVoiceQuote'
+  | 'gstinTrustGuard';
 
 export const AI_PILLAR_FEATURE_KEYS = [
   'aiCreditRisk',
   'aiVoiceCrm',
   'aiDealerDesk',
   'aiCopilot',
+  'aiVoiceQuote',
 ] as const;
 
 export interface FeatureSpec {
@@ -116,6 +119,18 @@ export const PLATFORM_FEATURE_CATALOG: FeatureSpec[] = [
     description: 'WhatsApp multi-SKU RFQ parser & prioritized field beat route planner',
   },
   {
+    key: 'aiVoiceQuote',
+    label: 'Phase 1 · Hinglish Voice-Note-to-Quote',
+    category: 'AI & Automation',
+    description: 'Whisper Hinglish STT transcription, /products SKU pricing match & 1-click UPI QR cart',
+  },
+  {
+    key: 'gstinTrustGuard',
+    label: 'Phase 1 · B2B GSTIN Trust & Credit Guard',
+    category: 'Revenue & GST',
+    description: 'Mod-36 GSTIN verification, state & constitution audit, and workspace overdue ledger guard',
+  },
+  {
     key: 'aiCopilot',
     label: 'Ask AI · Tenant RAG Copilot',
     category: 'AI & Automation',
@@ -163,6 +178,8 @@ export const DEFAULT_PLAN_MATRIX: Record<
       aiVoiceCrm: false,
       aiDealerDesk: false,
       aiCopilot: false,
+      aiVoiceQuote: false,
+      gstinTrustGuard: true,
     },
   },
   growth: {
@@ -189,6 +206,8 @@ export const DEFAULT_PLAN_MATRIX: Record<
       aiVoiceCrm: true,
       aiDealerDesk: true,
       aiCopilot: true,
+      aiVoiceQuote: true,
+      gstinTrustGuard: true,
     },
   },
   enterprise: {
@@ -215,6 +234,8 @@ export const DEFAULT_PLAN_MATRIX: Record<
       aiVoiceCrm: true,
       aiDealerDesk: true,
       aiCopilot: true,
+      aiVoiceQuote: true,
+      gstinTrustGuard: true,
     },
   },
 };
@@ -225,6 +246,8 @@ export interface GlobalKillSwitches {
   webhooksEnabled: boolean;
   bulkExportsEnabled: boolean;
   impersonationEnabled: boolean;
+  voiceNoteQuoteEnabled: boolean;
+  gstinGuardEnabled: boolean;
 }
 
 export const DEFAULT_GLOBAL_KILL_SWITCHES: GlobalKillSwitches = {
@@ -233,6 +256,8 @@ export const DEFAULT_GLOBAL_KILL_SWITCHES: GlobalKillSwitches = {
   webhooksEnabled: true,
   bulkExportsEnabled: true,
   impersonationEnabled: true,
+  voiceNoteQuoteEnabled: true,
+  gstinGuardEnabled: true,
 };
 
 export interface GlobalSecurityPolicies {
@@ -344,6 +369,58 @@ export const DEFAULT_PLATFORM_RAZORPAY_GATEWAY: PlatformRazorpayGatewayConfig = 
   updatedAt: '',
 };
 
+export interface PlatformGstinProviderConfig {
+  enabled: boolean;
+  providerName: string;
+  apiUrlTemplate: string;
+  apiKeyEncrypted: string;
+  apiKeyMask: string;
+  lastTestedAt: string;
+  lastTestStatus: 'untested' | 'connected' | 'error';
+  lastError: string;
+  updatedAt: string;
+}
+
+export const DEFAULT_PLATFORM_GSTIN_PROVIDER: PlatformGstinProviderConfig = {
+  enabled: true,
+  providerName: 'External GSTN API',
+  apiUrlTemplate: '',
+  apiKeyEncrypted: '',
+  apiKeyMask: '',
+  lastTestedAt: '',
+  lastTestStatus: 'untested',
+  lastError: '',
+  updatedAt: '',
+};
+
+export interface PlatformAiProviderConfig {
+  enabled: boolean;
+  openaiApiKeyEncrypted: string;
+  openaiApiKeyMask: string;
+  geminiApiKeyEncrypted: string;
+  geminiApiKeyMask: string;
+  claudeApiKeyEncrypted: string;
+  claudeApiKeyMask: string;
+  lastTestedAt: string;
+  lastTestStatus: 'untested' | 'connected' | 'error';
+  lastError: string;
+  updatedAt: string;
+}
+
+export const DEFAULT_PLATFORM_AI_PROVIDER: PlatformAiProviderConfig = {
+  enabled: true,
+  openaiApiKeyEncrypted: '',
+  openaiApiKeyMask: '',
+  geminiApiKeyEncrypted: '',
+  geminiApiKeyMask: '',
+  claudeApiKeyEncrypted: '',
+  claudeApiKeyMask: '',
+  lastTestedAt: '',
+  lastTestStatus: 'untested',
+  lastError: '',
+  updatedAt: '',
+};
+
 @Schema({ timestamps: true, collection: 'platform_configs' })
 export class PlatformConfig {
   @Prop({ required: true, unique: true, default: 'global' })
@@ -381,6 +458,12 @@ export class PlatformConfig {
 
   @Prop({ type: Object, default: () => DEFAULT_PLATFORM_RAZORPAY_GATEWAY })
   razorpayGateway?: PlatformRazorpayGatewayConfig;
+
+  @Prop({ type: Object, default: () => DEFAULT_PLATFORM_GSTIN_PROVIDER })
+  gstinProvider?: PlatformGstinProviderConfig;
+
+  @Prop({ type: Object, default: () => DEFAULT_PLATFORM_AI_PROVIDER })
+  aiProvider?: PlatformAiProviderConfig;
 
   @Prop({ trim: true, default: '' })
   updatedByEmail?: string;

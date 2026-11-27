@@ -210,6 +210,37 @@ export class AiBridgeController {
     };
   }
 
+  @Post('voice-quote')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Phase 1 Moat: Transcribe Hinglish WhatsApp Voice Note (Whisper STT) + Auto-Match /products SKUs for Instant Quote',
+  })
+  async voiceNoteToQuote(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    body: {
+      audioUrl?: string;
+      audioDataUrl?: string;
+      transcript?: string;
+      dealerName?: string;
+      dealerCity?: string;
+      companyName?: string;
+    },
+  ) {
+    const auth = await this.aiBridge.verifyAuth(authorization);
+    const res = await this.aiBridge.parseVoiceNoteToQuote({
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      userRole: auth.role,
+      context: body,
+    });
+    return {
+      source: res ? 'leadsetu-ai' : 'unavailable',
+      response: res,
+    };
+  }
+
   @Post('chat')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({

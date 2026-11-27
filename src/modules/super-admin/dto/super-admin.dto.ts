@@ -65,8 +65,8 @@ export class UpdateTenantGovernanceDto {
 }
 
 export class UpdateTenantUserRbacDto {
-  @ApiPropertyOptional({ enum: ['owner', 'admin', 'manager', 'agent'] })
-  role?: 'owner' | 'admin' | 'manager' | 'agent';
+  @ApiPropertyOptional({ enum: ['owner', 'admin', 'manager', 'agent', 'support'] })
+  role?: 'owner' | 'admin' | 'manager' | 'agent' | 'support';
 
   @ApiPropertyOptional({
     enum: ['executive', 'sales', 'finance', 'service', 'marketing', 'operations'],

@@ -41,6 +41,7 @@ export class TicketsController {
   @ApiQuery({ name: 'priority', required: false })
   @ApiQuery({ name: 'category', required: false })
   @ApiQuery({ name: 'slaBreached', required: false })
+  @ApiQuery({ name: 'assignedOnly', required: false })
   @ApiQuery({ name: 'search', required: false })
   @ApiResponse({
     status: 200,
@@ -54,11 +55,23 @@ export class TicketsController {
       priority?: string;
       category?: string;
       slaBreached?: string;
+      assignedOnly?: string;
       search?: string;
     },
   ) {
     const auth = await this.ticketsService.verifyAuth(authorization);
     return this.ticketsService.findAll(auth, query);
+  }
+
+  @Get('assignees')
+  @ApiOperation({
+    summary: 'List active Support Engineers & workspace team assignees for ticket routing',
+  })
+  async listAssignees(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.ticketsService.verifyAuth(authorization);
+    return this.ticketsService.listAssignees(auth);
   }
 
   @Get(':id')

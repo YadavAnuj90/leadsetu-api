@@ -72,6 +72,12 @@ export class CreateLeadSwaggerDto implements CreateLeadDto {
   city?: string;
 
   @ApiPropertyOptional({
+    description: '15-character Indian Buyer GSTIN for instant verification & credit guard',
+    example: '09AABCR1234F1Z5',
+  })
+  gstin?: string;
+
+  @ApiPropertyOptional({
     description: 'Lead acquisition source channel',
     enum: [
       'whatsapp',
@@ -480,6 +486,34 @@ export class LeadsController {
   ) {
     const auth = await this.leadsService.verifyAuth(authorization);
     return this.leadsService.autoAssignLead(auth, id);
+  }
+
+  @Post('verify-gstin')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Verify a 15-character GSTIN and compute B2B Trust & Credit Guardrails',
+  })
+  async verifyGstinPreview(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    body: { gstin: string; company?: string; city?: string; phone?: string },
+  ) {
+    const auth = await this.leadsService.verifyAuth(authorization);
+    return this.leadsService.verifyGstinPreview(auth, body);
+  }
+
+  @Post(':id/verify-gstin')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Verify & save GSTIN Trust Profile + Credit-Risk Guardrails directly on a Lead',
+  })
+  async verifyLeadGstin(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id') id: string,
+    @Body() body?: { gstin?: string },
+  ) {
+    const auth = await this.leadsService.verifyAuth(authorization);
+    return this.leadsService.verifyLeadGstin(auth, id, body);
   }
 
   @Delete(':id')

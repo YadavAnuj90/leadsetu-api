@@ -6,7 +6,7 @@ export type ConversationDocument = HydratedDocument<ConversationThread>;
 export type LinkedCrmEntityType = '' | 'lead' | 'contact' | 'deal' | 'ticket';
 
 export interface ChatAttachment {
-  type: 'document' | 'image';
+  type: 'document' | 'image' | 'audio';
   url: string;
   filename?: string;
   mimeType?: string;

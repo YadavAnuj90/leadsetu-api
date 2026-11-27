@@ -44,13 +44,17 @@ import {
   DEFAULT_PLAN_MATRIX,
   DEFAULT_PLATFORM_RAZORPAY_GATEWAY,
   DEFAULT_PLATFORM_WHATSAPP_PROVIDER,
+  DEFAULT_PLATFORM_GSTIN_PROVIDER,
+  DEFAULT_PLATFORM_AI_PROVIDER,
   DEFAULT_SECURITY_POLICIES,
   FeatureKey,
   PLATFORM_FEATURE_CATALOG,
   PlatformAuditLog,
   PlatformAuditLogDocument,
+  PlatformAiProviderConfig,
   PlatformConfig,
   PlatformConfigDocument,
+  PlatformGstinProviderConfig,
   PlatformRazorpayGatewayConfig,
   PlatformWhatsAppProviderConfig,
   SaasCoupon,
@@ -62,6 +66,11 @@ import {
   detectRazorpayMode,
   resolveEffectiveRazorpayConfig,
 } from './razorpay-config.util';
+import {
+  resolveEffectiveAiProviderConfig,
+  resolveEffectiveGstinProviderConfig,
+} from './platform-vaults.util';
+import { validateGstinChecksum } from '../leads/gstin.util';
 import {
   BulkManageAiAuthorityDto,
   ChurnRescueActionDto,
@@ -92,7 +101,7 @@ const WA_UNIT_COST_INR = 0.88;
 
 const VALID_PLANS = ['starter', 'growth', 'enterprise'] as const;
 const VALID_STATUSES = ['trial', 'active', 'suspended'] as const;
-const VALID_ROLES: UserRole[] = ['owner', 'admin', 'manager', 'agent'];
+const VALID_ROLES: UserRole[] = ['owner', 'admin', 'manager', 'agent', 'support'];
 
 @Injectable()
 export class SuperAdminService implements OnModuleInit {
@@ -394,6 +403,15 @@ export class SuperAdminService implements OnModuleInit {
     >;
 
     const isKilledGlobally = (key: FeatureKey): boolean => {
+      if (key === 'gstinTrustGuard') {
+        return kills.gstinGuardEnabled === false;
+      }
+      if (key === 'aiVoiceQuote') {
+        return (
+          kills.geminiAiEnabled === false ||
+          kills.voiceNoteQuoteEnabled === false
+        );
+      }
       if (
         key === 'aiScoring' ||
         (AI_PILLAR_FEATURE_KEYS as readonly string[]).includes(key)
@@ -5383,5 +5401,541 @@ export class SuperAdminService implements OnModuleInit {
         config: await this.buildSanitizedRazorpayGateway(doc),
       };
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  GSTIN TRUST PROVIDER VAULT + CROSS-TENANT TELEMETRY
+  // ═══════════════════════════════════════════════════════════════
+
+  private async buildSanitizedGstinProvider(doc: PlatformConfigDocument) {
+    const raw: PlatformGstinProviderConfig = {
+      ...DEFAULT_PLATFORM_GSTIN_PROVIDER,
+      ...((doc.gstinProvider || {}) as Partial<PlatformGstinProviderConfig>),
+    };
+    const eff = await resolveEffectiveGstinProviderConfig(
+      this.connection,
+      this.configService,
+    );
+
+    return {
+      enabled: raw.enabled !== false,
+      providerName: eff.providerName,
+      apiUrlTemplate: eff.apiUrlTemplate,
+      hasApiKey: Boolean(eff.apiKey),
+      apiKeyMask:
+        raw.apiKeyMask || (eff.apiKey ? maskSecret(eff.apiKey) : ''),
+      source: eff.source,
+      isLiveConfigured: eff.isLiveConfigured,
+      lastTestedAt: raw.lastTestedAt || '',
+      lastTestStatus: raw.lastTestStatus || 'untested',
+      lastError: raw.lastError || '',
+      updatedAt: raw.updatedAt || '',
+    };
+  }
+
+  private async buildGstinCrossTenantTelemetry() {
+    try {
+      const verifiedLeads = await this.connection
+        .collection('leads')
+        .find({ 'gstinProfile.gstin': { $exists: true, $ne: '' } })
+        .sort({ 'gstinProfile.verifiedAt': -1 })
+        .limit(100)
+        .toArray();
+
+      const tenantIds = Array.from(
+        new Set(
+          verifiedLeads
+            .map((l) => (l.tenantId ? String(l.tenantId) : ''))
+            .filter((id) => Types.ObjectId.isValid(id)),
+        ),
+      ).map((id) => new Types.ObjectId(id));
+
+      const tenantDocs =
+        tenantIds.length > 0
+          ? await this.tenantModel
+              .find({ _id: { $in: tenantIds } })
+              .select('name accountId')
+              .lean()
+              .exec()
+          : [];
+      const tenantMap = new Map(
+        tenantDocs.map((t) => [String(t._id), { name: t.name, accountId: t.accountId }]),
+      );
+
+      let safeCreditCount = 0;
+      let advance50Count = 0;
+      let advance100Count = 0;
+      let invalidChecksumCount = 0;
+      let scoreSum = 0;
+      const stateCounts = new Map<string, number>();
+
+      const recentVerifications = verifiedLeads.slice(0, 15).map((l) => {
+        const gp = (l.gstinProfile || {}) as Record<string, unknown>;
+        const tMeta = tenantMap.get(String(l.tenantId));
+        return {
+          leadId: String(l._id),
+          leadName: String(l.name || 'Buyer'),
+          company: String(l.company || ''),
+          tenantName: tMeta?.name || 'Workspace',
+          tenantAccountId: tMeta?.accountId || '',
+          gstin: String(gp.gstin || l.gstin || ''),
+          stateName: String(gp.stateName || 'India'),
+          entityType: String(gp.entityType || 'Business'),
+          trustScore: Number(gp.trustScore || 0),
+          recommendedTerms: String(gp.recommendedTerms || 'partial_advance_50'),
+          checksumValid: Boolean(gp.checksumValid),
+          source: String(gp.source || 'checksum_guard'),
+          verifiedAt: String(gp.verifiedAt || ''),
+        };
+      });
+
+      for (const l of verifiedLeads) {
+        const gp = (l.gstinProfile || {}) as Record<string, unknown>;
+        const terms = String(gp.recommendedTerms || '');
+        if (terms === 'safe_credit') safeCreditCount += 1;
+        else if (terms === 'advance_100') advance100Count += 1;
+        else advance50Count += 1;
+        if (gp.checksumValid === false) invalidChecksumCount += 1;
+        scoreSum += Number(gp.trustScore || 0);
+        const st = String(gp.stateName || 'Other');
+        stateCounts.set(st, (stateCounts.get(st) || 0) + 1);
+      }
+
+      const topStates = Array.from(stateCounts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6)
+        .map(([stateName, count]) => ({ stateName, count }));
+
+      return {
+        totalVerified: verifiedLeads.length,
+        avgTrustScore:
+          verifiedLeads.length > 0 ? Math.round(scoreSum / verifiedLeads.length) : 0,
+        safeCreditCount,
+        advance50Count,
+        advance100Count,
+        invalidChecksumCount,
+        topStates,
+        recentVerifications,
+      };
+    } catch {
+      return {
+        totalVerified: 0,
+        avgTrustScore: 0,
+        safeCreditCount: 0,
+        advance50Count: 0,
+        advance100Count: 0,
+        invalidChecksumCount: 0,
+        topStates: [],
+        recentVerifications: [],
+      };
+    }
+  }
+
+  async getGstinProvider() {
+    const doc = await this.ensureGlobalConfig();
+    const [config, telemetry] = await Promise.all([
+      this.buildSanitizedGstinProvider(doc),
+      this.buildGstinCrossTenantTelemetry(),
+    ]);
+    return { config, telemetry };
+  }
+
+  async updateGstinProvider(
+    actor: SuperAdminActor,
+    dto: {
+      enabled?: boolean;
+      providerName?: string;
+      apiUrlTemplate?: string;
+      apiKey?: string;
+      clearApiKey?: boolean;
+    },
+    ipAddress?: string,
+  ) {
+    const doc = await this.ensureGlobalConfig();
+    const prev: PlatformGstinProviderConfig = {
+      ...DEFAULT_PLATFORM_GSTIN_PROVIDER,
+      ...((doc.gstinProvider || {}) as Partial<PlatformGstinProviderConfig>),
+    };
+
+    const next: PlatformGstinProviderConfig = {
+      ...prev,
+      enabled: dto.enabled !== undefined ? Boolean(dto.enabled) : prev.enabled !== false,
+      providerName:
+        dto.providerName !== undefined
+          ? dto.providerName.trim() || 'External GSTN API'
+          : prev.providerName,
+      apiUrlTemplate:
+        dto.apiUrlTemplate !== undefined
+          ? dto.apiUrlTemplate.trim()
+          : prev.apiUrlTemplate,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (dto.clearApiKey) {
+      next.apiKeyEncrypted = '';
+      next.apiKeyMask = '';
+      next.lastTestStatus = 'untested';
+      next.lastError = '';
+    } else if (dto.apiKey?.trim()) {
+      const k = dto.apiKey.trim();
+      next.apiKeyEncrypted = encryptSecret(k);
+      next.apiKeyMask = maskSecret(k);
+      next.lastTestStatus = 'untested';
+      next.lastError = '';
+    }
+
+    doc.gstinProvider = next;
+    doc.updatedByEmail = actor.email;
+    doc.markModified('gstinProvider');
+    await doc.save();
+
+    const [config, telemetry] = await Promise.all([
+      this.buildSanitizedGstinProvider(doc),
+      this.buildGstinCrossTenantTelemetry(),
+    ]);
+
+    await this.recordAudit(actor, {
+      action: 'platform.gstin_provider_updated',
+      severity: 'info',
+      summary: `Updated GSTIN Verification Vault (provider=${config.providerName}, source=${config.source}, enabled=${config.enabled})`,
+      ipAddress,
+    });
+
+    return { config, telemetry };
+  }
+
+  async testGstinProvider(dto?: {
+    apiUrlTemplate?: string;
+    apiKey?: string;
+    sampleGstin?: string;
+  }) {
+    const doc = await this.ensureGlobalConfig();
+    const eff = await resolveEffectiveGstinProviderConfig(
+      this.connection,
+      this.configService,
+    );
+
+    const sampleGstin = String(dto?.sampleGstin || '09AABCR1234F1Z5')
+      .trim()
+      .toUpperCase();
+    const checksumOk = validateGstinChecksum(sampleGstin);
+    const testUrl = String(dto?.apiUrlTemplate || eff.apiUrlTemplate || '').trim();
+    const testKey = String(dto?.apiKey || eff.apiKey || '').trim();
+    const nowIso = new Date().toISOString();
+    const prev: PlatformGstinProviderConfig = {
+      ...DEFAULT_PLATFORM_GSTIN_PROVIDER,
+      ...((doc.gstinProvider || {}) as Partial<PlatformGstinProviderConfig>),
+    };
+
+    if (!testUrl || !testKey) {
+      return {
+        ok: true,
+        mode: 'offline_checksum_guard' as const,
+        checksumValid: checksumOk,
+        sampleGstin,
+        error: '',
+        note: 'No external GSTN endpoint saved yet — offline Mod-36 check-digit & workspace ledger guard verified.',
+        config: await this.buildSanitizedGstinProvider(doc),
+      };
+    }
+
+    try {
+      const endpoint = testUrl.replace(/\{gstin\}/g, encodeURIComponent(sampleGstin));
+      const res = await axios.get<Record<string, unknown>>(endpoint, {
+        headers: {
+          Authorization: `Bearer ${testKey}`,
+          'x-api-key': testKey,
+        },
+        timeout: 10000,
+      });
+
+      if (!dto?.apiUrlTemplate && !dto?.apiKey) {
+        doc.gstinProvider = {
+          ...prev,
+          lastTestedAt: nowIso,
+          lastTestStatus: 'connected',
+          lastError: '',
+        };
+        doc.markModified('gstinProvider');
+        await doc.save();
+      }
+
+      return {
+        ok: true,
+        mode: 'live_gstn' as const,
+        checksumValid: checksumOk,
+        sampleGstin,
+        httpStatus: res.status,
+        error: '',
+        config: await this.buildSanitizedGstinProvider(doc),
+      };
+    } catch (err) {
+      const msg = axios.isAxiosError(err)
+        ? String(err.response?.data?.message || err.message)
+        : err instanceof Error
+          ? err.message
+          : 'Live GSTN API test failed';
+
+      if (!dto?.apiUrlTemplate && !dto?.apiKey) {
+        doc.gstinProvider = {
+          ...prev,
+          lastTestedAt: nowIso,
+          lastTestStatus: 'error',
+          lastError: msg,
+        };
+        doc.markModified('gstinProvider');
+        await doc.save();
+      }
+
+      return {
+        ok: false,
+        mode: 'live_gstn' as const,
+        checksumValid: checksumOk,
+        sampleGstin,
+        error: msg,
+        config: await this.buildSanitizedGstinProvider(doc),
+      };
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  OPENAI WHISPER STT & AI PROVIDER KEY VAULT
+  // ═══════════════════════════════════════════════════════════════
+
+  private async buildSanitizedAiProvider(doc: PlatformConfigDocument) {
+    const raw: PlatformAiProviderConfig = {
+      ...DEFAULT_PLATFORM_AI_PROVIDER,
+      ...((doc.aiProvider || {}) as Partial<PlatformAiProviderConfig>),
+    };
+    const eff = await resolveEffectiveAiProviderConfig(
+      this.connection,
+      this.configService,
+    );
+
+    let aiServiceReachable = false;
+    const aiUrl = (
+      this.configService.get<string>('AI_SERVICE_URL') || 'http://localhost:3002'
+    ).replace(/\/+$/, '');
+    try {
+      await axios.get(`${aiUrl}/ai/health`, { timeout: 1800 });
+      aiServiceReachable = true;
+    } catch {
+      aiServiceReachable = false;
+    }
+
+    return {
+      enabled: raw.enabled !== false,
+      hasOpenaiKey: Boolean(eff.openaiApiKey),
+      openaiKeyMask:
+        raw.openaiApiKeyMask || (eff.openaiApiKey ? maskSecret(eff.openaiApiKey) : ''),
+      openaiSource: eff.openaiSource,
+      hasGeminiKey: Boolean(eff.geminiApiKey),
+      geminiKeyMask:
+        raw.geminiApiKeyMask || (eff.geminiApiKey ? maskSecret(eff.geminiApiKey) : ''),
+      geminiSource: eff.geminiSource,
+      hasClaudeKey: Boolean(eff.claudeApiKey),
+      claudeKeyMask:
+        raw.claudeApiKeyMask || (eff.claudeApiKey ? maskSecret(eff.claudeApiKey) : ''),
+      claudeSource: eff.claudeSource,
+      whisperReady: eff.whisperReady,
+      anyLiveLlm: eff.anyLiveLlm,
+      source: eff.source,
+      aiServiceUrl: aiUrl,
+      aiServiceReachable,
+      lastTestedAt: raw.lastTestedAt || '',
+      lastTestStatus: raw.lastTestStatus || 'untested',
+      lastError: raw.lastError || '',
+      updatedAt: raw.updatedAt || '',
+    };
+  }
+
+  async getAiProvider() {
+    const doc = await this.ensureGlobalConfig();
+    return this.buildSanitizedAiProvider(doc);
+  }
+
+  async updateAiProvider(
+    actor: SuperAdminActor,
+    dto: {
+      enabled?: boolean;
+      openaiApiKey?: string;
+      geminiApiKey?: string;
+      claudeApiKey?: string;
+      clearOpenaiKey?: boolean;
+      clearGeminiKey?: boolean;
+      clearClaudeKey?: boolean;
+    },
+    ipAddress?: string,
+  ) {
+    const doc = await this.ensureGlobalConfig();
+    const prev: PlatformAiProviderConfig = {
+      ...DEFAULT_PLATFORM_AI_PROVIDER,
+      ...((doc.aiProvider || {}) as Partial<PlatformAiProviderConfig>),
+    };
+
+    const next: PlatformAiProviderConfig = {
+      ...prev,
+      enabled: dto.enabled !== undefined ? Boolean(dto.enabled) : prev.enabled !== false,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (dto.clearOpenaiKey) {
+      next.openaiApiKeyEncrypted = '';
+      next.openaiApiKeyMask = '';
+    } else if (dto.openaiApiKey?.trim()) {
+      const k = dto.openaiApiKey.trim();
+      next.openaiApiKeyEncrypted = encryptSecret(k);
+      next.openaiApiKeyMask = maskSecret(k);
+    }
+
+    if (dto.clearGeminiKey) {
+      next.geminiApiKeyEncrypted = '';
+      next.geminiApiKeyMask = '';
+    } else if (dto.geminiApiKey?.trim()) {
+      const k = dto.geminiApiKey.trim();
+      next.geminiApiKeyEncrypted = encryptSecret(k);
+      next.geminiApiKeyMask = maskSecret(k);
+    }
+
+    if (dto.clearClaudeKey) {
+      next.claudeApiKeyEncrypted = '';
+      next.claudeApiKeyMask = '';
+    } else if (dto.claudeApiKey?.trim()) {
+      const k = dto.claudeApiKey.trim();
+      next.claudeApiKeyEncrypted = encryptSecret(k);
+      next.claudeApiKeyMask = maskSecret(k);
+    }
+
+    next.lastTestStatus = 'untested';
+    next.lastError = '';
+
+    doc.aiProvider = next;
+    doc.updatedByEmail = actor.email;
+    doc.markModified('aiProvider');
+    await doc.save();
+
+    const sanitized = await this.buildSanitizedAiProvider(doc);
+
+    await this.recordAudit(actor, {
+      action: 'platform.ai_provider_updated',
+      severity: 'warning',
+      summary: `Updated Central AI & Whisper STT Vault (whisperReady=${sanitized.whisperReady}, source=${sanitized.source})`,
+      ipAddress,
+    });
+
+    return sanitized;
+  }
+
+  async testAiProvider(dto?: {
+    openaiApiKey?: string;
+    geminiApiKey?: string;
+    claudeApiKey?: string;
+  }) {
+    const doc = await this.ensureGlobalConfig();
+    const eff = await resolveEffectiveAiProviderConfig(
+      this.connection,
+      this.configService,
+    );
+
+    const openaiKey = String(dto?.openaiApiKey || eff.openaiApiKey || '').trim();
+    const geminiKey = String(dto?.geminiApiKey || eff.geminiApiKey || '').trim();
+    const claudeKey = String(dto?.claudeApiKey || eff.claudeApiKey || '').trim();
+
+    const results: {
+      openai?: { ok: boolean; whisperAvailable?: boolean; detail: string };
+      gemini?: { ok: boolean; detail: string };
+      claude?: { ok: boolean; detail: string };
+    } = {};
+
+    if (openaiKey) {
+      try {
+        const res = await axios.get<{ data?: Array<{ id?: string }> }>(
+          'https://api.openai.com/v1/models',
+          {
+            headers: { Authorization: `Bearer ${openaiKey}` },
+            timeout: 10000,
+          },
+        );
+        const ids = (res.data?.data || []).map((m) => String(m.id || ''));
+        const hasWhisper = ids.some((id) => id.includes('whisper'));
+        results.openai = {
+          ok: true,
+          whisperAvailable: hasWhisper,
+          detail: hasWhisper
+            ? 'OpenAI authenticated · whisper-1 STT ready for Hinglish voice notes'
+            : 'OpenAI authenticated cleanly',
+        };
+      } catch (err) {
+        results.openai = {
+          ok: false,
+          detail: axios.isAxiosError(err)
+            ? String(err.response?.data?.error?.message || err.message)
+            : 'OpenAI verification failed',
+        };
+      }
+    }
+
+    if (geminiKey) {
+      try {
+        await axios.get(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(geminiKey)}`,
+          { timeout: 10000 },
+        );
+        results.gemini = { ok: true, detail: 'Gemini API key verified cleanly' };
+      } catch (err) {
+        results.gemini = {
+          ok: false,
+          detail: axios.isAxiosError(err)
+            ? String(err.response?.data?.error?.message || err.message)
+            : 'Gemini verification failed',
+        };
+      }
+    }
+
+    if (claudeKey) {
+      try {
+        await axios.get('https://api.anthropic.com/v1/models', {
+          headers: {
+            'x-api-key': claudeKey,
+            'anthropic-version': '2023-06-01',
+          },
+          timeout: 10000,
+        });
+        results.claude = { ok: true, detail: 'Anthropic Claude key verified cleanly' };
+      } catch (err) {
+        results.claude = {
+          ok: false,
+          detail: axios.isAxiosError(err)
+            ? String(err.response?.data?.error?.message || err.message)
+            : 'Claude verification failed',
+        };
+      }
+    }
+
+    const checks = Object.values(results).filter(Boolean);
+    const ok = checks.length > 0 && checks.every((c) => c.ok);
+    const firstError = checks.find((c) => !c.ok)?.detail || '';
+
+    const prev: PlatformAiProviderConfig = {
+      ...DEFAULT_PLATFORM_AI_PROVIDER,
+      ...((doc.aiProvider || {}) as Partial<PlatformAiProviderConfig>),
+    };
+    if (!dto?.openaiApiKey && !dto?.geminiApiKey && !dto?.claudeApiKey && checks.length > 0) {
+      doc.aiProvider = {
+        ...prev,
+        lastTestedAt: new Date().toISOString(),
+        lastTestStatus: ok ? 'connected' : 'error',
+        lastError: firstError,
+      };
+      doc.markModified('aiProvider');
+      await doc.save();
+    }
+
+    return {
+      ok,
+      results,
+      error: firstError,
+      config: await this.buildSanitizedAiProvider(doc),
+    };
   }
 }
