@@ -465,6 +465,9 @@ export class PlatformConfig {
   @Prop({ type: Object, default: () => DEFAULT_PLATFORM_AI_PROVIDER })
   aiProvider?: PlatformAiProviderConfig;
 
+  @Prop({ type: Boolean, default: false })
+  careersSeeded?: boolean;
+
   @Prop({ trim: true, default: '' })
   updatedByEmail?: string;
 }

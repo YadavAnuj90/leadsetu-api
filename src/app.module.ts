@@ -47,6 +47,7 @@ import { UniversalWebhooksModule } from './modules/universal-webhooks/universal-
 import { TimelineModule } from './modules/timeline/timeline.module';
 import { WhatsappCallingModule } from './modules/whatsapp-calling/whatsapp-calling.module';
 import { PlatformTicketsModule } from './modules/platform-tickets/platform-tickets.module';
+import { LeadFormsModule } from './modules/lead-forms/lead-forms.module';
 
 @Module({
   imports: [
@@ -140,6 +141,7 @@ import { PlatformTicketsModule } from './modules/platform-tickets/platform-ticke
     TimelineModule,
     WhatsappCallingModule,
     PlatformTicketsModule,
+    LeadFormsModule,
     HealthModule,
   ],
   providers: [

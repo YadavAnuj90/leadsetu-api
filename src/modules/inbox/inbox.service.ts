@@ -39,8 +39,26 @@ import {
 import { SuperAdminService } from '../super-admin/super-admin.service';
 import { AiBridgeService } from '../ai-bridge/ai-bridge.service';
 import { MetaCapiService } from '../meta-capi/meta-capi.service';
+import { Invoice, InvoiceDocument } from '../invoices/invoices.service';
+import { ProductItem } from '../products/products.module';
 import { Ticket, TicketDocument } from '../tickets/tickets.service';
 import { MetaWhatsAppService } from './meta-whatsapp.service';
+import {
+  BOT_MAIN_MENU_ID,
+  buildDefaultWhatsAppBotFlowConfig,
+  buildRootMenuPayload,
+  detectBotLanguage,
+  interpolateBotVars,
+  mainMenuButtonLabel,
+  matchBotInput,
+  normalizeWhatsAppBotFlowConfig,
+  pickLocalizedText,
+  type BotFlowBranch,
+  type BotFlowLanguage,
+  type BotSessionState,
+  type InteractiveBotPayload,
+  type WhatsAppBotFlowConfig,
+} from './whatsapp-bot-flow.util';
 import {
   buildConciergeFallbackReply,
   extractBuyerSignals,
@@ -58,6 +76,7 @@ import {
 } from './schemas/ai-knowledge-entry.schema';
 import {
   ChatAttachment,
+  ChatCtaButton,
   ChatMessage,
   ConversationDocument,
   ConversationThread,
@@ -213,6 +232,7 @@ export interface SendInboxMessageInput {
   metaTemplate?: MetaTemplateSendInput;
   attachment?: ChatAttachment;
   quickReplyButtons?: string[];
+  ctaButton?: ChatCtaButton;
 }
 
 export interface StartConversationInput {
@@ -300,6 +320,10 @@ export class InboxService {
     private readonly contactModel: Model<ContactDocument>,
     @InjectModel(Ticket.name)
     private readonly ticketModel: Model<TicketDocument>,
+    @InjectModel(ProductItem.name)
+    private readonly productModel: Model<ProductItem>,
+    @InjectModel(Invoice.name)
+    private readonly invoiceModel: Model<InvoiceDocument>,
     @InjectModel(AiKnowledgeEntry.name)
     private readonly kbModel: Model<AiKnowledgeEntryDocument>,
     private readonly metaWhatsAppService: MetaWhatsAppService,
@@ -1839,6 +1863,15 @@ export class InboxService {
     metaTemplate?: MetaTemplateSendInput;
     attachment?: ChatAttachment;
     quickReplyButtons?: string[];
+    interactiveButtons?: Array<{ id: string; title: string }>;
+    interactiveList?: {
+      headerText?: string;
+      buttonLabel: string;
+      sectionTitle?: string;
+      rows: Array<{ id: string; title: string; description?: string }>;
+    };
+    footerText?: string;
+    ctaButton?: ChatCtaButton;
     entitySnapshot?: CrmEntitySnapshot | null;
   }): Promise<boolean> {
     const { auth, doc, entitySnapshot } = params;
@@ -1932,6 +1965,28 @@ export class InboxService {
           mimeType: normalizedAttachment.mimeType,
           caption: renderedText || undefined,
         });
+        if (
+          metaResult.ok &&
+          params.ctaButton?.url &&
+          /^https?:\/\//i.test(params.ctaButton.url)
+        ) {
+          void this.metaWhatsAppService
+            .sendInteractiveCtaUrl({
+              phoneNumberId: runtime.phoneNumberId,
+              accessToken: runtime.accessToken,
+              toPhone: recipientDigits,
+              headerText: params.ctaButton.invoiceNumber
+                ? `Pay ${params.ctaButton.invoiceNumber}`
+                : 'Instant Secure Payment',
+              body: params.ctaButton.amountInr
+                ? `Tap below to settle ₹${Number(params.ctaButton.amountInr).toLocaleString('en-IN')} securely via Razorpay / UPI.`
+                : 'Tap below to complete your payment securely via Razorpay / UPI.',
+              footerText: 'Auto-reconciled GST receipt via Leadsetu',
+              displayText: params.ctaButton.label || 'Pay Now',
+              url: params.ctaButton.url,
+            })
+            .catch(() => {});
+        }
       } else if (
         params.sendMode === 'meta_template' &&
         params.metaTemplate?.name
@@ -1948,6 +2003,34 @@ export class InboxService {
           bodyParams: renderedParams,
         });
       } else if (
+        params.interactiveList &&
+        Array.isArray(params.interactiveList.rows) &&
+        params.interactiveList.rows.length > 0
+      ) {
+        metaResult = await this.metaWhatsAppService.sendInteractiveList({
+          phoneNumberId: runtime.phoneNumberId,
+          accessToken: runtime.accessToken,
+          toPhone: recipientDigits,
+          headerText: params.interactiveList.headerText,
+          body: renderedText,
+          footerText: params.footerText,
+          buttonLabel: params.interactiveList.buttonLabel,
+          sectionTitle: params.interactiveList.sectionTitle,
+          rows: params.interactiveList.rows,
+        });
+      } else if (
+        Array.isArray(params.interactiveButtons) &&
+        params.interactiveButtons.length > 0
+      ) {
+        metaResult = await this.metaWhatsAppService.sendInteractiveButtons({
+          phoneNumberId: runtime.phoneNumberId,
+          accessToken: runtime.accessToken,
+          toPhone: recipientDigits,
+          body: renderedText,
+          footerText: params.footerText,
+          buttons: params.interactiveButtons,
+        });
+      } else if (
         Array.isArray(params.quickReplyButtons) &&
         params.quickReplyButtons.length > 0
       ) {
@@ -1956,7 +2039,24 @@ export class InboxService {
           accessToken: runtime.accessToken,
           toPhone: recipientDigits,
           body: renderedText,
+          footerText: params.footerText,
           buttons: params.quickReplyButtons,
+        });
+      } else if (
+        params.ctaButton?.url &&
+        /^https?:\/\//i.test(params.ctaButton.url)
+      ) {
+        metaResult = await this.metaWhatsAppService.sendInteractiveCtaUrl({
+          phoneNumberId: runtime.phoneNumberId,
+          accessToken: runtime.accessToken,
+          toPhone: recipientDigits,
+          headerText: params.ctaButton.invoiceNumber
+            ? `Pay ${params.ctaButton.invoiceNumber}`
+            : undefined,
+          body: renderedText,
+          footerText: params.footerText || 'Razorpay / UPI Instant Pay',
+          displayText: params.ctaButton.label || 'Pay Now',
+          url: params.ctaButton.url,
         });
       } else {
         metaResult = await this.metaWhatsAppService.sendText({
@@ -2016,6 +2116,7 @@ export class InboxService {
       deliveryProvider,
       ...(deliveryError ? { deliveryError } : {}),
       ...(storedAttachment ? { attachment: storedAttachment } : {}),
+      ...(params.ctaButton?.url ? { ctaButton: params.ctaButton } : {}),
       statusUpdatedAt: nowIso,
       via,
       createdAt: nowIso,
@@ -2084,6 +2185,15 @@ export class InboxService {
     sendMode?: 'text' | 'meta_template';
     attachment?: ChatAttachment;
     quickReplyButtons?: string[];
+    interactiveButtons?: Array<{ id: string; title: string }>;
+    interactiveList?: {
+      headerText?: string;
+      buttonLabel: string;
+      sectionTitle?: string;
+      rows: Array<{ id: string; title: string; description?: string }>;
+    };
+    footerText?: string;
+    ctaButton?: ChatCtaButton;
     campaignId?: string;
     campaignName?: string;
     workflowId?: string;
@@ -2233,6 +2343,28 @@ export class InboxService {
           mimeType: params.attachment.mimeType,
           caption: renderedText || undefined,
         });
+        if (
+          metaResult.ok &&
+          params.ctaButton?.url &&
+          /^https?:\/\//i.test(params.ctaButton.url)
+        ) {
+          void this.metaWhatsAppService
+            .sendInteractiveCtaUrl({
+              phoneNumberId: runtime.phoneNumberId,
+              accessToken: runtime.accessToken,
+              toPhone: recipientDigits,
+              headerText: params.ctaButton.invoiceNumber
+                ? `Pay ${params.ctaButton.invoiceNumber}`
+                : 'Instant Secure Payment',
+              body: params.ctaButton.amountInr
+                ? `Tap below to pay ₹${Number(params.ctaButton.amountInr).toLocaleString('en-IN')} securely via Razorpay / UPI.`
+                : 'Tap below to pay securely via Razorpay / UPI.',
+              footerText: 'Auto-reconciled GST receipt via Leadsetu',
+              displayText: params.ctaButton.label || 'Pay Now',
+              url: params.ctaButton.url,
+            })
+            .catch(() => {});
+        }
       } else if (
         params.sendMode === 'meta_template' &&
         params.metaTemplateName?.trim()
@@ -2253,6 +2385,34 @@ export class InboxService {
           bodyParams,
         });
       } else if (
+        params.interactiveList &&
+        Array.isArray(params.interactiveList.rows) &&
+        params.interactiveList.rows.length > 0
+      ) {
+        metaResult = await this.metaWhatsAppService.sendInteractiveList({
+          phoneNumberId: runtime.phoneNumberId,
+          accessToken: runtime.accessToken,
+          toPhone: recipientDigits,
+          headerText: params.interactiveList.headerText,
+          body: renderedText,
+          footerText: params.footerText,
+          buttonLabel: params.interactiveList.buttonLabel,
+          sectionTitle: params.interactiveList.sectionTitle,
+          rows: params.interactiveList.rows,
+        });
+      } else if (
+        Array.isArray(params.interactiveButtons) &&
+        params.interactiveButtons.length > 0
+      ) {
+        metaResult = await this.metaWhatsAppService.sendInteractiveButtons({
+          phoneNumberId: runtime.phoneNumberId,
+          accessToken: runtime.accessToken,
+          toPhone: recipientDigits,
+          body: renderedText,
+          footerText: params.footerText,
+          buttons: params.interactiveButtons,
+        });
+      } else if (
         Array.isArray(params.quickReplyButtons) &&
         params.quickReplyButtons.length > 0
       ) {
@@ -2261,7 +2421,24 @@ export class InboxService {
           accessToken: runtime.accessToken,
           toPhone: recipientDigits,
           body: renderedText,
+          footerText: params.footerText,
           buttons: params.quickReplyButtons,
+        });
+      } else if (
+        params.ctaButton?.url &&
+        /^https?:\/\//i.test(params.ctaButton.url)
+      ) {
+        metaResult = await this.metaWhatsAppService.sendInteractiveCtaUrl({
+          phoneNumberId: runtime.phoneNumberId,
+          accessToken: runtime.accessToken,
+          toPhone: recipientDigits,
+          headerText: params.ctaButton.invoiceNumber
+            ? `Pay ${params.ctaButton.invoiceNumber}`
+            : undefined,
+          body: renderedText,
+          footerText: params.footerText || 'Razorpay / UPI Instant Pay',
+          displayText: params.ctaButton.label || 'Pay Now',
+          url: params.ctaButton.url,
         });
       } else {
         metaResult = await this.metaWhatsAppService.sendText({
@@ -2295,6 +2472,7 @@ export class InboxService {
       ...(params.workflowId ? { workflowId: params.workflowId } : {}),
       ...(externalMessageId ? { externalMessageId } : {}),
       ...(params.attachment ? { attachment: params.attachment } : {}),
+      ...(params.ctaButton?.url ? { ctaButton: params.ctaButton } : {}),
       deliveryProvider,
       ...(deliveryError ? { deliveryError } : {}),
       statusUpdatedAt: nowIso,
@@ -2853,6 +3031,7 @@ export class InboxService {
       sendMode: body.sendMode,
       metaTemplate: body.metaTemplate,
       attachment: body.attachment,
+      ctaButton: body.ctaButton,
       entitySnapshot: snapshot,
     });
 
@@ -3261,6 +3440,679 @@ export class InboxService {
     return merged;
   }
 
+  async getBotFlowConfig(auth: InboxAuthContext): Promise<WhatsAppBotFlowConfig> {
+    const tenant = await this.tenantModel.findById(auth.tenantId).lean().exec();
+    if (!tenant) throw new NotFoundException('Workspace not found.');
+    return normalizeWhatsAppBotFlowConfig(tenant.whatsappBotFlow);
+  }
+
+  async updateBotFlowConfig(
+    auth: InboxAuthContext,
+    dto: Partial<WhatsAppBotFlowConfig>,
+  ): Promise<WhatsAppBotFlowConfig> {
+    if (!['owner', 'admin', 'manager'].includes(auth.role)) {
+      throw new ForbiddenException(
+        'Only Workspace Owners, Admins, or Managers can configure the WhatsApp Interactive Bot Flow.',
+      );
+    }
+    const tenant = await this.tenantModel.findById(auth.tenantId).exec();
+    if (!tenant) throw new NotFoundException('Workspace not found.');
+
+    const current = normalizeWhatsAppBotFlowConfig(tenant.whatsappBotFlow);
+    const merged = normalizeWhatsAppBotFlowConfig({
+      ...current,
+      ...dto,
+      stats: current.stats,
+    });
+
+    await this.tenantModel.updateOne(
+      { _id: tenant._id },
+      { $set: { whatsappBotFlow: merged } },
+    );
+
+    await this.auditService?.record({
+      tenantId: auth.tenantId,
+      actorId: auth.userId,
+      action: 'inbox.bot_flow_updated',
+      entityType: 'security',
+      entityId: auth.tenantId,
+      entityLabel: 'WhatsApp Interactive Bot Flow',
+      summary: `WhatsApp Bot Flow ${merged.enabled ? 'ENABLED' : 'PAUSED'} (${merged.defaultLanguage}, ${merged.menuMode} mode, ${merged.branches.filter((b) => b.enabled).length} active branches)`,
+    });
+
+    return merged;
+  }
+
+  async resetBotFlowConfig(auth: InboxAuthContext): Promise<WhatsAppBotFlowConfig> {
+    if (!['owner', 'admin', 'manager'].includes(auth.role)) {
+      throw new ForbiddenException(
+        'Only Workspace Owners, Admins, or Managers can reset the WhatsApp Bot Flow.',
+      );
+    }
+    const tenant = await this.tenantModel.findById(auth.tenantId).exec();
+    if (!tenant) throw new NotFoundException('Workspace not found.');
+
+    const current = normalizeWhatsAppBotFlowConfig(tenant.whatsappBotFlow);
+    const fresh = {
+      ...buildDefaultWhatsAppBotFlowConfig(),
+      enabled: current.enabled,
+      stats: current.stats,
+    };
+
+    await this.tenantModel.updateOne(
+      { _id: tenant._id },
+      { $set: { whatsappBotFlow: fresh } },
+    );
+    return fresh;
+  }
+
+  private async pickRepForRole(
+    tenantId: string,
+    role: string,
+  ): Promise<{ userId: string; name: string } | null> {
+    try {
+      const tenantObjId = new Types.ObjectId(tenantId);
+      const roleFilter =
+        role === 'support'
+          ? { role: { $in: ['support', 'manager', 'owner', 'admin'] } }
+          : role === 'manager'
+            ? { role: { $in: ['manager', 'owner', 'admin'] } }
+            : { role: { $in: ['sales', 'manager', 'owner', 'admin'] } };
+      const users = await this.userModel
+        .find({ tenantId: tenantObjId, isActive: { $ne: false }, ...roleFilter })
+        .select('_id name role')
+        .lean()
+        .exec();
+      if (!users.length) return null;
+      const preferred =
+        users.find((u) => String(u.role) === role) || users[0];
+      return {
+        userId: String(preferred._id),
+        name: String(preferred.name || 'Team Rep'),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async buildBotRateCardSnippet(
+    tenantObjId: Types.ObjectId,
+    queryText: string,
+    lang: BotFlowLanguage,
+  ): Promise<string> {
+    const products = await this.productModel
+      .find({ tenantId: tenantObjId, inStock: { $ne: false } })
+      .sort({ updatedAt: -1 })
+      .limit(12)
+      .lean()
+      .exec();
+
+    if (!products.length) {
+      return lang === 'hindi'
+        ? '\n\n• कृपया अपनी आवश्यकता (प्रोडक्ट और मात्रा) बताएं, हमारी टीम तुरंत कस्टम GST कोटेशन भेजेगी।'
+        : lang === 'hinglish'
+          ? '\n\n• Apna product name aur quantity share karein — hamari team turant custom GST rate bhej degi.'
+          : '\n\n• Reply with your required item & quantity and our sales desk will send a custom GST quote.';
+    }
+
+    const q = queryText.toLowerCase();
+    const matched = products.filter(
+      (p) =>
+        q.includes(String(p.sku || '').toLowerCase()) ||
+        String(p.name || '')
+          .toLowerCase()
+          .split(/\s+/)
+          .some((w) => w.length >= 4 && q.includes(w)),
+    );
+    const displayList = (matched.length > 0 ? matched : products).slice(0, 4);
+    const lines = displayList.map(
+      (p) =>
+        `• *${p.name}* (${p.sku || 'SKU'}) — ₹${Number(p.unitPrice || 0).toLocaleString('en-IN')}/${p.unit || 'pcs'} + ${p.gstRate ?? 18}% GST (MOQ: ${p.moq || 1})`,
+    );
+    return `\n\n${lines.join('\n')}`;
+  }
+
+  private async buildBotOrderTrackSnippet(
+    tenantObjId: Types.ObjectId,
+    phone: string,
+    linkedEntityType: string,
+    linkedEntityId: string,
+    lang: BotFlowLanguage,
+  ): Promise<{ snippet: string; found: boolean }> {
+    const last10 = extractLast10Digits(phone);
+    const invCandidates = await this.invoiceModel
+      .find({ tenantId: tenantObjId })
+      .sort({ updatedAt: -1 })
+      .limit(25)
+      .lean()
+      .exec();
+    const matchedInv =
+      invCandidates.find((inv) => {
+        if (last10 && extractLast10Digits(inv.phone) === last10) return true;
+        if (linkedEntityType === 'deal' && inv.linkedDealId === linkedEntityId) {
+          return true;
+        }
+        return false;
+      }) || null;
+
+    if (matchedInv) {
+      const due = Number(matchedInv.balanceDue || 0);
+      const total = Number(matchedInv.grandTotal || 0);
+      const statusLabel = String(matchedInv.status || 'sent').toUpperCase();
+      return {
+        found: true,
+        snippet:
+          lang === 'hindi'
+            ? `\n\n📄 *इनवॉइस #${matchedInv.invoiceNumber}*\nस्थिति: *${statusLabel}*\nकुल राशि: ₹${total.toLocaleString('en-IN')} | बकाया: ₹${due.toLocaleString('en-IN')}`
+            : lang === 'hinglish'
+              ? `\n\n📄 *Invoice #${matchedInv.invoiceNumber}*\nStatus: *${statusLabel}*\nTotal: ₹${total.toLocaleString('en-IN')} | Balance Due: ₹${due.toLocaleString('en-IN')}`
+              : `\n\n📄 *Invoice #${matchedInv.invoiceNumber}*\nStatus: *${statusLabel}*\nGrand Total: ₹${total.toLocaleString('en-IN')} | Balance Due: ₹${due.toLocaleString('en-IN')}`,
+      };
+    }
+
+    const dealCandidates = await this.dealModel
+      .find({ tenantId: tenantObjId })
+      .sort({ updatedAt: -1 })
+      .limit(25)
+      .lean()
+      .exec();
+    const matchedDeal =
+      dealCandidates.find(
+        (d) =>
+          (linkedEntityType === 'deal' && String(d._id) === linkedEntityId) ||
+          (last10 && extractLast10Digits(String((d as { phone?: string }).phone || '')) === last10),
+      ) || null;
+
+    if (matchedDeal) {
+      return {
+        found: true,
+        snippet: `\n\n📦 *Deal: ${matchedDeal.title}*\nStage: *${String(matchedDeal.stage || 'active').replace(/_/g, ' ').toUpperCase()}*\nValue: ₹${Number(matchedDeal.value || 0).toLocaleString('en-IN')}`,
+      };
+    }
+
+    return {
+      found: false,
+      snippet:
+        lang === 'hindi'
+          ? '\n\nकोई सक्रिय डिस्पैच या इनवॉइस इस नंबर पर नहीं मिला। कृपया ऑर्डर/इनवॉइस नंबर साझा करें।'
+          : lang === 'hinglish'
+            ? '\n\nAbhi is mobile number par koi live invoice/dispatch linked nahi hai. Apna Order ya Invoice Number share karein.'
+            : '\n\nNo active order or invoice was matched to this phone yet. Please reply with your Invoice or Order number.',
+    };
+  }
+
+  private async resolveBotStepExecution(params: {
+    tenant: Record<string, unknown>;
+    tenantId: string;
+    config: WhatsAppBotFlowConfig;
+    text: string;
+    interactiveOptionId?: string;
+    session?: BotSessionState;
+    buyerName: string;
+    buyerPhone: string;
+    companyName: string;
+    linkedEntityType?: string;
+    linkedEntityId?: string;
+    isFirstConversationInbound?: boolean;
+    dryRun?: boolean;
+    languageOverride?: BotFlowLanguage;
+  }): Promise<{
+    handled: boolean;
+    payload: InteractiveBotPayload | null;
+    nextSession: BotSessionState;
+    actionExecuted: string;
+    crmActionSummary: string;
+    branchId?: string;
+    createdTicketNumber?: string;
+    language: BotFlowLanguage;
+    isButtonTap?: boolean;
+  }> {
+    const {
+      tenant,
+      tenantId,
+      config,
+      text,
+      interactiveOptionId,
+      session,
+      buyerName,
+      buyerPhone,
+      companyName,
+      linkedEntityType = '',
+      linkedEntityId = '',
+      isFirstConversationInbound = false,
+      dryRun = false,
+      languageOverride,
+    } = params;
+
+    const lang = detectBotLanguage(
+      text,
+      session?.language || config.defaultLanguage,
+      config.autoDetectLanguage,
+      languageOverride,
+    );
+    const match = matchBotInput({
+      config,
+      text,
+      interactiveOptionId,
+      session,
+      isFirstConversationInbound,
+    });
+
+    if (match.kind === 'none') {
+      return {
+        handled: false,
+        payload: null,
+        nextSession: session || {},
+        actionExecuted: 'none',
+        crmActionSummary: '',
+        language: lang,
+      };
+    }
+
+    const vars = {
+      buyerName: buyerName || 'Sir/Madam',
+      company: String((tenant.companyName as string) || companyName || 'Leadsetu Partner'),
+    };
+    const nowIso = new Date().toISOString();
+    const tenantObjId = new Types.ObjectId(tenantId);
+
+    if (match.kind === 'menu') {
+      return {
+        handled: true,
+        payload: buildRootMenuPayload(config, lang, vars),
+        nextSession: {
+          step: 'root',
+          lastMenuSentAt: nowIso,
+          language: lang,
+        },
+        actionExecuted: 'send_main_menu',
+        crmActionSummary: `Sent ${config.branches.filter((b) => b.enabled).length}-option ${lang.toUpperCase()} interactive menu`,
+        language: lang,
+        isButtonTap: match.isButtonTap,
+      };
+    }
+
+    if (match.kind === 'ticket_issue') {
+      const issueText = String(match.ticketIssueSummary || text).trim().slice(0, 220);
+      const sourceBranch =
+        config.branches.find((b) => b.id === session?.lastBranchId) ||
+        config.branches.find((b) => b.actionType === 'create_sla_ticket') ||
+        config.branches[0];
+      const rep = await this.pickRepForRole(
+        tenantId,
+        sourceBranch?.routeToRole || 'support',
+      );
+      const priority = sourceBranch?.ticketPriority || 'high';
+      const category = /gst|bill|invoice/i.test(issueText)
+        ? 'gst_correction'
+        : /warranty|service|defect|repair/i.test(issueText)
+          ? 'warranty'
+          : sourceBranch?.ticketCategory || 'dispatch_delay';
+
+      const slaDays = priority === 'urgent' ? 1 : priority === 'high' ? 2 : 3;
+      const slaDueAt = new Date(Date.now() + slaDays * 86400000)
+        .toISOString()
+        .slice(0, 10);
+      const ticketNumber = `SL-${randomBytes(3).toString('hex').toUpperCase()}`;
+
+      if (!dryRun) {
+        const ownerObjId =
+          rep && Types.ObjectId.isValid(rep.userId)
+            ? new Types.ObjectId(rep.userId)
+            : (
+                await this.userModel
+                  .findOne({ tenantId: tenantObjId })
+                  .select('_id')
+                  .lean()
+                  .exec()
+              )?._id || tenantObjId;
+
+        await this.ticketModel.create({
+          tenantId: tenantObjId,
+          ownerId: ownerObjId,
+          ticketNumber,
+          subject: `WhatsApp Bot: ${issueText.slice(0, 80)}`,
+          category,
+          priority,
+          status: 'open',
+          customerName: buyerName || 'WhatsApp Buyer',
+          company: companyName || '',
+          phone: buyerPhone || '',
+          assignedToUserId: rep?.userId || '',
+          assignedToName: rep?.name || '',
+          slaDueAt,
+          notes: `Auto-raised via WhatsApp Interactive Bot Flow (${lang}). Buyer message: "${issueText}"`,
+          comments: [
+            {
+              id: `cmt-${Date.now()}-${randomBytes(2).toString('hex')}`,
+              authorName: 'WhatsApp Bot Flow',
+              authorRole: 'system',
+              message: `Ticket ${ticketNumber} created automatically (${priority.toUpperCase()}) from WhatsApp interactive session.`,
+              isInternal: false,
+              createdAt: nowIso,
+            },
+          ],
+        });
+      }
+
+      const body =
+        lang === 'hindi'
+          ? `✅ *SLA टिकट बन गया: ${ticketNumber}*\nविषय: ${issueText}\nप्राथमिकता: ${priority.toUpperCase()} | SLA लक्ष्य: ${slaDueAt}${rep ? `\nअसाइन: ${rep.name}` : ''}\nहमारी सपोर्ट टीम जल्द संपर्क करेगी।`
+          : lang === 'hinglish'
+            ? `✅ *SLA Ticket Ban Gaya: ${ticketNumber}*\nIssue: ${issueText}\nPriority: ${priority.toUpperCase()} | SLA Due: ${slaDueAt}${rep ? `\nAssigned to: ${rep.name}` : ''}\nHamari team jaldi connect karegi.`
+            : `✅ *SLA Ticket Created: ${ticketNumber}*\nIssue: ${issueText}\nPriority: ${priority.toUpperCase()} | SLA Target: ${slaDueAt}${rep ? `\nAssigned Rep: ${rep.name}` : ''}\nOur support specialist will follow up shortly.`;
+
+      return {
+        handled: true,
+        payload: {
+          body,
+          footerText: config.footerText,
+          interactiveType: 'buttons',
+          buttons: [
+            { id: BOT_MAIN_MENU_ID, title: mainMenuButtonLabel(lang).slice(0, 20) },
+          ],
+        },
+        nextSession: {
+          step: 'completed',
+          lastBranchId: sourceBranch?.id,
+          lastMenuSentAt: session?.lastMenuSentAt,
+          language: lang,
+        },
+        actionExecuted: 'ticket_created',
+        createdTicketNumber: ticketNumber,
+        crmActionSummary: `${dryRun ? '[Simulator] Previewed' : 'Created'} SLA Ticket ${ticketNumber} (${priority.toUpperCase()})${rep ? ` → ${rep.name}` : ''}`,
+        branchId: sourceBranch?.id,
+        language: lang,
+        isButtonTap: match.isButtonTap,
+      };
+    }
+
+    if (match.kind === 'follow_up_action') {
+      const rep = await this.pickRepForRole(tenantId, 'sales');
+      const body =
+        lang === 'hindi'
+          ? `धन्यवाद ${vars.buyerName} जी! आपकी चैट हमारे प्रतिनिधि${rep ? ` (${rep.name})` : ''} को असाइन कर दी गई है। वे शीघ्र ही आपसे जुड़ेंगे।`
+          : lang === 'hinglish'
+            ? `Dhanyavaad ${vars.buyerName} ji! Aapki chat hamare specialist${rep ? ` (${rep.name})` : ''} ko route kar di hai — woh jaldi reply karenge.`
+            : `Thank you ${vars.buyerName}! We've routed your conversation directly to ${rep ? rep.name : 'our specialist team'} who will reply shortly.`;
+      return {
+        handled: true,
+        payload: {
+          body,
+          footerText: config.footerText,
+          interactiveType: 'buttons',
+          buttons: [
+            { id: BOT_MAIN_MENU_ID, title: mainMenuButtonLabel(lang).slice(0, 20) },
+          ],
+        },
+        nextSession: {
+          step: 'completed',
+          lastMenuSentAt: session?.lastMenuSentAt,
+          language: lang,
+        },
+        actionExecuted: 'handoff_rep',
+        crmActionSummary: `Routed buyer thread to ${rep?.name || 'Sales Rep'} & paused auto-bot`,
+        language: lang,
+        isButtonTap: match.isButtonTap,
+      };
+    }
+
+    const branch: BotFlowBranch = match.branch!;
+    let body = interpolateBotVars(pickLocalizedText(branch.replyBody, lang), vars);
+    let actionExecuted: string = branch.actionType;
+    let crmActionSummary = '';
+    let nextStep: BotSessionState['step'] = 'completed';
+
+    if (branch.actionType === 'send_rate_card') {
+      body += await this.buildBotRateCardSnippet(tenantObjId, text, lang);
+      crmActionSummary = 'Pulled live GST prices & MOQ from /products catalog';
+    } else if (branch.actionType === 'send_booking_link') {
+      const sched = (
+        tenant.leadConnectors as Record<string, Record<string, unknown>> | undefined
+      )?.bookingScheduler;
+      const slug =
+        String(sched?.slug || tenant.slug || '').trim() || 'book-demo';
+      const duration = Number(sched?.slotDurationMinutes || 30);
+      const originHint =
+        process.env.PUBLIC_WEB_URL ||
+        process.env.FRONTEND_URL ||
+        'https://leadsetu.app';
+      const cleanBase = originHint.replace(/\/+$/, '');
+      body += `\n\n📅 *${duration}-Min IST Booking Link:*\n${cleanBase}/book/${slug}`;
+      crmActionSummary = `Shared live scheduler /book/${slug} (${duration} min IST)`;
+    } else if (branch.actionType === 'track_order') {
+      const tracked = await this.buildBotOrderTrackSnippet(
+        tenantObjId,
+        buyerPhone,
+        linkedEntityType,
+        linkedEntityId,
+        lang,
+      );
+      body += tracked.snippet;
+      crmActionSummary = tracked.found
+        ? 'Matched live Invoice/Deal status for buyer phone'
+        : 'Checked CRM records (prompted buyer for Order/Invoice #)';
+    } else if (branch.actionType === 'create_sla_ticket') {
+      nextStep = 'awaiting_ticket_issue';
+      const rep = await this.pickRepForRole(tenantId, branch.routeToRole);
+      crmActionSummary = `Awaiting issue summary to open ${branch.ticketPriority.toUpperCase()} SLA Ticket${rep ? ` (Assignee: ${rep.name})` : ''}`;
+    } else if (branch.actionType === 'handoff_rep') {
+      const rep = await this.pickRepForRole(tenantId, branch.routeToRole);
+      crmActionSummary = `Routed to ${rep?.name || branch.routeToRole} specialist`;
+    }
+
+    const followUps = (branch.followUpButtons || [])
+      .filter(Boolean)
+      .slice(0, 3)
+      .map((label, idx) => ({
+        id:
+          /main\s*menu|मुख्य\s*मेनू/i.test(label)
+            ? BOT_MAIN_MENU_ID
+            : `ls_followup_${branch.id}_${idx + 1}`,
+        title: label.slice(0, 20),
+      }));
+
+    return {
+      handled: true,
+      payload: {
+        body,
+        footerText: config.footerText,
+        interactiveType: followUps.length > 0 ? 'buttons' : 'none',
+        buttons: followUps.length > 0 ? followUps : undefined,
+      },
+      nextSession: {
+        step: nextStep,
+        lastBranchId: branch.id,
+        lastMenuSentAt: session?.lastMenuSentAt || nowIso,
+        language: lang,
+      },
+      actionExecuted,
+      crmActionSummary,
+      branchId: branch.id,
+      language: lang,
+      isButtonTap: match.isButtonTap,
+    };
+  }
+
+  async simulateBotFlowStep(
+    auth: InboxAuthContext,
+    dto: {
+      message?: string;
+      interactiveOptionId?: string;
+      language?: BotFlowLanguage;
+      session?: BotSessionState;
+      buyerName?: string;
+      buyerPhone?: string;
+      draftConfig?: Partial<WhatsAppBotFlowConfig>;
+    },
+  ) {
+    const tenant = await this.tenantModel.findById(auth.tenantId).lean().exec();
+    if (!tenant) throw new NotFoundException('Workspace not found.');
+
+    const savedConfig = normalizeWhatsAppBotFlowConfig(tenant.whatsappBotFlow);
+    const activeConfig = dto.draftConfig
+      ? normalizeWhatsAppBotFlowConfig({ ...savedConfig, ...dto.draftConfig })
+      : savedConfig;
+
+    const text = String(dto.message || 'Namaste').trim();
+    const res = await this.resolveBotStepExecution({
+      tenant: tenant as unknown as Record<string, unknown>,
+      tenantId: auth.tenantId,
+      config: activeConfig,
+      text,
+      interactiveOptionId: dto.interactiveOptionId,
+      session: dto.session,
+      buyerName: dto.buyerName?.trim() || 'Rajesh Sharma',
+      buyerPhone: dto.buyerPhone?.trim() || '+91 98112 45678',
+      companyName: String(tenant.companyName || 'Leadsetu Demo'),
+      isFirstConversationInbound: !dto.session?.step && !dto.session?.lastMenuSentAt,
+      dryRun: true,
+      languageOverride: dto.language,
+    });
+
+    if (!res.handled) {
+      return {
+        handled: false,
+        payload: buildRootMenuPayload(
+          activeConfig,
+          dto.language || activeConfig.defaultLanguage,
+          {
+            buyerName: dto.buyerName?.trim() || 'Rajesh Sharma',
+            company: String(tenant.companyName || 'Leadsetu Demo'),
+          },
+        ),
+        nextSession: {
+          step: 'root' as const,
+          language: dto.language || activeConfig.defaultLanguage,
+          lastMenuSentAt: new Date().toISOString(),
+        },
+        actionExecuted: 'fallback_menu',
+        crmActionSummary: 'No branch keyword matched — showed fallback interactive menu',
+        language: res.language,
+      };
+    }
+
+    return res;
+  }
+
+  private async tryHandleInboundBotFlow(
+    conv: ConversationDocument,
+    inboundText: string,
+    interactiveOptionId?: string,
+  ): Promise<boolean> {
+    try {
+      const tenantId = conv.tenantId.toString();
+      const tenant = await this.tenantModel.findById(tenantId).lean().exec();
+      if (!tenant) return false;
+
+      const config = normalizeWhatsAppBotFlowConfig(tenant.whatsappBotFlow);
+      if (!config.enabled || conv.whatsappOptOut) {
+        return false;
+      }
+
+      const inboundCount = (conv.messages || []).filter(
+        (m) => m.direction === 'inbound',
+      ).length;
+
+      const outcome = await this.resolveBotStepExecution({
+        tenant: tenant as unknown as Record<string, unknown>,
+        tenantId,
+        config,
+        text: inboundText,
+        interactiveOptionId,
+        session: (conv.botSession || {}) as BotSessionState,
+        buyerName: conv.contactName || 'Sir/Madam',
+        buyerPhone: conv.phone || '',
+        companyName: conv.company || String(tenant.companyName || ''),
+        linkedEntityType: conv.linkedEntityType || '',
+        linkedEntityId: conv.linkedEntityId || '',
+        isFirstConversationInbound: inboundCount <= 1,
+        dryRun: false,
+      });
+
+      if (!outcome.handled || !outcome.payload) {
+        return false;
+      }
+
+      const snapshot =
+        conv.linkedEntityType && conv.linkedEntityId
+          ? await this.resolveCrmEntitySnapshot(
+              tenantId,
+              conv.linkedEntityType,
+              conv.linkedEntityId,
+            )
+          : null;
+
+      await this.appendMessageAndTimeline({
+        auth: {
+          userId: conv.ownerId?.toString() || 'system-bot',
+          tenantId,
+          email: 'whatsapp-bot@leadsetu.in',
+          name: 'Leadsetu WhatsApp Bot',
+          role: 'system',
+        },
+        doc: conv,
+        rawContent: outcome.payload.body,
+        isAiDrafted: true,
+        via: 'inbox',
+        logToTimeline: true,
+        interactiveButtons: outcome.payload.buttons,
+        interactiveList: outcome.payload.listMenu,
+        footerText: outcome.payload.footerText,
+        entitySnapshot: snapshot,
+      });
+
+      conv.botSession = outcome.nextSession as unknown as Record<string, unknown>;
+      conv.markModified('botSession');
+      if (outcome.actionExecuted === 'handoff_rep') {
+        conv.aiAutopilotPaused = true;
+        conv.aiHandoffReason = 'WhatsApp Bot routed buyer to human representative';
+        conv.aiHandedOffAt = new Date().toISOString();
+      }
+      await conv.save();
+      this.emitRealtimeConversationUpdate(conv, 'message.outbound');
+
+      // Update bot analytics counters atomically on Tenant
+      const nextBranches = config.branches.map((b) =>
+        b.id === outcome.branchId
+          ? { ...b, hitsCount: (b.hitsCount || 0) + 1 }
+          : b,
+      );
+      const nextStats = {
+        ...config.stats,
+        totalRuns: (config.stats.totalRuns || 0) + 1,
+        buttonsTapped:
+          (config.stats.buttonsTapped || 0) + (outcome.isButtonTap ? 1 : 0),
+        ticketsCreated:
+          (config.stats.ticketsCreated || 0) +
+          (outcome.actionExecuted === 'ticket_created' ? 1 : 0),
+        rateCardsSent:
+          (config.stats.rateCardsSent || 0) +
+          (outcome.actionExecuted === 'send_rate_card' ? 1 : 0),
+        demosShared:
+          (config.stats.demosShared || 0) +
+          (outcome.actionExecuted === 'send_booking_link' ? 1 : 0),
+        ordersTracked:
+          (config.stats.ordersTracked || 0) +
+          (outcome.actionExecuted === 'track_order' ? 1 : 0),
+        lastTriggeredAt: new Date().toISOString(),
+      };
+      await this.tenantModel.updateOne(
+        { _id: new Types.ObjectId(tenantId) },
+        {
+          $set: {
+            'whatsappBotFlow.branches': nextBranches,
+            'whatsappBotFlow.stats': nextStats,
+          },
+        },
+      );
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private toKbDto(doc: Record<string, unknown>) {
     return {
       id: String(doc._id),
@@ -3613,7 +4465,10 @@ export class InboxService {
     await conv.save();
     this.emitRealtimeConversationUpdate(conv, 'message.inbound');
 
-    await this.refreshConversationAiOnInbound(conv, text);
+    const botHandled = await this.tryHandleInboundBotFlow(conv, text);
+    await this.refreshConversationAiOnInbound(conv, text, {
+      skipAutopilotSend: botHandled,
+    });
 
     const refreshed = await this.convModel.findById(conv._id).exec();
     const maskPhones = this.auditService
@@ -3625,6 +4480,7 @@ export class InboxService {
   private async refreshConversationAiOnInbound(
     conv: ConversationDocument,
     explicitInboundText?: string,
+    options?: { skipAutopilotSend?: boolean },
   ) {
     try {
       const tenantId = conv.tenantId.toString();
@@ -3845,6 +4701,7 @@ export class InboxService {
 
       const withinHours = !policy.businessHoursOnly || isWithinIstBusinessHours();
       if (
+        !options?.skipAutopilotSend &&
         policy.mode === 'autopilot' &&
         !conv.aiAutopilotPaused &&
         !conv.whatsappOptOut &&
@@ -3954,6 +4811,7 @@ export class InboxService {
     text: string;
     attachment?: ChatAttachment;
     callPermissionReply?: 'accept' | 'reject';
+    interactiveOptionId?: string;
   } {
     const type = String(msg.type || 'text').toLowerCase();
     if (type === 'text') {
@@ -3973,8 +4831,8 @@ export class InboxService {
               response?: string;
               expiration_timestamp?: number;
             };
-            button_reply?: { title?: string };
-            list_reply?: { title?: string };
+            button_reply?: { id?: string; title?: string };
+            list_reply?: { id?: string; title?: string };
           }
         | undefined;
       if (interactive?.type === 'call_permission_reply') {
@@ -4002,6 +4860,10 @@ export class InboxService {
           interactive?.button_reply?.title ||
           interactive?.list_reply?.title ||
           '[Interactive reply]',
+        interactiveOptionId:
+          String(
+            interactive?.button_reply?.id || interactive?.list_reply?.id || '',
+          ).trim() || undefined,
       };
     }
     if (type === 'image') {
@@ -4511,7 +5373,14 @@ export class InboxService {
               extracted.text,
               nowIso,
             );
-            await this.refreshConversationAiOnInbound(conv);
+            const botHandled = await this.tryHandleInboundBotFlow(
+              conv,
+              extracted.text,
+              extracted.interactiveOptionId,
+            );
+            await this.refreshConversationAiOnInbound(conv, extracted.text, {
+              skipAutopilotSend: botHandled,
+            });
           }
 
           if (conv.linkedEntityType && conv.linkedEntityId) {

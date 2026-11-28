@@ -391,6 +391,7 @@ export class MetaWhatsAppService {
 
   /**
    * Send Official Meta Interactive Quick-Reply Buttons (up to 3 reply buttons).
+   * Accepts either plain string labels or explicit `{ id, title }` objects.
    * Falls back cleanly when button list is empty.
    */
   async sendInteractiveButtons(params: {
@@ -399,11 +400,18 @@ export class MetaWhatsAppService {
     toPhone: string;
     body: string;
     footerText?: string;
-    buttons: string[];
+    buttons: Array<string | { id: string; title: string }>;
   }): Promise<MetaSendResult> {
     const cleanButtons = (params.buttons || [])
-      .map((b) => String(b || '').trim())
-      .filter(Boolean)
+      .map((b, idx) =>
+        typeof b === 'string'
+          ? { id: `ls_btn_${idx + 1}`, title: String(b || '').trim() }
+          : {
+              id: String(b?.id || `ls_btn_${idx + 1}`).trim().slice(0, 256),
+              title: String(b?.title || '').trim(),
+            },
+      )
+      .filter((b) => Boolean(b.title))
       .slice(0, 3);
     if (cleanButtons.length === 0) {
       return this.sendText({
@@ -431,13 +439,124 @@ export class MetaWhatsAppService {
           ? { footer: { text: params.footerText.trim().slice(0, 60) } }
           : {}),
         action: {
-          buttons: cleanButtons.map((title, idx) => ({
+          buttons: cleanButtons.map((btn) => ({
             type: 'reply',
             reply: {
-              id: `ls_btn_${idx + 1}`,
-              title: title.slice(0, 20),
+              id: btn.id,
+              title: btn.title.slice(0, 20),
             },
           })),
+        },
+      },
+    });
+  }
+
+  /**
+   * Send Official Meta Interactive List Menu (up to 10 selectable rows).
+   */
+  async sendInteractiveList(params: {
+    phoneNumberId: string;
+    accessToken: string;
+    toPhone: string;
+    headerText?: string;
+    body: string;
+    footerText?: string;
+    buttonLabel: string;
+    sectionTitle?: string;
+    rows: Array<{ id: string; title: string; description?: string }>;
+  }): Promise<MetaSendResult> {
+    const cleanRows = (params.rows || [])
+      .map((r, idx) => ({
+        id: String(r.id || `ls_row_${idx + 1}`).trim().slice(0, 200),
+        title: String(r.title || '').trim().slice(0, 24),
+        description: r.description ? String(r.description).trim().slice(0, 72) : undefined,
+      }))
+      .filter((r) => Boolean(r.title))
+      .slice(0, 10);
+
+    if (cleanRows.length === 0) {
+      return this.sendText({
+        phoneNumberId: params.phoneNumberId,
+        accessToken: params.accessToken,
+        toPhone: params.toPhone,
+        body: params.body,
+      });
+    }
+
+    const to = this.formatRecipientDigits(params.toPhone);
+    if (!to || to.length < 10) {
+      return { ok: false, error: 'Recipient phone number is invalid for WhatsApp.' };
+    }
+
+    return this.postGraphMessage(params.phoneNumberId, params.accessToken, {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        ...(params.headerText?.trim()
+          ? { header: { type: 'text', text: params.headerText.trim().slice(0, 60) } }
+          : {}),
+        body: { text: String(params.body || '').slice(0, 1024) },
+        ...(params.footerText?.trim()
+          ? { footer: { text: params.footerText.trim().slice(0, 60) } }
+          : {}),
+      action: {
+          button: String(params.buttonLabel || 'Choose Option').trim().slice(0, 20),
+          sections: [
+            {
+              title: String(params.sectionTitle || 'Menu Options').trim().slice(0, 24),
+              rows: cleanRows,
+            },
+          ],
+        },
+      },
+    });
+  }
+
+  /**
+   * Send Official Meta Interactive Call-To-Action URL Button (e.g. "Pay ₹X Now" Razorpay Checkout Button).
+   */
+  async sendInteractiveCtaUrl(params: {
+    phoneNumberId: string;
+    accessToken: string;
+    toPhone: string;
+    headerText?: string;
+    body: string;
+    footerText?: string;
+    displayText: string;
+    url: string;
+  }): Promise<MetaSendResult> {
+    const cleanUrl = String(params.url || '').trim();
+    if (!/^https?:\/\//i.test(cleanUrl)) {
+      return { ok: false, error: 'CTA URL must be a valid HTTP/HTTPS link.' };
+    }
+    const to = this.formatRecipientDigits(params.toPhone);
+    if (!to || to.length < 10) {
+      return { ok: false, error: 'Recipient phone number is invalid for WhatsApp.' };
+    }
+
+    return this.postGraphMessage(params.phoneNumberId, params.accessToken, {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'cta_url',
+        ...(params.headerText?.trim()
+          ? { header: { type: 'text', text: params.headerText.trim().slice(0, 60) } }
+          : {}),
+        body: { text: String(params.body || 'Tap the button below to complete payment securely.').slice(0, 1024) },
+        ...(params.footerText?.trim()
+          ? { footer: { text: params.footerText.trim().slice(0, 60) } }
+          : {}),
+        action: {
+          name: 'cta_url',
+          parameters: {
+            display_text: String(params.displayText || 'Pay Now').trim().slice(0, 20),
+            url: cleanUrl,
+          },
         },
       },
     });

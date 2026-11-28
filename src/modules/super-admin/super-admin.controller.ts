@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   Param,
@@ -960,6 +961,180 @@ export class SuperAdminController {
       actor,
       tenantId,
       dto,
+      clientIp(req),
+    );
+  }
+
+  @Get('careers')
+  @ApiOperation({ summary: 'List all career job postings and candidate applications' })
+  async listSuperAdminCareers(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.listSuperAdminCareers();
+  }
+
+  @Post('careers/jobs')
+  @ApiOperation({ summary: 'Publish a new career job posting from Super Admin HQ' })
+  async createCareerJob(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    body: {
+      title: string;
+      team?:
+        | 'Engineering & AI'
+        | 'Product & Design'
+        | 'Growth & Success'
+        | 'Operations & Trust';
+      location?: string;
+      experience?: string;
+      employmentType?: 'Full-Time' | 'Contract' | 'Internship';
+      compensation?: string;
+      summary: string;
+      responsibilities?: string[] | string;
+      skills?: string[] | string;
+      status?: 'open' | 'paused' | 'closed';
+      featured?: boolean;
+      sortOrder?: number;
+    },
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.createCareerJob(actor, body, clientIp(req));
+  }
+
+  @Patch('careers/jobs/:jobId')
+  @ApiOperation({ summary: 'Edit or toggle status of a career job posting' })
+  async updateCareerJob(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('jobId') jobId: string,
+    @Body()
+    body: Partial<{
+      title: string;
+      team:
+        | 'Engineering & AI'
+        | 'Product & Design'
+        | 'Growth & Success'
+        | 'Operations & Trust';
+      location: string;
+      experience: string;
+      employmentType: 'Full-Time' | 'Contract' | 'Internship';
+      compensation: string;
+      summary: string;
+      responsibilities: string[] | string;
+      skills: string[] | string;
+      status: 'open' | 'paused' | 'closed';
+      featured: boolean;
+      sortOrder: number;
+    }>,
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.updateCareerJob(
+      actor,
+      jobId,
+      body,
+      clientIp(req),
+    );
+  }
+
+  @Delete('careers/jobs/:jobId')
+  @ApiOperation({ summary: 'Delete a career job posting permanently' })
+  async deleteCareerJob(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('jobId') jobId: string,
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.deleteCareerJob(actor, jobId, clientIp(req));
+  }
+
+  @Patch('careers/applications/:applicationId')
+  @ApiOperation({ summary: 'Update hiring stage or reviewer notes for an applicant' })
+  async updateCareerApplication(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('applicationId') applicationId: string,
+    @Body()
+    body: {
+      stage?: 'new' | 'shortlisted' | 'interview' | 'offer' | 'rejected';
+      reviewerNotes?: string;
+    },
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.updateCareerApplication(
+      actor,
+      applicationId,
+      body,
+      clientIp(req),
+    );
+  }
+
+  @Get('careers/applications/:applicationId/resume')
+  @ApiOperation({ summary: 'Download candidate PDF resume' })
+  async downloadCareerApplicationResume(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('applicationId') applicationId: string,
+    @Res() res: Response,
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    const { fileName, buffer } =
+      await this.superAdminService.getCareerApplicationResume(applicationId);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${fileName.replace(/["\r\n]/g, '')}"`,
+    );
+    res.send(buffer);
+  }
+
+  @Get('contact-inquiries')
+  @ApiOperation({
+    summary: 'List all public demo/sales inquiries submitted on /company/contact',
+  })
+  @ApiQuery({ name: 'status', required: false })
+  async listContactInquiries(
+    @Headers('authorization') authorization: string | undefined,
+    @Query('status') status?: string,
+  ) {
+    await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.listSuperAdminContactInquiries(status);
+  }
+
+  @Patch('contact-inquiries/:inquiryId')
+  @ApiOperation({
+    summary: 'Update workflow status or owner notes for a public inquiry',
+  })
+  async updateContactInquiry(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('inquiryId') inquiryId: string,
+    @Body()
+    body: {
+      status?: 'new' | 'contacted' | 'demo_scheduled' | 'converted' | 'archived';
+      ownerNotes?: string;
+    },
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.updateSuperAdminContactInquiry(
+      actor,
+      inquiryId,
+      body,
+      clientIp(req),
+    );
+  }
+
+  @Delete('contact-inquiries/:inquiryId')
+  @ApiOperation({ summary: 'Delete a public contact inquiry record' })
+  async deleteContactInquiry(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('inquiryId') inquiryId: string,
+    @Req() req: Request,
+  ) {
+    const actor = await this.superAdminService.verifySuperAdmin(authorization);
+    return this.superAdminService.deleteSuperAdminContactInquiry(
+      actor,
+      inquiryId,
       clientIp(req),
     );
   }

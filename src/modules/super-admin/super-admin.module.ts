@@ -15,8 +15,20 @@ import {
   SaasPartner,
   SaasPartnerSchema,
 } from './schemas/platform-config.schema';
+import {
+  CareerApplication,
+  CareerApplicationSchema,
+  CareerJob,
+  CareerJobSchema,
+} from './schemas/careers.schema';
+import {
+  PublicContactInquiry,
+  PublicContactInquirySchema,
+} from './schemas/contact-inquiries.schema';
 import { SuperAdminService } from './super-admin.service';
 import { SuperAdminController } from './super-admin.controller';
+import { PublicCareersController } from './public-careers.controller';
+import { PublicContactController } from './public-contact.controller';
 import { TenantSecurityGuard } from './tenant-security.guard';
 
 @Global()
@@ -30,6 +42,9 @@ import { TenantSecurityGuard } from './tenant-security.guard';
       { name: PlatformAuditLog.name, schema: PlatformAuditLogSchema },
       { name: SaasCoupon.name, schema: SaasCouponSchema },
       { name: SaasPartner.name, schema: SaasPartnerSchema },
+      { name: CareerJob.name, schema: CareerJobSchema },
+      { name: CareerApplication.name, schema: CareerApplicationSchema },
+      { name: PublicContactInquiry.name, schema: PublicContactInquirySchema },
     ]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -41,7 +56,11 @@ import { TenantSecurityGuard } from './tenant-security.guard';
       }),
     }),
   ],
-  controllers: [SuperAdminController],
+  controllers: [
+    SuperAdminController,
+    PublicCareersController,
+    PublicContactController,
+  ],
   providers: [
     SuperAdminService,
     {

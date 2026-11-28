@@ -300,8 +300,8 @@ export class AnalyticsService {
         regex: /noida/i,
       },
       {
-        label: 'New Delhi (Connaught Place, Okhla, Karol Bagh)',
-        regex: /delhi|okhla|karol/i,
+        label: 'New Delhi (Okhla, Karol Bagh, Bawana)',
+        regex: /delhi|okhla|karol|bawana/i,
       },
       {
         label: 'Gurugram (Cyber City, Udyog Vihar, Manesar)',

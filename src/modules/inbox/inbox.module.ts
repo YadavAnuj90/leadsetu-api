@@ -30,7 +30,9 @@ import { Tenant, TenantSchema } from '../auth/schemas/tenant.schema';
 import { User, UserSchema } from '../auth/schemas/user.schema';
 import { Contact, ContactSchema } from '../contacts/contacts.service';
 import { Deal, DealSchema } from '../deals/schemas/deal.schema';
+import { Invoice, InvoiceSchema } from '../invoices/invoices.service';
 import { Lead, LeadSchema } from '../leads/schemas/lead.schema';
+import { ProductItem, ProductSchema } from '../products/products.module';
 import {
   PlatformConfig,
   PlatformConfigSchema,
@@ -448,6 +450,63 @@ export class InboxController {
   ) {
     const auth = await this.inboxService.verifyAuth(authorization);
     return this.inboxService.updateAiAgentConfig(auth, body);
+  }
+
+  @Get('bot-flow')
+  @ApiOperation({
+    summary: 'Get WhatsApp Interactive Multi-Step Button & List Menu Bot Flow configuration',
+  })
+  async getBotFlowConfig(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.getBotFlowConfig(auth);
+  }
+
+  @Patch('bot-flow')
+  @ApiOperation({
+    summary: 'Save WhatsApp Interactive Multi-Step Bot Flow (English/Hindi/Hinglish buttons & routing)',
+  })
+  async updateBotFlowConfig(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: Record<string, unknown>,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.updateBotFlowConfig(auth, body);
+  }
+
+  @Post('bot-flow/reset-defaults')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Reset WhatsApp Interactive Bot Flow branches to starter English/Hindi/Hinglish presets',
+  })
+  async resetBotFlowConfig(
+    @Headers('authorization') authorization: string | undefined,
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.resetBotFlowConfig(auth);
+  }
+
+  @Post('bot-flow/simulate')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Simulate a multi-step WhatsApp Interactive Bot turn against live catalog/booking/invoice CRM data',
+  })
+  async simulateBotFlowStep(
+    @Headers('authorization') authorization: string | undefined,
+    @Body()
+    body: {
+      message?: string;
+      interactiveOptionId?: string;
+      language?: 'english' | 'hindi' | 'hinglish';
+      session?: Record<string, unknown>;
+      buyerName?: string;
+      buyerPhone?: string;
+      draftConfig?: Record<string, unknown>;
+    },
+  ) {
+    const auth = await this.inboxService.verifyAuth(authorization);
+    return this.inboxService.simulateBotFlowStep(auth, body as never);
   }
 
   @Get('ai-knowledge')
@@ -887,6 +946,8 @@ export class InboxController {
       { name: Deal.name, schema: DealSchema },
       { name: Contact.name, schema: ContactSchema },
       { name: Ticket.name, schema: TicketSchema },
+      { name: ProductItem.name, schema: ProductSchema },
+      { name: Invoice.name, schema: InvoiceSchema },
     ]),
     JwtModule.registerAsync({
       imports: [ConfigModule],

@@ -84,7 +84,7 @@ const LEADSETU_SELLER = {
   sellerCompany: 'Leadsetu Technologies (Anujalite Tech Pvt. Ltd.)',
   sellerGstin: '07AABCL4821K1Z5',
   sellerAddress:
-    'Tower B, 7th Floor, Sector 62, Noida & Connaught Place, New Delhi – 110001, India',
+    'Tower B, 7th Floor, Sector 62, Noida Electronic City, UP – 201309, India',
   sellerEmail: 'billing@leadsetu.in',
 };
 

@@ -4109,6 +4109,19 @@ export class InvoicesService {
         ? doc.linkedLeadId
         : doc._id.toString();
 
+    const settle = this.computeSettlement(doc);
+    const payableAmt = settle.balanceDue > 0 ? settle.balanceDue : settle.grandTotal;
+    const ctaButton =
+      doc.status !== 'paid' && /^https?:\/\//i.test(String(doc.paymentLink || ''))
+        ? {
+            label: `Pay ₹${Math.round(payableAmt).toLocaleString('en-IN')}`.slice(0, 20),
+            url: doc.paymentLink,
+            amountInr: payableAmt,
+            invoiceId: doc._id.toString(),
+            invoiceNumber: doc.invoiceNumber,
+          }
+        : undefined;
+
     const dispatch = await this.inboxService.dispatchAutomatedWhatsApp({
       tenantId: auth.tenantId,
       userId: auth.userId,
@@ -4127,6 +4140,7 @@ export class InvoicesService {
         filename,
         mimeType: 'application/pdf',
       },
+      ...(ctaButton ? { ctaButton } : {}),
       workflowName: `${docLabel} PDF (${doc.invoiceNumber})`,
     });
 
@@ -4174,6 +4188,7 @@ export class InvoicesService {
       publicUrl,
       linkedDealId: doc.linkedDealId || '',
       linkedLeadId: doc.linkedLeadId || '',
+      ctaButton,
       message: dispatch.renderedMessage || defaultMessage,
       error: dispatch.deliveryError || dispatch.reason || '',
     };
@@ -4325,6 +4340,7 @@ export class InvoicesService {
       settlementBefore.balanceDue || settledAmount,
     );
 
+    let capiEvent: { eventId?: string; status?: string } | null = null;
     if (appliedAmount > 0 && doc.status !== 'paid') {
       const entry: InvoicePaymentRecord = {
         id: `pay-${Date.now()}-${randomBytes(3).toString('hex')}`,
@@ -4348,7 +4364,7 @@ export class InvoicesService {
       await doc.save();
 
       if (doc.status === 'paid' && this.metaCapiService) {
-        await this.metaCapiService
+        capiEvent = await this.metaCapiService
           .fireConversionEvent({
             tenantId: doc.tenantId.toString(),
             eventName: 'Purchase',
@@ -4361,7 +4377,7 @@ export class InvoicesService {
             triggeredBy: 'auto_razorpay_webhook_paid',
             respectAutoToggle: true,
           })
-          .catch(() => {});
+          .catch(() => null);
       }
     }
 
@@ -4499,6 +4515,9 @@ export class InvoicesService {
       status: doc.status,
       creditHoldRemoved,
       whatsappReceiptSent,
+      metaCapiPurchaseFired: Boolean(capiEvent),
+      metaCapiEventId: capiEvent?.eventId || '',
+      metaCapiStatus: capiEvent?.status || '',
       action: doc.status === 'paid' ? 'invoice_paid' : 'partial_payment_recorded',
     };
   }
@@ -4634,6 +4653,15 @@ export class InvoicesService {
             mimeType: 'image/png',
           }
         : undefined;
+      const cartCtaButton = /^https?:\/\//i.test(String(createdInv.paymentLink || ''))
+        ? {
+            label: `Pay ₹${Math.round(createdInv.grandTotal).toLocaleString('en-IN')}`.slice(0, 20),
+            url: createdInv.paymentLink,
+            amountInr: createdInv.grandTotal,
+            invoiceId: createdInv.id,
+            invoiceNumber: createdInv.invoiceNumber,
+          }
+        : undefined;
 
       if (resolvedConvId && Types.ObjectId.isValid(resolvedConvId)) {
         try {
@@ -4651,6 +4679,7 @@ export class InvoicesService {
               via: 'inbox',
               logToTimeline: true,
               ...(qrAttachment ? { attachment: qrAttachment } : {}),
+              ...(cartCtaButton ? { ctaButton: cartCtaButton } : {}),
             },
           );
           whatsappDispatched = true;
@@ -4672,7 +4701,8 @@ export class InvoicesService {
             messageBody: cartMsg,
             sendMode: 'text',
             ...(qrAttachment ? { attachment: qrAttachment } : {}),
-            timelineMarker: `WhatsApp Catalog Cart ${createdInv.invoiceNumber} (₹${createdInv.grandTotal.toLocaleString('en-IN')}) sent with UPI QR`,
+            ...(cartCtaButton ? { ctaButton: cartCtaButton } : {}),
+            timelineMarker: `WhatsApp Catalog Cart ${createdInv.invoiceNumber} (₹${createdInv.grandTotal.toLocaleString('en-IN')}) sent with UPI QR + Razorpay CTA`,
           });
           whatsappDispatched = !dispatch.skippedDnd && dispatch.status !== 'failed';
           resolvedConvId = dispatch.conversationId || '';

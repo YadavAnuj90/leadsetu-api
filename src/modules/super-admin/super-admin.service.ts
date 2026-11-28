@@ -63,6 +63,20 @@ import {
   SaasPartnerDocument,
 } from './schemas/platform-config.schema';
 import {
+  CareerApplication,
+  CareerApplicationDocument,
+  CareerApplicationStage,
+  CareerJob,
+  CareerJobDocument,
+  CareerJobStatus,
+  CareerTeam,
+} from './schemas/careers.schema';
+import {
+  ContactInquiryStatus,
+  PublicContactInquiry,
+  PublicContactInquiryDocument,
+} from './schemas/contact-inquiries.schema';
+import {
   detectRazorpayMode,
   resolveEffectiveRazorpayConfig,
 } from './razorpay-config.util';
@@ -121,6 +135,12 @@ export class SuperAdminService implements OnModuleInit {
     private readonly couponModel: Model<SaasCouponDocument>,
     @InjectModel(SaasPartner.name)
     private readonly partnerModel: Model<SaasPartnerDocument>,
+    @InjectModel(CareerJob.name)
+    private readonly careerJobModel: Model<CareerJobDocument>,
+    @InjectModel(CareerApplication.name)
+    private readonly careerApplicationModel: Model<CareerApplicationDocument>,
+    @InjectModel(PublicContactInquiry.name)
+    private readonly contactInquiryModel: Model<PublicContactInquiryDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
@@ -128,6 +148,9 @@ export class SuperAdminService implements OnModuleInit {
 
   async onModuleInit() {
     await this.ensureGlobalConfig();
+    await this.careerJobModel
+      .deleteMany({ createdByEmail: 'system@leadsetu.in' })
+      .exec();
     const superAdminCount = await this.userModel
       .countDocuments({ role: 'super_admin' })
       .exec();
@@ -1983,7 +2006,7 @@ export class SuperAdminService implements OnModuleInit {
       sellerCompany: 'Leadsetu Technologies (Anujalite Tech Pvt. Ltd.)',
       sellerGstin: '07AABCL4821K1Z5',
       sellerAddress:
-        'Tower B, 7th Floor, Sector 62, Noida & Connaught Place, New Delhi – 110001, India',
+        'Tower B, 7th Floor, Sector 62, Noida Electronic City, UP – 201309, India',
       sellerEmail: 'billing@leadsetu.in',
     };
 
@@ -3097,7 +3120,7 @@ export class SuperAdminService implements OnModuleInit {
         sellerCompany: 'Leadsetu Technologies (Anujalite Tech Pvt. Ltd.)',
         sellerGstin: '07AABCL4821K1Z5',
         sellerAddress:
-          'Tower B, 7th Floor, Sector 62, Noida & Connaught Place, New Delhi – 110001, India',
+          'Tower B, 7th Floor, Sector 62, Noida Electronic City, UP – 201309, India',
         sellerEmail: 'billing@leadsetu.in',
         issuedByEmail: actor.email,
       };
@@ -5937,5 +5960,637 @@ export class SuperAdminService implements OnModuleInit {
       error: firstError,
       config: await this.buildSanitizedAiProvider(doc),
     };
+  }
+
+  // ─── Dynamic Careers & Talent Portal ──────────────────────────────────
+
+  private normalizeStringList(value: unknown): string[] {
+    if (Array.isArray(value)) {
+      return value.map((v) => String(v || '').trim()).filter(Boolean);
+    }
+    if (typeof value === 'string') {
+      return value
+        .split(/\r?\n|,/)
+        .map((v) => v.trim())
+        .filter(Boolean);
+    }
+    return [];
+  }
+
+  async listPublicCareerJobs(team?: string) {
+    const filter: Record<string, unknown> = { status: 'open' };
+    if (team && team.trim() && team !== 'All') {
+      filter.team = team.trim();
+    }
+    const jobs = await this.careerJobModel
+      .find(filter)
+      .sort({ featured: -1, sortOrder: 1, createdAt: -1 })
+      .lean()
+      .exec();
+
+    return {
+      data: jobs.map((j) => ({
+        id: j._id.toString(),
+        slug: j.slug,
+        title: j.title,
+        team: j.team,
+        location: j.location,
+        experience: j.experience,
+        employmentType: j.employmentType,
+        compensation: j.compensation,
+        summary: j.summary,
+        responsibilities: j.responsibilities || [],
+        skills: j.skills || [],
+        featured: Boolean(j.featured),
+        createdAt: (j as { createdAt?: Date }).createdAt?.toISOString?.() || '',
+      })),
+    };
+  }
+
+  async submitPublicCareerApplication(input: {
+    jobId?: string;
+    jobTitle: string;
+    jobTeam?: string;
+    candidateName: string;
+    candidateEmail: string;
+    candidatePhone: string;
+    noticePeriod?: string;
+    portfolioUrl?: string;
+    coverNote?: string;
+    resumeFileName: string;
+    resumeSizeBytes?: number;
+    resumeBase64: string;
+  }) {
+    const candidateName = String(input?.candidateName || '').trim();
+    const candidateEmail = String(input?.candidateEmail || '')
+      .trim()
+      .toLowerCase();
+    const candidatePhone = String(input?.candidatePhone || '').trim();
+    const jobTitle = String(input?.jobTitle || '').trim();
+    const resumeFileName = String(input?.resumeFileName || '').trim();
+
+    if (
+      !candidateName ||
+      !candidateEmail ||
+      !candidatePhone ||
+      !jobTitle ||
+      !resumeFileName ||
+      !input?.resumeBase64
+    ) {
+      throw new BadRequestException(
+        'Name, email, phone, role title, and a PDF resume are required.',
+      );
+    }
+
+    if (!resumeFileName.toLowerCase().endsWith('.pdf')) {
+      throw new BadRequestException('Only PDF resumes (.pdf) are accepted.');
+    }
+
+    const strippedBase64 = String(input.resumeBase64).replace(
+      /^data:application\/pdf;base64,/i,
+      '',
+    );
+    const buffer = Buffer.from(strippedBase64, 'base64');
+    if (!buffer.length || buffer.length > 5.5 * 1024 * 1024) {
+      throw new BadRequestException(
+        'Uploaded PDF resume must be non-empty and under 5 MB.',
+      );
+    }
+
+    let resolvedJobTeam = String(input?.jobTeam || '').trim() || 'General';
+    let resolvedJobId = '';
+
+    if (input?.jobId && Types.ObjectId.isValid(input.jobId)) {
+      const matchedJob = await this.careerJobModel.findById(input.jobId).exec();
+      if (matchedJob) {
+        resolvedJobId = matchedJob._id.toString();
+        resolvedJobTeam = matchedJob.team;
+        matchedJob.applicationsCount = (matchedJob.applicationsCount || 0) + 1;
+        await matchedJob.save();
+      }
+    }
+
+    const created = await this.careerApplicationModel.create({
+      jobId: resolvedJobId,
+      jobTitle,
+      jobTeam: resolvedJobTeam,
+      candidateName,
+      candidateEmail,
+      candidatePhone,
+      noticePeriod: String(input?.noticePeriod || 'Immediate / 15 Days').trim(),
+      portfolioUrl: String(input?.portfolioUrl || '').trim(),
+      coverNote: String(input?.coverNote || '').trim(),
+      resumeFileName,
+      resumeSizeBytes: Number(input?.resumeSizeBytes) || buffer.length,
+      resumeBase64: strippedBase64,
+      stage: 'new',
+      reviewerNotes: '',
+    });
+
+    return {
+      applicationId: created._id.toString(),
+      jobTitle: created.jobTitle,
+      candidateEmail: created.candidateEmail,
+      resumeFileName: created.resumeFileName,
+      submittedAt: new Date().toISOString(),
+    };
+  }
+
+  async listSuperAdminCareers() {
+    const [jobs, applications] = await Promise.all([
+      this.careerJobModel
+        .find()
+        .sort({ sortOrder: 1, createdAt: -1 })
+        .lean()
+        .exec(),
+      this.careerApplicationModel
+        .find()
+        .select('-resumeBase64')
+        .sort({ createdAt: -1 })
+        .limit(200)
+        .lean()
+        .exec(),
+    ]);
+
+    const mappedJobs = jobs.map((j) => ({
+      id: j._id.toString(),
+      slug: j.slug,
+      title: j.title,
+      team: j.team,
+      location: j.location,
+      experience: j.experience,
+      employmentType: j.employmentType,
+      compensation: j.compensation,
+      summary: j.summary,
+      responsibilities: j.responsibilities || [],
+      skills: j.skills || [],
+      status: j.status,
+      featured: Boolean(j.featured),
+      sortOrder: j.sortOrder || 0,
+      applicationsCount: j.applicationsCount || 0,
+      createdByName: j.createdByName || '',
+      createdByEmail: j.createdByEmail || '',
+      createdAt: (j as { createdAt?: Date }).createdAt?.toISOString?.() || '',
+      updatedAt: (j as { updatedAt?: Date }).updatedAt?.toISOString?.() || '',
+    }));
+
+    const mappedApps = applications.map((a) => ({
+      id: a._id.toString(),
+      jobId: a.jobId || '',
+      jobTitle: a.jobTitle,
+      jobTeam: a.jobTeam || 'General',
+      candidateName: a.candidateName,
+      candidateEmail: a.candidateEmail,
+      candidatePhone: a.candidatePhone,
+      noticePeriod: a.noticePeriod || '',
+      portfolioUrl: a.portfolioUrl || '',
+      coverNote: a.coverNote || '',
+      resumeFileName: a.resumeFileName,
+      resumeSizeBytes: a.resumeSizeBytes || 0,
+      stage: a.stage,
+      reviewerNotes: a.reviewerNotes || '',
+      createdAt: (a as { createdAt?: Date }).createdAt?.toISOString?.() || '',
+    }));
+
+    return {
+      jobs: mappedJobs,
+      applications: mappedApps,
+      stats: {
+        totalJobs: mappedJobs.length,
+        openJobs: mappedJobs.filter((j) => j.status === 'open').length,
+        pausedJobs: mappedJobs.filter((j) => j.status === 'paused').length,
+        closedJobs: mappedJobs.filter((j) => j.status === 'closed').length,
+        totalApplications: mappedApps.length,
+        newApplications: mappedApps.filter((a) => a.stage === 'new').length,
+        shortlistedApplications: mappedApps.filter(
+          (a) => a.stage === 'shortlisted' || a.stage === 'interview',
+        ).length,
+      },
+    };
+  }
+
+  async createCareerJob(
+    actor: SuperAdminActor,
+    body: {
+      title: string;
+      team?: CareerTeam;
+      location?: string;
+      experience?: string;
+      employmentType?: 'Full-Time' | 'Contract' | 'Internship';
+      compensation?: string;
+      summary: string;
+      responsibilities?: string[] | string;
+      skills?: string[] | string;
+      status?: CareerJobStatus;
+      featured?: boolean;
+      sortOrder?: number;
+    },
+    ipAddress?: string,
+  ) {
+    const title = String(body?.title || '').trim();
+    const summary = String(body?.summary || '').trim();
+    if (!title || !summary) {
+      throw new BadRequestException('Job title and summary are required.');
+    }
+
+    const baseSlug = title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40);
+    const slug = `${baseSlug || 'role'}-${randomBytes(2).toString('hex')}`;
+
+    const created = await this.careerJobModel.create({
+      slug,
+      title,
+      team: body.team || 'Engineering & AI',
+      location: String(body.location || 'Hybrid · India').trim(),
+      experience: String(body.experience || '2–5 Years').trim(),
+      employmentType: body.employmentType || 'Full-Time',
+      compensation: String(body.compensation || 'Competitive + ESOPs').trim(),
+      summary,
+      responsibilities: Array.isArray(body.responsibilities)
+        ? body.responsibilities.map((r) => String(r).trim()).filter(Boolean)
+        : String(body.responsibilities || '')
+            .split(/\r?\n/)
+            .map((r) => r.trim())
+            .filter(Boolean),
+      skills: this.normalizeStringList(body.skills),
+      status: body.status || 'open',
+      featured: Boolean(body.featured),
+      sortOrder: Number.isFinite(body.sortOrder) ? Number(body.sortOrder) : 0,
+      applicationsCount: 0,
+      createdByName: actor.name,
+      createdByEmail: actor.email,
+    });
+
+    await this.recordAudit(actor, {
+      action: 'CAREER_JOB_CREATED',
+      severity: 'info',
+      summary: `Published career opening "${created.title}" (${created.status})`,
+      ipAddress,
+      metadata: { jobId: created._id.toString(), slug: created.slug },
+    });
+
+    return {
+      job: {
+        id: created._id.toString(),
+        slug: created.slug,
+        title: created.title,
+        team: created.team,
+        location: created.location,
+        experience: created.experience,
+        employmentType: created.employmentType,
+        compensation: created.compensation,
+        summary: created.summary,
+        responsibilities: created.responsibilities,
+        skills: created.skills,
+        status: created.status,
+        featured: created.featured,
+        sortOrder: created.sortOrder,
+        applicationsCount: created.applicationsCount,
+      },
+    };
+  }
+
+  async updateCareerJob(
+    actor: SuperAdminActor,
+    jobId: string,
+    body: Partial<{
+      title: string;
+      team: CareerTeam;
+      location: string;
+      experience: string;
+      employmentType: 'Full-Time' | 'Contract' | 'Internship';
+      compensation: string;
+      summary: string;
+      responsibilities: string[] | string;
+      skills: string[] | string;
+      status: CareerJobStatus;
+      featured: boolean;
+      sortOrder: number;
+    }>,
+    ipAddress?: string,
+  ) {
+    if (!Types.ObjectId.isValid(jobId)) {
+      throw new BadRequestException('Invalid career job ID.');
+    }
+    const job = await this.careerJobModel.findById(jobId).exec();
+    if (!job) {
+      throw new NotFoundException('Career opening not found.');
+    }
+
+    if (body.title !== undefined) job.title = String(body.title).trim();
+    if (body.team !== undefined) job.team = body.team;
+    if (body.location !== undefined) job.location = String(body.location).trim();
+    if (body.experience !== undefined)
+      job.experience = String(body.experience).trim();
+    if (body.employmentType !== undefined)
+      job.employmentType = body.employmentType;
+    if (body.compensation !== undefined)
+      job.compensation = String(body.compensation).trim();
+    if (body.summary !== undefined) job.summary = String(body.summary).trim();
+    if (body.responsibilities !== undefined) {
+      job.responsibilities = Array.isArray(body.responsibilities)
+        ? body.responsibilities.map((r) => String(r).trim()).filter(Boolean)
+        : String(body.responsibilities)
+            .split(/\r?\n/)
+            .map((r) => r.trim())
+            .filter(Boolean);
+    }
+    if (body.skills !== undefined) {
+      job.skills = this.normalizeStringList(body.skills);
+    }
+    if (body.status !== undefined) job.status = body.status;
+    if (body.featured !== undefined) job.featured = Boolean(body.featured);
+    if (body.sortOrder !== undefined && Number.isFinite(body.sortOrder)) {
+      job.sortOrder = Number(body.sortOrder);
+    }
+
+    await job.save();
+
+    await this.recordAudit(actor, {
+      action: 'CAREER_JOB_UPDATED',
+      severity: 'info',
+      summary: `Updated career opening "${job.title}" (status: ${job.status})`,
+      ipAddress,
+      metadata: { jobId: job._id.toString(), status: job.status },
+    });
+
+    return {
+      job: {
+        id: job._id.toString(),
+        slug: job.slug,
+        title: job.title,
+        team: job.team,
+        location: job.location,
+        experience: job.experience,
+        employmentType: job.employmentType,
+        compensation: job.compensation,
+        summary: job.summary,
+        responsibilities: job.responsibilities,
+        skills: job.skills,
+        status: job.status,
+        featured: job.featured,
+        sortOrder: job.sortOrder,
+        applicationsCount: job.applicationsCount,
+      },
+    };
+  }
+
+  async deleteCareerJob(
+    actor: SuperAdminActor,
+    jobId: string,
+    ipAddress?: string,
+  ) {
+    if (!Types.ObjectId.isValid(jobId)) {
+      throw new BadRequestException('Invalid career job ID.');
+    }
+    const deleted = await this.careerJobModel.findByIdAndDelete(jobId).exec();
+    if (!deleted) {
+      throw new NotFoundException('Career opening not found.');
+    }
+
+    await this.recordAudit(actor, {
+      action: 'CAREER_JOB_DELETED',
+      severity: 'warning',
+      summary: `Deleted career opening "${deleted.title}"`,
+      ipAddress,
+      metadata: { jobId },
+    });
+
+    return { deleted: true, id: jobId };
+  }
+
+  async updateCareerApplication(
+    actor: SuperAdminActor,
+    applicationId: string,
+    body: {
+      stage?: CareerApplicationStage;
+      reviewerNotes?: string;
+    },
+    ipAddress?: string,
+  ) {
+    if (!Types.ObjectId.isValid(applicationId)) {
+      throw new BadRequestException('Invalid application ID.');
+    }
+    const app = await this.careerApplicationModel.findById(applicationId).exec();
+    if (!app) {
+      throw new NotFoundException('Candidate application not found.');
+    }
+    if (body.stage !== undefined) app.stage = body.stage;
+    if (body.reviewerNotes !== undefined) {
+      app.reviewerNotes = String(body.reviewerNotes).trim();
+    }
+    await app.save();
+
+    await this.recordAudit(actor, {
+      action: 'CAREER_APPLICATION_UPDATED',
+      severity: 'info',
+      summary: `Updated candidate "${app.candidateName}" (${app.jobTitle}) -> stage: ${app.stage}`,
+      ipAddress,
+      metadata: { applicationId, stage: app.stage },
+    });
+
+    return {
+      application: {
+        id: app._id.toString(),
+        jobId: app.jobId || '',
+        jobTitle: app.jobTitle,
+        jobTeam: app.jobTeam || 'General',
+        candidateName: app.candidateName,
+        candidateEmail: app.candidateEmail,
+        candidatePhone: app.candidatePhone,
+        noticePeriod: app.noticePeriod || '',
+        portfolioUrl: app.portfolioUrl || '',
+        coverNote: app.coverNote || '',
+        resumeFileName: app.resumeFileName,
+        resumeSizeBytes: app.resumeSizeBytes || 0,
+        stage: app.stage,
+        reviewerNotes: app.reviewerNotes || '',
+      },
+    };
+  }
+
+  async getCareerApplicationResume(applicationId: string) {
+    if (!Types.ObjectId.isValid(applicationId)) {
+      throw new BadRequestException('Invalid application ID.');
+    }
+    const app = await this.careerApplicationModel.findById(applicationId).exec();
+    if (!app || !app.resumeBase64) {
+      throw new NotFoundException('Resume PDF not found.');
+    }
+    return {
+      fileName: app.resumeFileName || 'candidate-resume.pdf',
+      buffer: Buffer.from(app.resumeBase64, 'base64'),
+    };
+  }
+
+  // ─── Public Contact & Demo Requests ───────────────────────────────────
+
+  async submitPublicContactInquiry(
+    input: {
+      name: string;
+      company: string;
+      email: string;
+      phone?: string;
+      topic?: string;
+      message: string;
+    },
+    ipAddress?: string,
+  ) {
+    const name = String(input?.name || '').trim();
+    const company = String(input?.company || '').trim();
+    const email = String(input?.email || '')
+      .trim()
+      .toLowerCase();
+    const message = String(input?.message || '').trim();
+
+    if (!name || !company || !email || !message) {
+      throw new BadRequestException(
+        'Name, company name, work email, and message are required.',
+      );
+    }
+
+    const created = await this.contactInquiryModel.create({
+      name,
+      company,
+      email,
+      phone: String(input?.phone || '').trim(),
+      topic:
+        String(input?.topic || '').trim() || 'Enterprise Demo & Migration',
+      message,
+      status: 'new',
+      ownerNotes: '',
+      source: 'company_contact',
+      ipAddress: ipAddress || '',
+    });
+
+    return {
+      inquiryId: created._id.toString(),
+      name: created.name,
+      company: created.company,
+      email: created.email,
+      topic: created.topic,
+      submittedAt: new Date().toISOString(),
+    };
+  }
+
+  async listSuperAdminContactInquiries(status?: string) {
+    const filter: Record<string, unknown> = {};
+    if (status && status !== 'all') {
+      filter.status = status;
+    }
+
+    const [allInquiries, filtered] = await Promise.all([
+      this.contactInquiryModel.find().select('status').lean().exec(),
+      this.contactInquiryModel
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .limit(200)
+        .lean()
+        .exec(),
+    ]);
+
+    return {
+      data: filtered.map((item) => ({
+        id: item._id.toString(),
+        name: item.name,
+        company: item.company,
+        email: item.email,
+        phone: item.phone || '',
+        topic: item.topic,
+        message: item.message,
+        status: item.status,
+        ownerNotes: item.ownerNotes || '',
+        source: item.source || 'company_contact',
+        createdAt:
+          (item as { createdAt?: Date }).createdAt?.toISOString?.() || '',
+        updatedAt:
+          (item as { updatedAt?: Date }).updatedAt?.toISOString?.() || '',
+      })),
+      stats: {
+        total: allInquiries.length,
+        newCount: allInquiries.filter((i) => i.status === 'new').length,
+        contactedCount: allInquiries.filter((i) => i.status === 'contacted')
+          .length,
+        demoScheduledCount: allInquiries.filter(
+          (i) => i.status === 'demo_scheduled',
+        ).length,
+        convertedCount: allInquiries.filter((i) => i.status === 'converted')
+          .length,
+      },
+    };
+  }
+
+  async updateSuperAdminContactInquiry(
+    actor: SuperAdminActor,
+    inquiryId: string,
+    body: {
+      status?: ContactInquiryStatus;
+      ownerNotes?: string;
+    },
+    ipAddress?: string,
+  ) {
+    if (!Types.ObjectId.isValid(inquiryId)) {
+      throw new BadRequestException('Invalid inquiry ID.');
+    }
+    const inquiry = await this.contactInquiryModel.findById(inquiryId).exec();
+    if (!inquiry) {
+      throw new NotFoundException('Contact inquiry not found.');
+    }
+    if (body.status !== undefined) inquiry.status = body.status;
+    if (body.ownerNotes !== undefined) {
+      inquiry.ownerNotes = String(body.ownerNotes).trim();
+    }
+    await inquiry.save();
+
+    await this.recordAudit(actor, {
+      action: 'CONTACT_INQUIRY_UPDATED',
+      severity: 'info',
+      summary: `Updated inquiry from ${inquiry.name} (${inquiry.company}) -> ${inquiry.status}`,
+      ipAddress,
+      metadata: { inquiryId, status: inquiry.status },
+    });
+
+    return {
+      inquiry: {
+        id: inquiry._id.toString(),
+        name: inquiry.name,
+        company: inquiry.company,
+        email: inquiry.email,
+        phone: inquiry.phone || '',
+        topic: inquiry.topic,
+        message: inquiry.message,
+        status: inquiry.status,
+        ownerNotes: inquiry.ownerNotes || '',
+      },
+    };
+  }
+
+  async deleteSuperAdminContactInquiry(
+    actor: SuperAdminActor,
+    inquiryId: string,
+    ipAddress?: string,
+  ) {
+    if (!Types.ObjectId.isValid(inquiryId)) {
+      throw new BadRequestException('Invalid inquiry ID.');
+    }
+    const deleted = await this.contactInquiryModel
+      .findByIdAndDelete(inquiryId)
+      .exec();
+    if (!deleted) {
+      throw new NotFoundException('Contact inquiry not found.');
+    }
+
+    await this.recordAudit(actor, {
+      action: 'CONTACT_INQUIRY_DELETED',
+      severity: 'warning',
+      summary: `Deleted contact inquiry from ${deleted.name} (${deleted.company})`,
+      ipAddress,
+      metadata: { inquiryId },
+    });
+
+    return { deleted: true, id: inquiryId };
   }
 }

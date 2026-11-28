@@ -21,6 +21,8 @@ const ALLOWLIST_PREFIXES = [
   '/v1/webhooks',
   '/v1/calls/public',
   '/v1/marketplace-sync/public',
+  '/v1/public/booking',
+  '/v1/public/forms',
   '/v1/analytics/notifications',
   '/v1/platform-tickets',
   '/docs',

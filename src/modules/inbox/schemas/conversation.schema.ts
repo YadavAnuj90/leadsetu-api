@@ -12,6 +12,14 @@ export interface ChatAttachment {
   mimeType?: string;
 }
 
+export interface ChatCtaButton {
+  label: string;
+  url: string;
+  amountInr?: number;
+  invoiceId?: string;
+  invoiceNumber?: string;
+}
+
 export interface ChatMessage {
   id: string;
   direction: 'inbound' | 'outbound';
@@ -29,6 +37,7 @@ export interface ChatMessage {
   campaignId?: string;
   workflowId?: string;
   attachment?: ChatAttachment;
+  ctaButton?: ChatCtaButton;
   statusUpdatedAt?: string;
   createdAt: string;
 }
@@ -114,6 +123,10 @@ export class ConversationThread {
 
   @Prop({ type: Object, default: {} })
   aiQualifiedData?: Record<string, unknown>;
+
+  /** Per-thread multi-step Interactive Bot session state (step, language, cooldown). */
+  @Prop({ type: Object, default: {} })
+  botSession?: Record<string, unknown>;
 
   @Prop({ type: Array, default: [] })
   aiActionLogs?: Array<{

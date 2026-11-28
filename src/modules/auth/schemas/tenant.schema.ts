@@ -182,7 +182,7 @@ export class SubscriptionInvoiceRecord {
   @Prop({
     trim: true,
     default:
-      'Tower B, 7th Floor, Sector 62, Noida & Connaught Place, New Delhi – 110001, India',
+      'Tower B, 7th Floor, Sector 62, Noida Electronic City, UP – 201309, India',
   })
   sellerAddress!: string;
 
@@ -556,6 +556,10 @@ export class Tenant {
   /** Autonomous 24x7 AI WhatsApp Sales Concierge & Discount Guardrails. */
   @Prop({ type: Object, default: () => ({}) })
   aiSalesAgentPolicy?: Record<string, unknown>;
+
+  /** Multi-step Interactive WhatsApp Button & List Menu Bot Flow Config. */
+  @Prop({ type: Object, default: () => ({}) })
+  whatsappBotFlow?: Record<string, unknown>;
 
   /** Workspace industry segment preset driving labels, default modules & workflows. */
   @Prop({
