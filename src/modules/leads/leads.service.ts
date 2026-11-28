@@ -124,7 +124,7 @@ export class LeadsService {
     const token = authHeader.slice(7).trim();
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
 
     try {
       const payload = await this.jwtService.verifyAsync<{
@@ -253,7 +253,7 @@ export class LeadsService {
       finalScore >= 80 ? 'Hot' : finalScore >= 58 ? 'Warm' : 'Cold';
 
     const latestQuote = quotes[0];
-    const cityLabel = input.city?.trim() || 'Delhi-NCR';
+    const cityLabel = input.city?.trim() || '';
     const buyerLabel = input.name?.trim() || 'Buyer';
     const companyLabel = input.company?.trim() || 'Direct Account';
 
@@ -404,7 +404,7 @@ export class LeadsService {
       company: input.company || '',
       phone: input.phone || '',
       email: input.email || '',
-      city: input.city || 'Delhi-NCR',
+      city: input.city || '',
       source: input.source || 'whatsapp',
       status: input.status || 'new',
       estimatedValue: Number(input.estimatedValue || 0),
@@ -564,7 +564,7 @@ export class LeadsService {
       company: doc.company || '',
       phone: maskPhones ? maskPhoneNumber(doc.phone) : doc.phone || '',
       email: doc.email || '',
-      city: doc.city || 'Delhi-NCR',
+      city: doc.city || '',
       gstin: doc.gstin || '',
       gstinProfile: doc.gstinProfile || undefined,
       source: doc.source,
@@ -1613,11 +1613,11 @@ export class LeadsService {
       .toLowerCase();
     const mergedCity =
       ov.city !== undefined
-        ? ov.city.trim() || 'Delhi-NCR'
+        ? ov.city.trim() || ''
         : pickFirstNonEmpty([
             primaryDoc.city,
             ...secondaryDocs.map((d) => d.city),
-          ]) || 'Delhi-NCR';
+          ]) || '';
     const mergedSource = ov.source || primaryDoc.source;
     const mergedStatus = ov.status || primaryDoc.status;
     const mergedAccountKind = ov.accountKind || primaryDoc.accountKind;
@@ -1944,7 +1944,7 @@ export class LeadsService {
         company: row.company?.trim() ?? '',
         phone: formattedPhone,
         email,
-        city: row.city?.trim() || 'Delhi-NCR',
+        city: row.city?.trim() || '',
         source: row.source || 'manual',
         status: row.status,
         estimatedValue: Number(row.estimatedValue ?? 0) || 0,
@@ -2164,7 +2164,7 @@ export class LeadsService {
       payload?.SENDER_COMPANY ?? payload?.company ?? '',
     ).trim();
     const city = String(
-      payload?.SENDER_CITY ?? payload?.city ?? 'Delhi-NCR',
+      payload?.SENDER_CITY ?? payload?.city ?? '',
     ).trim();
     const estimatedValue = Number(payload?.estimatedValue ?? payload?.budget ?? 0) || 0;
 

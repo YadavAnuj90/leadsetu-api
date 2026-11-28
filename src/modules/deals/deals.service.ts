@@ -85,7 +85,7 @@ export class DealsService {
     const token = authHeader.slice(7).trim();
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
     try {
       const payload = await this.jwtService.verifyAsync<{
         sub: string;
@@ -201,7 +201,7 @@ export class DealsService {
       finalScore >= 80 ? 'Hot' : finalScore >= 60 ? 'Warm' : 'Cold';
 
     const latestQuote = quotes[0];
-    const cityLabel = input.city?.trim() || 'Delhi-NCR';
+    const cityLabel = input.city?.trim() || '';
     const clientLabel =
       input.company?.trim() || input.contactName?.trim() || input.title || 'Client';
 
@@ -349,7 +349,7 @@ export class DealsService {
       phone: input.contactPhone || '',
       contactPhone: input.contactPhone || '',
       email: input.contactEmail || '',
-      city: input.city || 'Delhi-NCR',
+      city: input.city || '',
       source: input.source || 'whatsapp',
       stage: input.stage || 'qualified',
       status: input.stage || 'qualified',
@@ -525,7 +525,7 @@ export class DealsService {
         ? maskPhoneNumber(doc.contactPhone)
         : doc.contactPhone || '',
       contactEmail: doc.contactEmail || '',
-      city: doc.city || 'Delhi-NCR',
+      city: doc.city || '',
       value: doc.value || 0,
       stage: doc.stage || 'qualified',
       stageCategory:

@@ -59,7 +59,7 @@ export class ConversationThread {
   @Prop({ trim: true, default: '' })
   phone!: string;
 
-  @Prop({ trim: true, default: 'Delhi-NCR' })
+  @Prop({ trim: true, default: '' })
   city!: string;
 
   @Prop({

@@ -190,7 +190,7 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
     const token = authHeader.slice(7).trim();
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
     try {
       const payload = await this.jwtService.verifyAsync<{
         sub: string;
@@ -444,7 +444,7 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
         contactName: params.leadDoc.name,
         company: params.leadDoc.company || '',
         phone: params.leadDoc.phone,
-        city: params.leadDoc.city || 'Delhi-NCR',
+        city: params.leadDoc.city || '',
         estimatedValue: Number(params.leadDoc.estimatedValue || 0),
         channel: 'whatsapp',
         initialMessage: renderedMsg,
@@ -571,7 +571,7 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
       const phone = normalizeIndianPhone(rawPhone) || rawPhone;
       const phone10 = last10(phone);
       const email = String(raw.email || '').trim().toLowerCase();
-      const rawCity = String(raw.city || params.tenant.city || 'Delhi-NCR').trim();
+      const rawCity = String(raw.city || params.tenant.city || '').trim();
       const company = String(raw.company || '').trim();
       const product = String(raw.product || '').trim();
       const message = String(raw.message || '').trim();
@@ -950,7 +950,7 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
     // Sandbox simulation when no live CRM key is configured or requested explicitly
     if (!decryptedKey || dto.simulateIfNoKey) {
       const records = this.buildSandboxBatch(
-        tenant.city || 'Delhi-NCR',
+        tenant.city || '',
         dto.sampleCount ?? 2,
       );
       return this.ingestRecords({
@@ -1874,7 +1874,7 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
             name: name || `Meta Ad Lead ${leadgenId.slice(-6)}`,
             phone,
             email,
-            city: city || tenant.city || 'Delhi-NCR',
+            city: city || tenant.city || '',
             company,
             product: product || 'Meta Lead Ads Instant Form',
             message: `Captured via Meta Lead Ads (Form ${String(val.form_id || cfg?.formId || '-')}, Ad ${String(val.ad_id || '-')})`,
@@ -1900,7 +1900,7 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
           name: name || `Meta Lead ${phone || email}`,
           phone,
           email,
-          city: String(payload?.city || tenant.city || 'Delhi-NCR'),
+          city: String(payload?.city || tenant.city || ''),
           company: String(payload?.company_name ?? payload?.company ?? ''),
           product: String(
             payload?.ad_name ?? payload?.campaign_name ?? payload?.form_name ?? 'Meta Instant Lead Form',
@@ -1958,7 +1958,7 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
     }
 
     const category = String(input?.category ?? input?.leadtype ?? 'Justdial Inquiry').trim();
-    const city = String(input?.city ?? input?.area ?? tenant.city ?? 'Delhi-NCR').trim();
+    const city = String(input?.city ?? input?.area ?? tenant.city ?? '').trim();
     const pincode = String(input?.pincode ?? input?.pin ?? '').trim();
     const extId = String(input?.leadid ?? input?.id ?? `JD-${Date.now()}`).trim();
 
@@ -2017,7 +2017,7 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
         contactName: lead.name,
         company: lead.company || '',
         phone: lead.phone,
-        city: lead.city || 'Delhi-NCR',
+        city: lead.city || '',
         estimatedValue: Number(lead.estimatedValue || 0),
         channel: 'whatsapp',
         initialMessage: msg,
@@ -2072,7 +2072,7 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
       input?.product_name ?? input?.subject ?? 'TradeIndia B2B Inquiry',
     ).trim();
     const city = String(
-      input?.sender_city ?? input?.city ?? tenant.city ?? 'Delhi-NCR',
+      input?.sender_city ?? input?.city ?? tenant.city ?? '',
     ).trim();
     const extId = String(input?.rfi_id ?? input?.inquiry_id ?? `TI-${Date.now()}`).trim();
 

@@ -102,7 +102,7 @@ export class LeadFormsService {
     const token = authHeader.slice(7).trim();
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
     try {
       const payload = await this.jwtService.verifyAsync<{
         sub: string;
@@ -259,7 +259,7 @@ export class LeadFormsService {
         title: 'Industrial Stabilizer Quote',
         headline: 'Get 18% GST Factory Rate Card in 60 Seconds',
         subheadline:
-          'Direct OEM pricing on 3-Phase Servo Voltage Stabilizers & Transformers across Delhi-NCR & Pan-India.',
+          'Direct OEM pricing on 3-Phase Servo Voltage Stabilizers & Transformers across Pan-India.',
         brandColor: '#2563EB',
         status: 'live',
         requireWhatsappOtp: true,
@@ -292,7 +292,7 @@ export class LeadFormsService {
                 type: 'select',
                 required: true,
                 options: [
-                  'Delhi-NCR (Noida / Gurugram / Faridabad)',
+                  'North India Hub',
                   'Maharashtra (Pune / Mumbai)',
                   'Gujarat (Ahmedabad / Surat)',
                   'Pan-India Dispatch',
@@ -1138,7 +1138,7 @@ export class LeadFormsService {
     const name = pickAnswer('full_name', 'name', 'visitor') || (p10 ? `Lead +91 ${p10}` : 'Instant Form Lead');
     const email = pickAnswer('email').toLowerCase();
     const company = pickAnswer('company_name', 'company', 'firm');
-    const city = pickAnswer('delivery_city', 'city', 'location') || 'Delhi-NCR';
+    const city = pickAnswer('delivery_city', 'city', 'location') || '';
     const gstin = pickAnswer('gstin').toUpperCase();
 
     if (!p10 && !email) {

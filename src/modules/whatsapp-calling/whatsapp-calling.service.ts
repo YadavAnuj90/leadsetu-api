@@ -830,7 +830,7 @@ export class WhatsappCallingService implements OnModuleInit {
       contactName: params.lead.name,
       company: params.lead.company || '',
       phone: params.lead.phone,
-      city: params.lead.city || params.tenant.city || 'Delhi-NCR',
+      city: params.lead.city || params.tenant.city || '',
       channel: 'whatsapp',
       status: 'open',
       aiScore: params.lead.aiScore ?? 80,

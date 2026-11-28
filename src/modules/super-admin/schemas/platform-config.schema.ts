@@ -572,7 +572,7 @@ export class SaasPartner {
   @Prop({ trim: true, default: '' })
   phone!: string;
 
-  @Prop({ trim: true, default: 'Delhi-NCR' })
+  @Prop({ trim: true, default: '' })
   city!: string;
 
   @Prop({ type: Number, default: 15 })

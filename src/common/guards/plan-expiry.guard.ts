@@ -65,7 +65,7 @@ export class PlanExpiryGuard implements CanActivate {
 
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
 
     let payload: { tenantId?: string; role?: string } | null = null;
     try {

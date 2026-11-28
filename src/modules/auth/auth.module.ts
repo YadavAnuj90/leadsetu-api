@@ -20,7 +20,7 @@ import { Tenant, TenantSchema } from './schemas/tenant.schema';
       useFactory: (config: ConfigService) => ({
         secret:
           config.get<string>('JWT_SECRET') ||
-          'leadsetu_super_secret_access_key_2026_delhi_ncr',
+          'leadsetu_super_secret_access_key_2026',
         signOptions: {
           expiresIn: config.get<string>('JWT_EXPIRES_IN') || '1d',
         },

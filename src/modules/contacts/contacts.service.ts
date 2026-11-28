@@ -265,7 +265,7 @@ export class ContactsService {
     const token = authHeader.slice(7).trim();
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
     try {
       const payload = await this.jwtService.verifyAsync<{
         sub: string;
@@ -374,7 +374,7 @@ export class ContactsService {
       designation: doc.designation || '',
       phone: maskPhones ? maskPhoneNumber(doc.phone) : doc.phone || '',
       email: doc.email || '',
-      city: doc.city || 'Delhi-NCR',
+      city: doc.city || '',
       gstin: doc.gstin || '',
       gstinStatus:
         doc.gstinStatus && doc.gstinStatus !== 'unverified'

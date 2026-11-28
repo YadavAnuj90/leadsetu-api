@@ -221,7 +221,7 @@ export class UniversalWebhookProcessor {
         const routed = await this.leadRoutingService.resolveAssigneeForLead(
           tenantIdStr,
           {
-            city: mappedFields.city || 'Delhi-NCR',
+            city: mappedFields.city || '',
             source: 'website',
             estimatedValue: Number(
               mappedFields.estimatedValue || mappedFields.value || 0,
@@ -354,7 +354,7 @@ export class UniversalWebhookProcessor {
           contactName: recordContactName || normalizedPhone,
           company: mappedFields.company || companyName,
           phone: normalizedPhone,
-          city: mappedFields.city || 'Delhi-NCR',
+          city: mappedFields.city || '',
           messageBody: msg,
           ...(webhook.whatsappTemplateId
             ? {
@@ -435,7 +435,7 @@ export class UniversalWebhookProcessor {
           phone: normalizedPhone,
           normalizedPhone,
           email: (mappedFields.email || '').toLowerCase(),
-          city: mappedFields.city || 'Delhi-NCR',
+          city: mappedFields.city || '',
           source: 'website',
           status: 'new',
           estimatedValue: Number.isFinite(numericVal) ? numericVal : 0,
@@ -477,7 +477,7 @@ export class UniversalWebhookProcessor {
       const val = field === 'email' ? incoming.toLowerCase() : incoming;
       const curr = existing![field];
       const isDefaultPlaceholder =
-        (field === 'city' && curr === 'Delhi-NCR') ||
+        (field === 'city' && !curr) ||
         (field === 'name' && curr.startsWith('Lead +91'));
       if (
         strategy === 'overwrite_non_empty' ||
@@ -671,7 +671,7 @@ export class UniversalWebhookProcessor {
             mappedFields.email ||
             ''
           ).toLowerCase(),
-          city: mappedFields.city || 'Delhi-NCR',
+          city: mappedFields.city || '',
           value: Number.isFinite(numericVal) ? numericVal : 0,
           stage: 'qualified',
           notes: mappedFields.notes || '',

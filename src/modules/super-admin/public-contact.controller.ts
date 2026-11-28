@@ -3,7 +3,7 @@ import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { SuperAdminService } from './super-admin.service';
 
-@ApiTags('17. Public Contact & Demo Requests')
+@ApiTags('18. Public Contact & Demo Requests')
 @Controller('public/contact')
 export class PublicContactController {
   constructor(private readonly superAdminService: SuperAdminService) {}
@@ -18,12 +18,18 @@ export class PublicContactController {
       type: 'object',
       required: ['name', 'company', 'email', 'message'],
       properties: {
-        name: { type: 'string' },
-        company: { type: 'string' },
-        email: { type: 'string' },
-        phone: { type: 'string' },
-        topic: { type: 'string' },
-        message: { type: 'string' },
+        name: { type: 'string', example: 'Rajesh Sharma' },
+        company: { type: 'string', example: 'RS Electricals Pvt. Ltd.' },
+        email: { type: 'string', example: 'rajesh@rselectricals.in' },
+        phone: { type: 'string', example: '+91 9811002233' },
+        topic: {
+          type: 'string',
+          example: 'Enterprise Demo & Migration',
+        },
+        message: {
+          type: 'string',
+          example: 'Looking for a 25-seat WhatsApp Cloud + GST workflow demo.',
+        },
       },
     },
   })

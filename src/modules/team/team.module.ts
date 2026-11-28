@@ -257,7 +257,7 @@ export class TeamService {
     }
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
     let payload: { sub: string; tenantId: string };
     try {
       payload = await this.jwtService.verifyAsync(authHeader.slice(7).trim(), { secret });
@@ -554,7 +554,7 @@ export class TeamService {
         logoUrl: actor.tenant.logoUrl || '',
         plan: actor.tenant.plan,
         status: actor.tenant.status,
-        city: actor.tenant.city || 'Delhi-NCR',
+        city: actor.tenant.city || '',
         maskPhoneForAgents: Boolean(actor.tenant.maskPhoneForAgents),
         blockAgentExport: actor.tenant.blockAgentExport ?? true,
         ownerName: owner?.name || '',
@@ -1711,7 +1711,7 @@ export class TeamController {
       useFactory: (config: ConfigService) => ({
         secret:
           config.get<string>('JWT_SECRET') ||
-          'leadsetu_super_secret_access_key_2026_delhi_ncr',
+          'leadsetu_super_secret_access_key_2026',
       }),
     }),
   ],

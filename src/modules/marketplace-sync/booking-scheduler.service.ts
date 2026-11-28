@@ -266,7 +266,7 @@ export class BookingSchedulerService {
         const routed = await this.leadRoutingService.resolveAssigneeForLead(
           tenantIdStr,
           {
-            city: tenant.city || 'Delhi-NCR',
+            city: tenant.city || '',
             source: 'website',
             estimatedValue: 0,
             leadName: guestName,

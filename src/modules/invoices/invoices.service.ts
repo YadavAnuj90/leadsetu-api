@@ -349,7 +349,7 @@ export class InvoicesService {
     const token = authHeader.slice(7).trim();
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
     let payload: { sub: string; tenantId: string; email: string };
     try {
       payload = await this.jwtService.verifyAsync<{
@@ -3781,7 +3781,7 @@ export class InvoicesService {
       764,
       9,
       `Document No: ${doc.invoiceNumber}   |   Place of Supply: ${
-        doc.placeOfSupply || 'Delhi-NCR'
+        doc.placeOfSupply || 'India'
       }   |   Due / Valid Till: ${doc.dueDate || '15 Days'}`,
       false,
       0.82,
@@ -4131,7 +4131,7 @@ export class InvoicesService {
       contactName: doc.contactPerson || doc.clientName,
       company: doc.clientName,
       phone: formattedPhone,
-      city: doc.placeOfSupply || 'Delhi-NCR',
+      city: doc.placeOfSupply || 'India',
       estimatedValue: doc.grandTotal || 0,
       messageBody: defaultMessage,
       attachment: {

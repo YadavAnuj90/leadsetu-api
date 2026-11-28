@@ -976,6 +976,37 @@ export class SuperAdminController {
 
   @Post('careers/jobs')
   @ApiOperation({ summary: 'Publish a new career job posting from Super Admin HQ' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['title', 'summary'],
+      properties: {
+        title: { type: 'string', example: 'Staff Backend Engineer (NestJS)' },
+        team: {
+          type: 'string',
+          enum: [
+            'Engineering & AI',
+            'Product & Design',
+            'Growth & Success',
+            'Operations & Trust',
+          ],
+        },
+        location: { type: 'string', example: 'Hybrid · India' },
+        experience: { type: 'string', example: '3–6 Years' },
+        employmentType: {
+          type: 'string',
+          enum: ['Full-Time', 'Contract', 'Internship'],
+        },
+        compensation: { type: 'string', example: '₹20L – ₹32L + ESOPs' },
+        summary: { type: 'string', example: 'Lead high-throughput billing and messaging services.' },
+        responsibilities: { type: 'array', items: { type: 'string' } },
+        skills: { type: 'array', items: { type: 'string' } },
+        status: { type: 'string', enum: ['open', 'paused', 'closed'] },
+        featured: { type: 'boolean', example: true },
+        sortOrder: { type: 'number', example: 0 },
+      },
+    },
+  })
   async createCareerJob(
     @Headers('authorization') authorization: string | undefined,
     @Body()
@@ -1005,6 +1036,37 @@ export class SuperAdminController {
 
   @Patch('careers/jobs/:jobId')
   @ApiOperation({ summary: 'Edit or toggle status of a career job posting' })
+  @ApiParam({ name: 'jobId', description: 'CareerJob MongoDB ObjectId' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string' },
+        team: {
+          type: 'string',
+          enum: [
+            'Engineering & AI',
+            'Product & Design',
+            'Growth & Success',
+            'Operations & Trust',
+          ],
+        },
+        location: { type: 'string' },
+        experience: { type: 'string' },
+        employmentType: {
+          type: 'string',
+          enum: ['Full-Time', 'Contract', 'Internship'],
+        },
+        compensation: { type: 'string' },
+        summary: { type: 'string' },
+        responsibilities: { type: 'array', items: { type: 'string' } },
+        skills: { type: 'array', items: { type: 'string' } },
+        status: { type: 'string', enum: ['open', 'paused', 'closed'] },
+        featured: { type: 'boolean' },
+        sortOrder: { type: 'number' },
+      },
+    },
+  })
   async updateCareerJob(
     @Headers('authorization') authorization: string | undefined,
     @Param('jobId') jobId: string,
@@ -1040,6 +1102,7 @@ export class SuperAdminController {
 
   @Delete('careers/jobs/:jobId')
   @ApiOperation({ summary: 'Delete a career job posting permanently' })
+  @ApiParam({ name: 'jobId', description: 'CareerJob MongoDB ObjectId' })
   async deleteCareerJob(
     @Headers('authorization') authorization: string | undefined,
     @Param('jobId') jobId: string,
@@ -1051,6 +1114,19 @@ export class SuperAdminController {
 
   @Patch('careers/applications/:applicationId')
   @ApiOperation({ summary: 'Update hiring stage or reviewer notes for an applicant' })
+  @ApiParam({ name: 'applicationId', description: 'CareerApplication MongoDB ObjectId' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        stage: {
+          type: 'string',
+          enum: ['new', 'shortlisted', 'interview', 'offer', 'rejected'],
+        },
+        reviewerNotes: { type: 'string', example: 'Strong system design round.' },
+      },
+    },
+  })
   async updateCareerApplication(
     @Headers('authorization') authorization: string | undefined,
     @Param('applicationId') applicationId: string,
@@ -1072,6 +1148,7 @@ export class SuperAdminController {
 
   @Get('careers/applications/:applicationId/resume')
   @ApiOperation({ summary: 'Download candidate PDF resume' })
+  @ApiParam({ name: 'applicationId', description: 'CareerApplication MongoDB ObjectId' })
   async downloadCareerApplicationResume(
     @Headers('authorization') authorization: string | undefined,
     @Param('applicationId') applicationId: string,
@@ -1092,7 +1169,11 @@ export class SuperAdminController {
   @ApiOperation({
     summary: 'List all public demo/sales inquiries submitted on /company/contact',
   })
-  @ApiQuery({ name: 'status', required: false })
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    enum: ['all', 'new', 'contacted', 'demo_scheduled', 'converted', 'archived'],
+  })
   async listContactInquiries(
     @Headers('authorization') authorization: string | undefined,
     @Query('status') status?: string,
@@ -1104,6 +1185,19 @@ export class SuperAdminController {
   @Patch('contact-inquiries/:inquiryId')
   @ApiOperation({
     summary: 'Update workflow status or owner notes for a public inquiry',
+  })
+  @ApiParam({ name: 'inquiryId', description: 'PublicContactInquiry MongoDB ObjectId' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        status: {
+          type: 'string',
+          enum: ['new', 'contacted', 'demo_scheduled', 'converted', 'archived'],
+        },
+        ownerNotes: { type: 'string', example: 'Demo scheduled for Friday 4 PM IST.' },
+      },
+    },
   })
   async updateContactInquiry(
     @Headers('authorization') authorization: string | undefined,
@@ -1126,6 +1220,7 @@ export class SuperAdminController {
 
   @Delete('contact-inquiries/:inquiryId')
   @ApiOperation({ summary: 'Delete a public contact inquiry record' })
+  @ApiParam({ name: 'inquiryId', description: 'PublicContactInquiry MongoDB ObjectId' })
   async deleteContactInquiry(
     @Headers('authorization') authorization: string | undefined,
     @Param('inquiryId') inquiryId: string,

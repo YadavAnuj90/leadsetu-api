@@ -23,7 +23,7 @@ export class TerritoryRoutingRuleDto implements TerritoryRoutingRule {
   @ApiProperty({ example: 'rule_delhi_indiamart' })
   id!: string;
 
-  @ApiProperty({ example: 'Delhi-NCR IndiaMART Priority' })
+  @ApiProperty({ example: 'High-Value IndiaMART Priority' })
   name!: string;
 
   @ApiProperty({ example: true })

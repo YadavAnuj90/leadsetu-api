@@ -31,7 +31,7 @@ export class AnalyticsService {
     const token = authHeader.slice(7).trim();
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
     try {
       const payload = await this.jwtService.verifyAsync<{
         sub: string;
@@ -293,7 +293,7 @@ export class AnalyticsService {
       };
     });
 
-    // 6. Delhi-NCR & Regional City Breakdown
+    // 6. Regional City Breakdown
     const cityBuckets = [
       {
         label: 'Noida Electronic City & Greater Noida (UP)',
@@ -569,7 +569,7 @@ export class AnalyticsService {
           userId: uid,
           name: String(u.name || 'Team Member'),
           role: String(u.role || 'agent'),
-          territory: String(u.territory || 'Delhi-NCR'),
+          territory: String(u.territory || 'Pan-India'),
           leadsCount: repLeads.length,
           hotLeadsCount: repLeads.filter(
             (l) => l.aiLabel === 'Hot' || Number(l.aiScore) >= 80,
@@ -1096,7 +1096,7 @@ export class AnalyticsService {
         category: 'inbox' as const,
         severity: 'info' as const,
         title: `WhatsApp Thread Open: ${String(c.contactName || 'Buyer')}`,
-        subtitle: `${String(c.company || c.city || 'Delhi-NCR')} · Needs reply`,
+        subtitle: `${String(c.company || c.city || 'India')} · Needs reply`,
         href: '/inbox',
         createdAt: c.updatedAt
           ? new Date(c.updatedAt as Date).toISOString()

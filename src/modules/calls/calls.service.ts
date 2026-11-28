@@ -132,7 +132,7 @@ export class CallsService {
 
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
 
     let payload: {
       sub: string;
@@ -1756,7 +1756,7 @@ export class CallsService {
         accountKind: l.accountKind === 'consumer' ? 'consumer' : 'business',
         phone: l.phone || '',
         email: l.email || '',
-        city: l.city || 'Delhi-NCR',
+        city: l.city || '',
         source: l.source || 'manual',
         status: l.status || 'new',
         estimatedValue: Number(l.estimatedValue) || 0,
@@ -2065,7 +2065,7 @@ export class CallsService {
   private getJwtSecret(): string {
     return (
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr'
+      'leadsetu_super_secret_access_key_2026'
     );
   }
 

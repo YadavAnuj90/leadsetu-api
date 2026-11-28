@@ -243,7 +243,7 @@ export class MetaLeadsProcessor implements OnModuleDestroy {
       mapped.phone || mapped.rawFields.phone_number || mapped.rawFields.phone || '',
     );
     const tenant = await this.tenantModel.findById(tenantOid).lean().exec();
-    const city = mapped.city || tenant?.city || 'Delhi-NCR';
+    const city = mapped.city || tenant?.city || '';
     const leadName =
       mapped.name ||
       mapped.rawFields.full_name ||

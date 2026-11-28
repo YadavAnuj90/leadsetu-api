@@ -179,7 +179,7 @@ export class WorkflowsService implements OnModuleInit, OnModuleDestroy {
     const token = authHeader.slice(7).trim();
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
     let payload: { sub: string; tenantId: string; email: string };
     try {
       payload = await this.jwtService.verifyAsync<{
@@ -966,7 +966,7 @@ export class WorkflowsService implements OnModuleInit, OnModuleDestroy {
         contactName: lead.name,
         company: lead.company || '',
         phone: lead.phone,
-        city: lead.city || 'Delhi-NCR',
+        city: lead.city || '',
         estimatedValue: lead.estimatedValue || 0,
         messageBody,
         workflowId: wf._id.toString(),
@@ -1472,7 +1472,7 @@ export class WorkflowsService implements OnModuleInit, OnModuleDestroy {
           contactName: lead.name,
           company: lead.company || '',
           phone: lead.phone,
-          city: lead.city || 'Delhi-NCR',
+          city: lead.city || '',
           estimatedValue: lead.estimatedValue || 0,
           messageBody,
           workflowId: wf._id.toString(),
@@ -1614,7 +1614,7 @@ export class WorkflowsService implements OnModuleInit, OnModuleDestroy {
           contactName: lead.name,
           company: lead.company || '',
           phone: lead.phone,
-          city: lead.city || 'Delhi-NCR',
+          city: lead.city || '',
           estimatedValue: lead.estimatedValue || 0,
           messageBody,
           workflowId: wf._id.toString(),
@@ -1754,7 +1754,7 @@ export class WorkflowsService implements OnModuleInit, OnModuleDestroy {
         contactName: latestLead.name,
         company: latestLead.company || '',
         phone: latestLead.phone,
-        city: latestLead.city || 'Delhi-NCR',
+        city: latestLead.city || '',
         estimatedValue: latestLead.estimatedValue || 0,
         messageBody,
         workflowId: doc._id.toString(),
@@ -1849,7 +1849,7 @@ export class WorkflowsService implements OnModuleInit, OnModuleDestroy {
         : 24;
 
     const cityMatch = goal.match(
-      /\b(Noida|Delhi-NCR|Delhi|Gurugram|Gurgaon|Pune|Mumbai|Ahmedabad|Bengaluru|Bangalore|Chennai|Hyderabad|Surat|Jaipur)\b/i,
+      /\b(Noida|Delhi|Gurugram|Gurgaon|Pune|Mumbai|Ahmedabad|Bengaluru|Bangalore|Chennai|Hyderabad|Surat|Jaipur)\b/i,
     );
     const cityLabel = cityMatch ? cityMatch[1] : '';
 

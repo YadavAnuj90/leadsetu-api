@@ -61,6 +61,11 @@ interface OperationLike {
 
 const PARAM_DESCRIPTION_HINTS: Record<string, string> = {
   id: 'Unique resource identifier (MongoDB ObjectId)',
+  jobId: 'Career job posting ObjectId',
+  applicationId: 'Career applicant submission ObjectId',
+  inquiryId: 'Public sales/demo inquiry ObjectId',
+  slug: 'URL-friendly unique public resource slug',
+  code: 'Unique coupon, invite, or referral code',
   tenantId: 'Workspace / company tenant identifier',
   userId: 'Team member user identifier',
   operatorId: 'Leadsetu HQ Super Admin operator identifier',

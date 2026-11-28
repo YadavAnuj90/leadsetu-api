@@ -66,7 +66,7 @@ export class RegisterSwaggerDto implements RegisterInput {
   @ApiPropertyOptional({
     description: 'Primary business city / hub',
     example: 'Noida Electronic City',
-    default: 'Delhi-NCR',
+    default: '',
   })
   city?: string;
 

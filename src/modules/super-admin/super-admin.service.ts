@@ -346,7 +346,7 @@ export class SuperAdminService implements OnModuleInit {
     const token = authHeader.slice(7).trim();
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
 
     let payload: { sub: string; email?: string; role?: string };
     try {
@@ -782,7 +782,7 @@ export class SuperAdminService implements OnModuleInit {
         monthlyRecurringInr += spec?.monthlyPrice || 0;
       }
 
-      const city = (t.city || 'Delhi-NCR').trim();
+      const city = (t.city || 'Unassigned').trim();
       cityCounts.set(city, (cityCounts.get(city) || 0) + 1);
 
       for (const inv of t.subscriptionInvoices || []) {
@@ -892,7 +892,7 @@ export class SuperAdminService implements OnModuleInit {
           name: t.name,
           plan: t.plan,
           status: t.status,
-          city: t.city || 'Delhi-NCR',
+          city: t.city || '',
           seatsUsed: seats.total,
           seatLimit: this.resolveSeatLimit(t, config),
           createdAt: raw.createdAt ? new Date(raw.createdAt).toISOString() : null,
@@ -1005,7 +1005,7 @@ export class SuperAdminService implements OnModuleInit {
           slug: t.slug,
           plan: t.plan,
           status: t.status,
-          city: t.city || 'Delhi-NCR',
+          city: t.city || '',
           gstin: t.gstin || '',
           email: t.email || '',
           phone: t.phone || '',
@@ -1071,7 +1071,7 @@ export class SuperAdminService implements OnModuleInit {
         slug: tenant.slug,
         plan: tenant.plan,
         status: tenant.status,
-        city: tenant.city || 'Delhi-NCR',
+        city: tenant.city || '',
         gstin: tenant.gstin || '',
         state: tenant.state || 'Delhi (07)',
         email: tenant.email || '',
@@ -1461,7 +1461,7 @@ export class SuperAdminService implements OnModuleInit {
     );
     const accessSecret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
 
     const accessToken = await this.jwtService.signAsync(
       {
@@ -1524,7 +1524,7 @@ export class SuperAdminService implements OnModuleInit {
         slug: tenant.slug,
         plan: tenant.plan,
         status: tenant.status,
-        city: tenant.city || 'Delhi-NCR',
+        city: tenant.city || '',
         gstin: tenant.gstin || '',
         state: tenant.state || 'Delhi (07)',
         phone: tenant.phone || '',
@@ -1845,7 +1845,7 @@ export class SuperAdminService implements OnModuleInit {
         name: p.name,
         email: p.email,
         phone: p.phone || '',
-        city: p.city || 'Delhi-NCR',
+        city: p.city || '',
         commissionRatePct: p.commissionRatePct || 15,
         totalAttributedRevenueInr: p.totalAttributedRevenueInr || 0,
         totalCommissionEarnedInr: p.totalCommissionEarnedInr || 0,
@@ -2207,7 +2207,7 @@ export class SuperAdminService implements OnModuleInit {
       name: dto.name.trim(),
       email: dto.email.trim().toLowerCase(),
       phone: dto.phone?.trim() || '',
-      city: dto.city?.trim() || 'Delhi-NCR',
+      city: dto.city?.trim() || '',
       commissionRatePct: rate,
       isActive: true,
     });
@@ -4054,7 +4054,7 @@ export class SuperAdminService implements OnModuleInit {
       status === 'trial'
         ? new Date(Date.now() + trialDays * 86_400_000).toISOString()
         : '';
-    const city = String(dto.city || '').trim() || 'Delhi-NCR';
+    const city = String(dto.city || '').trim() || '';
     const gstin = String(dto.gstin || '').trim().toUpperCase();
     const slugBase = companyName
       .toLowerCase()
@@ -4098,201 +4098,57 @@ export class SuperAdminService implements OnModuleInit {
     });
 
     const seededCounts = { pipelines: 0, leads: 0, deals: 0, invoices: 0 };
-    if (dto.seedDemoData !== false) {
-      const stagePresets: Record<
-        string,
-        Array<{
-          id: string;
-          name: string;
-          probability: number;
-          color: string;
-          category: 'open' | 'won' | 'lost';
-        }>
-      > = {
-        b2c: [
-          { id: 'new_inquiry', name: 'New Inquiry', probability: 20, color: '#3978EA', category: 'open' },
-          { id: 'order_confirmed', name: 'Order Confirmed', probability: 55, color: '#8B5CF6', category: 'open' },
-          { id: 'dispatched', name: 'Packed & Dispatched', probability: 80, color: '#F59E0B', category: 'open' },
-          { id: 'won', name: 'Delivered / COD Settled', probability: 100, color: '#10B981', category: 'won' },
-          { id: 'lost', name: 'Cancelled / RTO', probability: 0, color: '#EF4444', category: 'lost' },
-        ],
-        education: [
-          { id: 'inquiry', name: 'Inquiry', probability: 20, color: '#3978EA', category: 'open' },
-          { id: 'counseling_done', name: 'Counseling Done', probability: 45, color: '#8B5CF6', category: 'open' },
-          { id: 'demo_attended', name: 'Demo Attended', probability: 75, color: '#F59E0B', category: 'open' },
-          { id: 'won', name: 'Fee Settled / Enrolled', probability: 100, color: '#10B981', category: 'won' },
-          { id: 'lost', name: 'Dropped', probability: 0, color: '#EF4444', category: 'lost' },
-        ],
-        bpo: [
-          { id: 'fresh_queue', name: 'Fresh Queue', probability: 20, color: '#3978EA', category: 'open' },
-          { id: 'contacted', name: 'Contacted', probability: 45, color: '#8B5CF6', category: 'open' },
-          { id: 'callback', name: 'Callback Scheduled', probability: 70, color: '#F59E0B', category: 'open' },
-          { id: 'won', name: 'Closed Converted', probability: 100, color: '#10B981', category: 'won' },
-          { id: 'lost', name: 'Not Interested / DND', probability: 0, color: '#EF4444', category: 'lost' },
-        ],
-        b2b: [
-          { id: 'qualified', name: 'Qualified Inquiry', probability: 25, color: '#3978EA', category: 'open' },
-          { id: 'discovery', name: 'Discovery & Sample', probability: 45, color: '#8B5CF6', category: 'open' },
-          { id: 'proposal', name: 'GST Proposal Sent', probability: 65, color: '#F59E0B', category: 'open' },
-          { id: 'negotiation', name: 'Negotiation', probability: 85, color: '#06B6D4', category: 'open' },
-          { id: 'won', name: 'Closed Won', probability: 100, color: '#10B981', category: 'won' },
-          { id: 'lost', name: 'Closed Lost', probability: 0, color: '#EF4444', category: 'lost' },
-        ],
-      };
+    const stagePresets: Record<
+      string,
+      Array<{
+        id: string;
+        name: string;
+        probability: number;
+        color: string;
+        category: 'open' | 'won' | 'lost';
+      }>
+    > = {
+      b2c: [
+        { id: 'new_inquiry', name: 'New Inquiry', probability: 20, color: '#3978EA', category: 'open' },
+        { id: 'order_confirmed', name: 'Order Confirmed', probability: 55, color: '#8B5CF6', category: 'open' },
+        { id: 'dispatched', name: 'Packed & Dispatched', probability: 80, color: '#F59E0B', category: 'open' },
+        { id: 'won', name: 'Delivered / COD Settled', probability: 100, color: '#10B981', category: 'won' },
+        { id: 'lost', name: 'Cancelled / RTO', probability: 0, color: '#EF4444', category: 'lost' },
+      ],
+      education: [
+        { id: 'inquiry', name: 'Inquiry', probability: 20, color: '#3978EA', category: 'open' },
+        { id: 'counseling_done', name: 'Counseling Done', probability: 45, color: '#8B5CF6', category: 'open' },
+        { id: 'demo_attended', name: 'Demo Attended', probability: 75, color: '#F59E0B', category: 'open' },
+        { id: 'won', name: 'Fee Settled / Enrolled', probability: 100, color: '#10B981', category: 'won' },
+        { id: 'lost', name: 'Dropped', probability: 0, color: '#EF4444', category: 'lost' },
+      ],
+      bpo: [
+        { id: 'fresh_queue', name: 'Fresh Queue', probability: 20, color: '#3978EA', category: 'open' },
+        { id: 'contacted', name: 'Contacted', probability: 45, color: '#8B5CF6', category: 'open' },
+        { id: 'callback', name: 'Callback Scheduled', probability: 70, color: '#F59E0B', category: 'open' },
+        { id: 'won', name: 'Closed Converted', probability: 100, color: '#10B981', category: 'won' },
+        { id: 'lost', name: 'Not Interested / DND', probability: 0, color: '#EF4444', category: 'lost' },
+      ],
+      b2b: [
+        { id: 'qualified', name: 'Qualified Inquiry', probability: 25, color: '#3978EA', category: 'open' },
+        { id: 'discovery', name: 'Discovery & Sample', probability: 45, color: '#8B5CF6', category: 'open' },
+        { id: 'proposal', name: 'GST Proposal Sent', probability: 65, color: '#F59E0B', category: 'open' },
+        { id: 'negotiation', name: 'Negotiation', probability: 85, color: '#06B6D4', category: 'open' },
+        { id: 'won', name: 'Closed Won', probability: 100, color: '#10B981', category: 'won' },
+        { id: 'lost', name: 'Closed Lost', probability: 0, color: '#EF4444', category: 'lost' },
+      ],
+    };
 
-      const chosenStages = stagePresets[businessMode] || stagePresets.b2b;
-      const pipelineDoc = await this.connection.collection('pipelines').insertOne({
-        tenantId: tenant._id,
-        name: `${businessMode.toUpperCase()} Primary Pipeline`,
-        isDefault: true,
-        stages: chosenStages,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-      seededCounts.pipelines = 1;
-
-      const kind = normalizeAccountKind(undefined, businessMode);
-      const now = new Date();
-      await this.connection.collection('leads').insertMany([
-        {
-          tenantId: tenant._id,
-          ownerId: owner._id,
-          name: kind === 'consumer' ? 'Aarav Mehta' : 'Ramesh Verma',
-          accountKind: kind,
-          company: kind === 'consumer' ? '' : 'Verma Industrial Controls',
-          phone: '+91 98111 40201',
-          email: 'buyer1@example.in',
-          city,
-          source: 'indiamart',
-          status: 'qualified',
-          estimatedValue: 185000,
-          aiScore: 89,
-          aiLabel: 'Hot',
-          aiInsight: 'Starter sample high-intent inquiry ready for WhatsApp quotation.',
-          tags: ['HQ Seeded'],
-          activities: [],
-          createdAt: now,
-          updatedAt: now,
-        },
-        {
-          tenantId: tenant._id,
-          ownerId: owner._id,
-          name: kind === 'consumer' ? 'Neha Kapoor' : 'Sunita Nair',
-          accountKind: kind,
-          company: kind === 'consumer' ? '' : 'Nair Precision Works',
-          phone: '+91 98111 40202',
-          email: 'buyer2@example.in',
-          city,
-          source: 'whatsapp',
-          status: 'new',
-          estimatedValue: 92000,
-          aiScore: 76,
-          aiLabel: 'Warm',
-          aiInsight: 'Fresh inbound WhatsApp lead queued for <10s response.',
-          tags: ['HQ Seeded'],
-          activities: [],
-          createdAt: now,
-          updatedAt: now,
-        },
-      ]);
-      seededCounts.leads = 2;
-
-      const firstOpenStage = chosenStages[0];
-      const wonStage = chosenStages.find((s) => s.category === 'won') || chosenStages[0];
-      await this.connection.collection('deals').insertMany([
-        {
-          tenantId: tenant._id,
-          ownerId: owner._id,
-          pipelineId: pipelineDoc.insertedId,
-          title:
-            kind === 'consumer'
-              ? `Priority Package - ${city}`
-              : `Annual Supply Deal - ${city}`,
-          company: kind === 'consumer' ? '' : 'Verma Industrial Controls',
-          contactName: kind === 'consumer' ? 'Aarav Mehta' : 'Ramesh Verma',
-          contactPhone: '+91 98111 40201',
-          contactEmail: 'buyer1@example.in',
-          city,
-          value: 185000,
-          stage: firstOpenStage.id,
-          stageCategory: firstOpenStage.category,
-          probability: firstOpenStage.probability,
-          source: 'indiamart',
-          gstApplicable: true,
-          aiScore: 86,
-          aiLabel: 'Hot',
-          tags: ['Sample'],
-          activities: [],
-          createdAt: now,
-          updatedAt: now,
-        },
-        {
-          tenantId: tenant._id,
-          ownerId: owner._id,
-          pipelineId: pipelineDoc.insertedId,
-          title: `Onboarding Reference Order`,
-          company: kind === 'consumer' ? '' : 'Apex Partner Corp',
-          contactName: 'Starter Customer',
-          contactPhone: '+91 98111 40203',
-          contactEmail: 'accounts@example.in',
-          city,
-          value: 118000,
-          stage: wonStage.id,
-          stageCategory: 'won',
-          probability: 100,
-          source: 'referral',
-          gstApplicable: true,
-          aiScore: 95,
-          aiLabel: 'Hot',
-          tags: ['Sample'],
-          activities: [],
-          createdAt: now,
-          updatedAt: now,
-        },
-      ]);
-      seededCounts.deals = 2;
-
-      await this.connection.collection('invoices').insertOne({
-        tenantId: tenant._id,
-        ownerId: owner._id,
-        invoiceNumber: `INV-${new Date().getFullYear()}-0001`,
-        docType: 'tax_invoice',
-        clientName: kind === 'consumer' ? 'Aarav Mehta' : 'Verma Industrial Controls',
-        phone: '+91 98111 40201',
-        email: 'buyer1@example.in',
-        gstin: kind === 'consumer' ? '' : '07AABCR1234F1Z5',
-        placeOfSupply: '09 - Uttar Pradesh',
-        taxType: 'cgst_sgst',
-        gstRate: 18,
-        items: [
-          {
-            description: 'Starter Solution Package (Sample)',
-            hsnSac: '998314',
-            quantity: 1,
-            unitPrice: 100000,
-            amount: 100000,
-          },
-        ],
-        subTotal: 100000,
-        discount: 0,
-        taxableAmount: 100000,
-        cgstAmount: 9000,
-        sgstAmount: 9000,
-        igstAmount: 0,
-        gstAmount: 18000,
-        grandTotal: 118000,
-        amountPaid: 0,
-        tdsDeducted: 0,
-        balanceDue: 118000,
-        payments: [],
-        status: 'sent',
-        paymentMethod: 'unpaid',
-        dueDate: new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10),
-        createdAt: now,
-        updatedAt: now,
-      });
-      seededCounts.invoices = 1;
-    }
+    const chosenStages = stagePresets[businessMode] || stagePresets.b2b;
+    await this.connection.collection('pipelines').insertOne({
+      tenantId: tenant._id,
+      name: `${businessMode.toUpperCase()} Primary Pipeline`,
+      isDefault: true,
+      stages: chosenStages,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    seededCounts.pipelines = 1;
 
     await this.recordAudit(actor, {
       action: 'superadmin.workspace_provisioned',
@@ -4475,7 +4331,7 @@ export class SuperAdminService implements OnModuleInit {
         businessMode: t.businessMode || 'b2b',
         plan: t.plan || 'growth',
         status: t.status || 'trial',
-        city: t.city || 'Delhi-NCR',
+        city: t.city || '',
         trialEndsAt: t.trialEndsAt || '',
         daysRemaining,
         isExpired,
@@ -4821,7 +4677,7 @@ export class SuperAdminService implements OnModuleInit {
         accountId: t.accountId || '',
         companyName: t.companyName || t.name,
         plan: t.plan || 'growth',
-        city: t.city || 'Delhi-NCR',
+        city: t.city || '',
         overallHealth,
         whatsappCloud: {
           status: waStatus,

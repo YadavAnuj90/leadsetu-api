@@ -92,7 +92,7 @@ export class RetargetCampaignDto {
 export class CreateCampaignDto {
   @ApiProperty({
     description: 'Campaign title for internal tracking',
-    example: 'Noida & Delhi-NCR Q4 Industrial Catalogue Blast',
+    example: 'Q4 Industrial Catalogue Blast',
   })
   name!: string;
 

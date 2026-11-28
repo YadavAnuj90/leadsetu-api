@@ -92,7 +92,7 @@ export class TimelineService {
     const token = authHeader.slice(7).trim();
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
     try {
       const payload = await this.jwtService.verifyAsync<{
         sub: string;
@@ -165,7 +165,7 @@ export class TimelineService {
     )
       .trim()
       .toLowerCase();
-    const customerCity = String(rootDoc.city || 'Delhi-NCR').trim();
+    const customerCity = String(rootDoc.city || '').trim();
 
     // Build cross-collection matcher by phone, email, or explicit ID links
     const buildOrConditions = (

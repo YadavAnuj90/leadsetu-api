@@ -172,10 +172,10 @@ export class AuthService {
 
     const accessSecret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
     const refreshSecret =
       this.configService.get<string>('JWT_REFRESH_SECRET') ||
-      'leadsetu_super_secret_refresh_key_2026_delhi_ncr';
+      'leadsetu_super_secret_refresh_key_2026';
 
     const ttlHours = Math.max(
       1,
@@ -258,7 +258,7 @@ export class AuthService {
         slug: tenant.slug,
         plan: tenant.plan,
         status: tenant.status,
-        city: tenant.city || 'Delhi-NCR',
+        city: tenant.city || '',
         gstin: tenant.gstin || '',
         state: tenant.state || 'Delhi (07)',
         phone: tenant.phone || '',
@@ -346,7 +346,7 @@ export class AuthService {
       plan: 'growth',
       status: 'trial',
       trialEndsAt,
-      city: input.city?.trim() || 'Delhi-NCR',
+      city: input.city?.trim() || '',
       businessMode,
       hiddenNavModules: DEFAULT_HIDDEN_MODULES_BY_MODE[businessMode] || [],
     });
@@ -444,7 +444,7 @@ export class AuthService {
     const token = authHeader.slice(7).trim();
     const accessSecret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
 
     let payload: {
       sub: string;
@@ -559,7 +559,7 @@ export class AuthService {
             slug: tenant.slug,
             plan: tenant.plan,
             status: tenant.status,
-            city: tenant.city || 'Delhi-NCR',
+            city: tenant.city || '',
             gstin: tenant.gstin || '',
             state: tenant.state || 'Delhi (07)',
             phone: tenant.phone || '',
@@ -592,7 +592,7 @@ export class AuthService {
 
     const refreshSecret =
       this.configService.get<string>('JWT_REFRESH_SECRET') ||
-      'leadsetu_super_secret_refresh_key_2026_delhi_ncr';
+      'leadsetu_super_secret_refresh_key_2026';
 
     let payload: { sub: string; typ?: string };
     try {
@@ -646,7 +646,7 @@ export class AuthService {
       const token = authHeader.slice(7).trim();
       const accessSecret =
         this.configService.get<string>('JWT_SECRET') ||
-        'leadsetu_super_secret_access_key_2026_delhi_ncr';
+        'leadsetu_super_secret_access_key_2026';
       const payload = await this.jwtService.verifyAsync<{ sub: string }>(token, {
         secret: accessSecret,
       });
@@ -1077,7 +1077,7 @@ export class AuthService {
   private async issueTwoFactorChallenge(user: UserDocument) {
     const accessSecret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
     const challengeToken = await this.jwtService.signAsync(
       {
         sub: user._id.toString(),
@@ -1204,7 +1204,7 @@ export class AuthService {
       name: companyName,
       companyName,
       slug: this.generateSlug(companyName),
-      city: 'Delhi-NCR',
+      city: '',
       plan: 'growth',
       status: 'trial',
     });
@@ -1257,7 +1257,7 @@ export class AuthService {
 
     const accessSecret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
 
     let payload: { sub: string; type?: string };
     try {

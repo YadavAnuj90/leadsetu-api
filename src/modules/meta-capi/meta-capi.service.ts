@@ -121,7 +121,7 @@ export class MetaCapiService {
     const token = authHeader.slice(7).trim();
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
 
     try {
       const payload = await this.jwtService.verifyAsync<{
@@ -872,7 +872,7 @@ export class MetaCapiService {
         company: '',
         phone: normalizedPhone,
         email: '',
-        city: tenant.city || 'Delhi-NCR',
+        city: tenant.city || '',
         source: 'meta_ads',
         status: 'new',
         estimatedValue,
@@ -930,7 +930,7 @@ export class MetaCapiService {
         contactName,
         company: lead.company || '',
         phone: normalizedPhone,
-        city: lead.city || tenant.city || 'Delhi-NCR',
+        city: lead.city || tenant.city || '',
         channel: 'whatsapp',
         status: 'open',
         aiScore: lead.aiScore || 84,

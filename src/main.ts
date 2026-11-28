@@ -62,12 +62,12 @@ async function bootstrap() {
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Leadsetu AI CRM — Backend API')
     .setDescription(
-      'Official OpenAPI 3.0 specification for Leadsetu CRM (Noida / Delhi-NCR). Includes Multi-Tenant Auth, SetuAI Lead Scoring, Visual Kanban Deals Pipeline, B2B Contacts & GST Directory, Sales Follow-up Tasks, and Unified WhatsApp Inbox.'
+      'Official OpenAPI 3.0 specification for Leadsetu CRM. Includes Multi-Tenant Auth, SetuAI Lead Scoring, Visual Kanban Deals Pipeline, B2B Contacts & GST Directory, Omnichannel WhatsApp Cloud & Email CRM, WebRTC Calling, Razorpay 18% GST Collections, Public Portals, and Super Admin HQ.'
     )
     .setVersion('2.0.0')
     .setContact(
       'Leadsetu Engineering',
-      'http://localhost:3000',
+      process.env.FRONTEND_URL || 'http://localhost:3000',
       'hello@leadsetu.in'
     )
     .addBearerAuth(
@@ -82,8 +82,9 @@ async function bootstrap() {
       },
       'access-token'
     )
+    .addTag('0. System Health & Readiness', 'Liveness & MongoDB/Redis readiness probes')
     .addTag('1. Auth & Workspace', 'Multi-tenant registration, login, JWT refresh & profile')
-    .addTag('2. Leads & SetuAI Scoring', 'Lead capture, 1–100 AI scoring, filtering & activity timeline')
+    .addTag('2. Leads & SetuAI Scoring', 'Lead capture, routing, 1–100 AI scoring, filtering & activity timeline')
     .addTag('3. Deals & Kanban Pipeline', 'Visual sales stages, win probability, 18% GST & weighted forecast')
     .addTag('4. Contacts & GST Directory', 'B2B accounts, 15-digit GSTIN records & Lifetime Value (LTV)')
     .addTag('5. Tasks & Call Reminders', 'Daily follow-ups, site visits, WhatsApp & phone call tasks')
@@ -101,10 +102,24 @@ async function bootstrap() {
     .addTag('14. Custom Fields Builder', 'Per-tenant custom CRM fields on Leads, Contacts & Deals')
     .addTag('14. Product & HSN Catalog', 'B2B SKU catalogue, GST rates & HSN/SAC codes')
     .addTag('14. Document Center & Compliance Vault', 'GST certificates, brochures, contracts & signed sales assets')
+    .addTag('14. HQ Platform Support Tickets', 'Tenant escalations & platform engineering support desk')
     .addTag('15. SaaS Billing, Razorpay Checkout & Webhooks', 'Plans, proration, Razorpay subscriptions, invoices & GST credit notes')
-    .addTag('15. Super Admin Platform Authority', 'Leadsetu HQ governance, tenant provisioning, DPDP controls & billing ledger')
+    .addTag('15. Super Admin Platform Authority', 'Leadsetu HQ governance, tenant provisioning, DPDP controls, billing ledger, careers & inquiries')
     .addTag('16. Native CRM Voice Calling', 'Click-to-call WebRTC, Twilio/Exotel bridge & callback links')
+    .addTag('16B. WhatsApp Business Calling API (WebRTC)', 'Meta Business Calling API WebRTC calls, prepaid ₹0.45/min wallet & telemetry')
     .addTag('16. AI Copilot & 3 Indian B2B Pillars', 'SetuAI credit risk, Udhaar chasers, voice-to-CRM & dealer desk intelligence')
+    .addTag('Leadsetu Instant Forms (Builder)', 'Manage public lead forms & OTP micro-pages')
+    .addTag('Public Instant Forms (/f/[slug])', 'Unauthenticated public instant forms & WhatsApp OTP submit')
+    .addTag('IndiaMART Pull & Marketplace Speed-to-Lead', 'IndiaMART & Justdial sync settings & appointment slots')
+    .addTag('Public Embeddable Booking Scheduler', 'Unauthenticated /book/[slug] scheduling endpoints')
+    .addTag('Meta CAPI & CTWA Attribution', 'Server-side Purchase conversion events & attribution ledger')
+    .addTag('Meta (Facebook & Instagram) Lead Ads', 'Meta Lead Ads OAuth page connections & field mappings')
+    .addTag('Meta Lead Ads Public Webhook', 'Meta Leadgen verification & inbound webhook ingestion')
+    .addTag('Customer 360 Unified Timeline', 'Aggregated cross-channel activity timeline per contact or lead')
+    .addTag('Universal Webhooks Management', 'HTTPS + HMAC outbound/inbound webhook configuration')
+    .addTag('HTTPS-Only Public Universal Webhook Receiver', 'Signed universal webhook ingestion endpoints')
+    .addTag('17. Public Careers & Applications', 'Live job openings from Super Admin HQ & public PDF resume submissions')
+    .addTag('18. Public Contact & Demo Requests', 'Public /company/contact walkthrough & sales inquiries routed to Super Admin HQ')
     .build();
 
   const port = Number(process.env.PORT || 3001);

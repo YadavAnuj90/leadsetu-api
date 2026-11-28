@@ -73,7 +73,7 @@ export class Lead {
   @Prop({ trim: true, lowercase: true, default: '' })
   email!: string;
 
-  @Prop({ trim: true, default: 'Delhi-NCR' })
+  @Prop({ trim: true, default: '' })
   city!: string;
 
   @Prop({ trim: true, uppercase: true, default: '', index: true })

@@ -100,7 +100,7 @@ export const SUPPORTED_WHATSAPP_VARIABLES: WhatsAppVariableMeta[] = [
   { key: 'buyer_name', token: '{{buyer_name}}', label: 'Buyer Name', example: 'Rajesh Sharma' },
   { key: 'company', token: '{{company}}', label: 'Company Name', example: 'Apex Steel Pvt Ltd' },
   { key: 'deal_value', token: '{{deal_value}}', label: 'Deal / Est. Value', example: '₹2,50,000' },
-  { key: 'city', token: '{{city}}', label: 'City', example: 'Delhi-NCR' },
+  { key: 'city', token: '{{city}}', label: 'City', example: 'Mumbai' },
   { key: 'phone', token: '{{phone}}', label: 'Phone Number', example: '+91 98112 45678' },
   { key: 'agent_name', token: '{{agent_name}}', label: 'Your Name (Agent)', example: 'Anuj' },
   { key: 'quote_link', token: '{{quote_link}}', label: 'Quotation Link', example: 'https://leadsetu.in/quote/demo' },
@@ -411,7 +411,7 @@ export class InboxService {
     const token = authHeader.slice(7).trim();
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
     let payload: { sub: string; tenantId: string; email: string };
     try {
       payload = await this.jwtService.verifyAsync<{
@@ -463,7 +463,7 @@ export class InboxService {
       contactName: doc.contactName,
       company: doc.company || '',
       phone: maskPhones ? maskPhoneNumber(doc.phone) : doc.phone || '',
-      city: doc.city || 'Delhi-NCR',
+      city: doc.city || '',
       channel: doc.channel || 'whatsapp',
       status: doc.status || 'open',
       aiScore: doc.aiScore || 85,
@@ -1559,7 +1559,7 @@ export class InboxService {
         contactName: lead.name,
         company: lead.company || '',
         phone: lead.phone || '',
-        city: lead.city || 'Delhi-NCR',
+        city: lead.city || '',
         estimatedValue: lead.estimatedValue || 0,
         aiScore: lead.aiScore || 80,
       };
@@ -1577,7 +1577,7 @@ export class InboxService {
         contactName: contact.name,
         company: contact.company || '',
         phone: contact.phone || '',
-        city: contact.city || 'Delhi-NCR',
+        city: contact.city || '',
         estimatedValue: contact.lifetimeValue || 0,
       };
     }
@@ -1592,7 +1592,7 @@ export class InboxService {
         contactName: deal.contactName || deal.title,
         company: deal.company || '',
         phone: deal.contactPhone || '',
-        city: deal.city || 'Delhi-NCR',
+        city: deal.city || '',
         estimatedValue: deal.value || 0,
       };
     }
@@ -1607,7 +1607,7 @@ export class InboxService {
         contactName: ticket.customerName || ticket.subject,
         company: ticket.company || '',
         phone: ticket.phone || '',
-        city: ticket.siteAddress || 'Delhi-NCR',
+        city: ticket.siteAddress || '',
         estimatedValue: 0,
       };
     }
@@ -1812,7 +1812,7 @@ export class InboxService {
         contactName: l.name,
         company: l.company || '',
         phone: l.phone || '',
-        city: l.city || 'Delhi-NCR',
+        city: l.city || '',
         estimatedValue: l.estimatedValue || 0,
       })),
       contacts: contacts.map((c) => ({
@@ -1823,7 +1823,7 @@ export class InboxService {
         contactName: c.name,
         company: c.company || '',
         phone: c.phone || '',
-        city: c.city || 'Delhi-NCR',
+        city: c.city || '',
         estimatedValue: c.lifetimeValue || 0,
       })),
       deals: deals.map((d) => ({
@@ -1834,7 +1834,7 @@ export class InboxService {
         contactName: d.contactName || d.title,
         company: d.company || '',
         phone: d.contactPhone || '',
-        city: d.city || 'Delhi-NCR',
+        city: d.city || '',
         estimatedValue: d.value || 0,
       })),
       tickets: tickets.map((t) => ({
@@ -1845,7 +1845,7 @@ export class InboxService {
         contactName: t.customerName || t.subject,
         company: t.company || '',
         phone: t.phone || '',
-        city: t.siteAddress || 'Delhi-NCR',
+        city: t.siteAddress || '',
         estimatedValue: 0,
       })),
     };
@@ -2265,7 +2265,7 @@ export class InboxService {
         contactName: params.contactName || formattedPhone,
         company: params.company || '',
         phone: formattedPhone,
-        city: params.city || 'Delhi-NCR',
+        city: params.city || '',
         channel: 'whatsapp',
         status: 'open',
         aiScore: 80,
@@ -2817,7 +2817,7 @@ export class InboxService {
       String(body.phone || '').trim();
     const company = String(body.company || '').trim() || snapshot?.company || '';
     const phone = String(body.phone || '').trim() || snapshot?.phone || '';
-    const city = String(body.city || '').trim() || snapshot?.city || 'Delhi-NCR';
+    const city = String(body.city || '').trim() || snapshot?.city || '';
     const estimatedValue =
       body.estimatedValue !== undefined
         ? Number(body.estimatedValue) || 0
@@ -3249,7 +3249,7 @@ export class InboxService {
       buyerName: conv.contactName,
       contactName: conv.contactName,
       company: conv.company || '',
-      city: conv.city || 'Delhi-NCR',
+      city: conv.city || '',
       phone: conv.phone || '',
       estimatedValue: conv.estimatedValue || 0,
       language: opts?.language || 'hinglish',
@@ -3962,9 +3962,9 @@ export class InboxService {
       text,
       interactiveOptionId: dto.interactiveOptionId,
       session: dto.session,
-      buyerName: dto.buyerName?.trim() || 'Rajesh Sharma',
-      buyerPhone: dto.buyerPhone?.trim() || '+91 98112 45678',
-      companyName: String(tenant.companyName || 'Leadsetu Demo'),
+      buyerName: dto.buyerName?.trim() || 'Customer',
+      buyerPhone: dto.buyerPhone?.trim() || '+91 98000 00000',
+      companyName: String(tenant.companyName || tenant.name || 'Workspace'),
       isFirstConversationInbound: !dto.session?.step && !dto.session?.lastMenuSentAt,
       dryRun: true,
       languageOverride: dto.language,
@@ -3977,8 +3977,8 @@ export class InboxService {
           activeConfig,
           dto.language || activeConfig.defaultLanguage,
           {
-            buyerName: dto.buyerName?.trim() || 'Rajesh Sharma',
-            company: String(tenant.companyName || 'Leadsetu Demo'),
+            buyerName: dto.buyerName?.trim() || 'Customer',
+            company: String(tenant.companyName || tenant.name || 'Workspace'),
           },
         ),
         nextSession: {
@@ -4292,7 +4292,7 @@ export class InboxService {
         refId: 'preset_dispatch_delivery',
         title: 'PAN-India Dispatch, Courier & E-Way Bill Timeline',
         category: 'shipping_dispatch',
-        content: `In-stock SKUs dispatch same-day (orders before 4 PM) via Shiprocket, Delhivery Surface, or BlueDart Air with live AWB tracking sent automatically on WhatsApp. Delivery takes 24–48h in Delhi-NCR and 3–5 business days PAN-India; E-Way Bill issued for orders >= ₹50,000.`,
+        content: `In-stock SKUs dispatch same-day (orders before 4 PM) via Shiprocket, Delhivery Surface, or BlueDart Air with live AWB tracking sent automatically on WhatsApp. Delivery takes 24–72h in major metros and 3–5 business days PAN-India; E-Way Bill issued for orders >= ₹50,000.`,
         tags: ['dispatch', 'delivery', 'shipping', 'courier', 'awb', 'transport', 'eway'],
       },
       {
@@ -5235,7 +5235,7 @@ export class InboxService {
                   company: '',
                   phone: formattedPhone,
                   email: '',
-                  city: tenant.city || 'Delhi-NCR',
+                  city: tenant.city || '',
                   source: hasCtwaReferral ? 'meta_ads' : 'whatsapp',
                   status: 'new',
                   estimatedValue: 0,
@@ -5286,7 +5286,7 @@ export class InboxService {
                 matchedLead?.name || contactProfile || `WhatsApp ${formattedPhone}`,
               company: matchedLead?.company || '',
               phone: matchedLead?.phone || formattedPhone,
-              city: matchedLead?.city || tenant.city || 'Delhi-NCR',
+              city: matchedLead?.city || tenant.city || '',
               channel: 'whatsapp',
               status: 'open',
               aiScore: matchedLead?.aiScore ?? 78,

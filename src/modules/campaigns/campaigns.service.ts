@@ -164,7 +164,7 @@ export class CampaignsService {
     const token = authHeader.slice(7).trim();
     const secret =
       this.configService.get<string>('JWT_SECRET') ||
-      'leadsetu_super_secret_access_key_2026_delhi_ncr';
+      'leadsetu_super_secret_access_key_2026';
     let payload: { sub: string; tenantId: string; email: string };
     try {
       payload = await this.jwtService.verifyAsync<{
@@ -492,7 +492,7 @@ export class CampaignsService {
         contactName: String(r.name || 'Buyer').trim(),
         company: String(r.company || '').trim(),
         phone,
-        city: String(r.city || 'Delhi-NCR').trim(),
+        city: String(r.city || '').trim(),
         estimatedValue: Number(r.estimatedValue ?? r.lifetimeValue ?? 0) || 0,
         optedOut,
         accountKind: r.accountKind === 'consumer' ? 'consumer' : 'business',

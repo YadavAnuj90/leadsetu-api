@@ -49,7 +49,7 @@ export class Deal {
   @Prop({ trim: true, default: '' })
   contactEmail!: string;
 
-  @Prop({ trim: true, default: 'Delhi-NCR' })
+  @Prop({ trim: true, default: '' })
   city!: string;
 
   @Prop({ type: Number, default: 0 })

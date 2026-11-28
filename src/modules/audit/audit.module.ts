@@ -36,7 +36,7 @@ export type {
       useFactory: (config: ConfigService) => ({
         secret:
           config.get<string>('JWT_SECRET') ||
-          'leadsetu_super_secret_access_key_2026_delhi_ncr',
+          'leadsetu_super_secret_access_key_2026',
       }),
     }),
   ],
