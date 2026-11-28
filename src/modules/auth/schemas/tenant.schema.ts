@@ -355,6 +355,12 @@ export class WhatsAppCloudConfig {
   @Prop({ trim: true, default: '' })
   lastTestedAt!: string;
 
+  @Prop({ trim: true, default: '' })
+  qualityRating?: string;
+
+  @Prop({ trim: true, default: '' })
+  messagingLimitTier?: string;
+
   @Prop({
     default: 'untested',
     enum: ['untested', 'connected', 'error'],
@@ -401,6 +407,9 @@ export class MetaCapiConfig {
   @Prop({ type: Boolean, default: true })
   autoFireOnInvoicePaid!: boolean;
 
+  @Prop({ type: Number, default: 0 })
+  monthlyAdSpendInr?: number;
+
   @Prop({ trim: true, default: '' })
   lastFiredAt!: string;
 
@@ -443,6 +452,21 @@ export class IndiaMartPullConfig {
 
   @Prop({ type: Number, default: 10 })
   slaThresholdMinutes!: number;
+
+  @Prop({ type: Boolean, default: true })
+  autoAttachProductBrochure?: boolean;
+
+  @Prop({ type: [String], default: ['Share GST Quote', 'Download Catalog', 'Book Callback'] })
+  autoQuickReplyButtons?: string[];
+
+  @Prop({ type: Boolean, default: true })
+  brokerFilterEnabled?: boolean;
+
+  @Prop({ type: Boolean, default: false })
+  skipWhatsAppOnJunk?: boolean;
+
+  @Prop({ trim: true, default: 'test, fake, sample free, job, vacancy, resume, student' })
+  junkKeywords?: string;
 
   @Prop({ trim: true, default: '' })
   lastSyncedAt!: string;
@@ -582,6 +606,11 @@ export class Tenant {
       secretToken?: string;
       categoryFilter?: string;
       autoWhatsAppWelcome?: boolean;
+      pincodeZoneRules?: string;
+      autoCreateTicketForService?: boolean;
+      serviceCategoryKeywords?: string;
+      reviewBoosterEnabled?: boolean;
+      reviewLink?: string;
       lastReceivedAt?: string;
       lastLeadSummary?: string;
     };

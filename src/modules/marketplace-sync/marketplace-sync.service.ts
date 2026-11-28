@@ -24,6 +24,8 @@ import {
   LeadDocument,
   LeadSource,
 } from '../leads/schemas/lead.schema';
+import { ProductItem, ProductDocument } from '../products/products.module';
+import { Ticket, TicketDocument } from '../tickets/tickets.module';
 import {
   MarketplaceChannel,
   MarketplaceSyncLog,
@@ -107,6 +109,10 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
     private readonly userModel: Model<UserDocument>,
     @InjectModel(Lead.name)
     private readonly leadModel: Model<LeadDocument>,
+    @InjectModel(ProductItem.name)
+    private readonly productModel: Model<ProductDocument>,
+    @InjectModel(Ticket.name)
+    private readonly ticketModel: Model<TicketDocument>,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     @Optional() private readonly auditService?: AuditService,
@@ -239,10 +245,127 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
       greetingTemplate:
         'Namaste {{buyer_name}} ji! Thanks for your inquiry regarding {{product}}. Our specialist {{rep_name}} from {{company}} is sharing quotation & availability right away.',
       slaThresholdMinutes: 10,
+      autoAttachProductBrochure: true,
+      autoQuickReplyButtons: ['Share GST Quote', 'Download Catalog', 'Book Callback'],
+      brokerFilterEnabled: true,
+      skipWhatsAppOnJunk: false,
+      junkKeywords: 'test, fake, sample free, job, vacancy, resume, student',
       lastSyncedAt: '',
       lastSyncStatus: '',
       lastSyncSummary: '',
     };
+  }
+
+  private async matchWorkspaceProduct(
+    tenantOid: Types.ObjectId,
+    queryText: string,
+  ): Promise<ProductDocument | null> {
+    const clean = String(queryText || '').trim().toLowerCase();
+    if (!clean || clean.length < 3) return null;
+
+    const products = await this.productModel
+      .find({ tenantId: tenantOid, inStock: { $ne: false } })
+      .limit(150)
+      .exec();
+    if (!products.length) return null;
+
+    const tokens = clean
+      .replace(/[^a-z0-9\s-]/g, ' ')
+      .split(/\s+/)
+      .filter((t) => t.length >= 3);
+
+    let bestDoc: ProductDocument | null = null;
+    let bestScore = 0;
+
+    for (const prod of products) {
+      const sku = String(prod.sku || '').toLowerCase();
+      const name = String(prod.name || '').toLowerCase();
+      const cat = String(prod.category || '').toLowerCase();
+      let score = 0;
+
+      if (sku && clean.includes(sku)) score += 10;
+      if (name && clean.includes(name)) score += 8;
+
+      for (const tok of tokens) {
+        if (name.includes(tok)) score += 2;
+        if (cat.includes(tok)) score += 1;
+        if (sku.includes(tok)) score += 2;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestDoc = prod;
+      }
+    }
+
+    return bestScore >= 2 ? bestDoc : null;
+  }
+
+  private detectJunkReason(
+    name: string,
+    product: string,
+    message: string,
+    keywordsCsv?: string,
+  ): string {
+    const rawKeywords = String(
+      keywordsCsv || 'test, fake, sample free, job, vacancy, resume, student',
+    );
+    const keywords = rawKeywords
+      .split(',')
+      .map((k) => k.trim().toLowerCase())
+      .filter((k) => k.length >= 2);
+    if (!keywords.length) return '';
+
+    const haystack = `${name} ${product} ${message}`.toLowerCase();
+    for (const kw of keywords) {
+      if (haystack.includes(kw)) {
+        return kw;
+      }
+    }
+    return '';
+  }
+
+  private resolvePincodeZone(
+    rulesStr: string | undefined,
+    pincode: string | undefined,
+    fallbackCity: string,
+  ): { matchedZone: string; effectiveCity: string } {
+    const cleanPin = String(pincode || '').replace(/\D/g, '');
+    const cleanRules = String(rulesStr || '').trim();
+    if (!cleanPin || !cleanRules) {
+      return { matchedZone: '', effectiveCity: fallbackCity };
+    }
+
+    const entries = cleanRules
+      .split(/[\n,;]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    for (const entry of entries) {
+      const parts = entry.split(/[:=->]+/);
+      if (parts.length < 2) continue;
+      const prefix = parts[0].replace(/\*/g, '').replace(/\D/g, '');
+      const zoneName = parts.slice(1).join(' ').trim();
+      if (prefix && zoneName && cleanPin.startsWith(prefix)) {
+        return { matchedZone: zoneName, effectiveCity: zoneName };
+      }
+    }
+    return { matchedZone: '', effectiveCity: fallbackCity };
+  }
+
+  private isServiceCategoryInquiry(
+    productOrCategory: string,
+    message: string,
+    keywordsCsv?: string,
+  ): boolean {
+    const kws = String(
+      keywordsCsv || 'repair, service, amc, installation, complaint, warranty',
+    )
+      .split(',')
+      .map((k) => k.trim().toLowerCase())
+      .filter((k) => k.length >= 2);
+    const text = `${productOrCategory} ${message}`.toLowerCase();
+    return kws.some((k) => text.includes(k));
   }
 
   /**
@@ -271,7 +394,9 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
     const companyName = String(
       tenant?.companyName || tenant?.name || 'Leadsetu Partner',
     ).trim();
-    const renderedMsg = this.renderGreeting(
+    const productSearchText =
+      params.productHint || params.leadDoc.notes || '';
+    let renderedMsg = this.renderGreeting(
       cfg.greetingTemplate || this.buildDefaultConfig().greetingTemplate,
       {
         buyerName: params.leadDoc.name || 'Buyer',
@@ -284,9 +409,33 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
       },
     );
 
+    if (cfg.autoAttachProductBrochure !== false && productSearchText) {
+      const matched = await this.matchWorkspaceProduct(
+        new Types.ObjectId(params.tenantId),
+        productSearchText,
+      );
+      if (matched) {
+        const rateText =
+          matched.unitPrice > 0
+            ? `₹${Number(matched.unitPrice).toLocaleString('en-IN')}/${matched.unit || 'pcs'} + ${matched.gstRate ?? 18}% GST`
+            : 'Custom Factory Quote';
+        const brochureLine = matched.brochureUrl?.trim()
+          ? `\nCatalog / Datasheet: ${matched.brochureUrl.trim()}`
+          : '';
+        renderedMsg += `\n\nMatched SKU: ${matched.name} (${matched.sku}) · Rate: ${rateText} · MOQ: ${matched.moq || 1}${brochureLine}`;
+      }
+    }
+
     if (!this.inboxService) {
       return { sent: false, speedToLeadSeconds: -1 };
     }
+
+    const quickReplyButtons = Array.isArray(cfg.autoQuickReplyButtons)
+      ? cfg.autoQuickReplyButtons
+          .map((b) => String(b || '').trim())
+          .filter(Boolean)
+          .slice(0, 3)
+      : [];
 
     try {
       await this.inboxService.startOrGetConversation(params.repAuth, {
@@ -302,6 +451,8 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
         via: 'inbox',
         isAiDrafted: true,
         logToTimeline: false,
+        quickReplyButtons:
+          quickReplyButtons.length > 0 ? quickReplyButtons : undefined,
       });
 
       const createdMs = new Date(
@@ -420,11 +571,37 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
       const phone = normalizeIndianPhone(rawPhone) || rawPhone;
       const phone10 = last10(phone);
       const email = String(raw.email || '').trim().toLowerCase();
-      const city = String(raw.city || params.tenant.city || 'Delhi-NCR').trim();
+      const rawCity = String(raw.city || params.tenant.city || 'Delhi-NCR').trim();
       const company = String(raw.company || '').trim();
       const product = String(raw.product || '').trim();
       const message = String(raw.message || '').trim();
-      const estimatedValue = Math.max(0, Number(raw.estimatedValue || 0) || 0);
+      const pincode = String(raw.pincode || '').trim();
+      let estimatedValue = Math.max(0, Number(raw.estimatedValue || 0) || 0);
+
+      const imCfg = params.tenant.indiamartPull || this.buildDefaultConfig();
+      const jdCfg = params.tenant.leadConnectors?.justdialWebhook;
+
+      const { matchedZone, effectiveCity } =
+        params.channel === 'justdial_feed'
+          ? this.resolvePincodeZone(jdCfg?.pincodeZoneRules, pincode, rawCity)
+          : { matchedZone: '', effectiveCity: rawCity };
+      const city = effectiveCity || rawCity;
+
+      const matchedCatalogProduct =
+        imCfg.autoAttachProductBrochure !== false && (product || message)
+          ? await this.matchWorkspaceProduct(tenantOid, `${product} ${message}`)
+          : null;
+      if (estimatedValue === 0 && matchedCatalogProduct && matchedCatalogProduct.unitPrice > 0) {
+        estimatedValue =
+          Number(matchedCatalogProduct.unitPrice) *
+          Math.max(1, Number(matchedCatalogProduct.moq || 1));
+      }
+
+      const junkKeyword =
+        imCfg.brokerFilterEnabled !== false
+          ? this.detectJunkReason(name, product, message, imCfg.junkKeywords)
+          : '';
+      const isJunkFlagged = Boolean(junkKeyword);
 
       if (!name && !phone && !email) {
         skippedCount += 1;
@@ -499,12 +676,26 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
         }
       }
 
-      const aiScore = Math.min(
+      const baseAiScore = Math.min(
         96,
         72 + (estimatedValue >= 100000 ? 12 : 6) + (product ? 6 : 0) + (company ? 4 : 0),
       );
+      const aiScore = isJunkFlagged ? 32 : baseAiScore;
       const aiLabel = aiScore >= 80 ? 'Hot' : aiScore >= 60 ? 'Warm' : 'Cold';
       const nowIso = new Date().toISOString();
+
+      const tags: string[] = [
+        params.channel === 'meta_lead_ads'
+          ? 'Meta Lead Ads'
+          : params.channel === 'justdial_feed'
+            ? 'Justdial Webhook'
+            : params.channel === 'tradeindia_feed'
+              ? 'TradeIndia Webhook'
+              : 'IndiaMART Pull',
+      ];
+      if (matchedZone) tags.push(`Zone: ${matchedZone}`);
+      if (matchedCatalogProduct?.sku) tags.push(`SKU: ${matchedCatalogProduct.sku}`);
+      if (isJunkFlagged) tags.push(`Flagged: Low Intent (${junkKeyword})`);
 
       const created = await this.leadModel.create({
         tenantId: tenantOid,
@@ -520,29 +711,29 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
         source,
         status: 'new',
         estimatedValue,
-        tags: [
-          params.channel === 'meta_lead_ads'
-            ? 'Meta Lead Ads'
-            : params.channel === 'justdial_feed'
-              ? 'Justdial Webhook'
-              : params.channel === 'tradeindia_feed'
-                ? 'TradeIndia Webhook'
-                : 'IndiaMART Pull',
-        ],
-        notes: [product ? `Product: ${product}` : '', message]
+        tags,
+        notes: [
+          product ? `Product: ${product}` : '',
+          pincode ? `Pincode: ${pincode}` : '',
+          message,
+        ]
           .filter(Boolean)
           .join(' — '),
         externalQueryId: extId,
         aiScore,
         aiLabel,
-        aiInsight: `Captured via ${params.channel.replace(/_/g, ' ')} · Routed to ${repName} (${routingStrategy}).`,
-        aiNextAction: 'Verify <10s WhatsApp welcome & share GST quotation.',
+        aiInsight: isJunkFlagged
+          ? `Flagged by Junk/Broker Shield (matched "${junkKeyword}") · Assigned to ${repName}.`
+          : `Captured via ${params.channel.replace(/_/g, ' ')} · Routed to ${repName} (${routingStrategy})${matchedZone ? ` · Territory Zone: ${matchedZone}` : ''}.`,
+        aiNextAction: isJunkFlagged
+          ? 'Verify inquiry authenticity before committing rep follow-up.'
+          : 'Verify <10s WhatsApp welcome & share GST quotation.',
         aiScoredAt: nowIso,
         activities: [
           {
             id: randomBytes(6).toString('hex'),
             type: 'created',
-            description: `Captured via ${params.channel.toUpperCase()}${extId ? ` (${extId})` : ''} · Auto-assigned to ${repName}.`,
+            description: `Captured via ${params.channel.toUpperCase()}${extId ? ` (${extId})` : ''} · Auto-assigned to ${repName}${matchedZone ? ` (Zone: ${matchedZone})` : ''}${isJunkFlagged ? ` · Junk/Broker Shield: "${junkKeyword}"` : ''}.`,
             authorName: 'Leadsetu Omnichannel Capture',
             createdAt: nowIso,
           },
@@ -551,22 +742,90 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
 
       createdCount += 1;
 
-      // 3. Fire <10s Auto-WhatsApp Speed-to-Lead
-      const welcome =
-        params.autoWelcome === false
-          ? { sent: false, speedToLeadSeconds: -1 }
-          : await this.dispatchInstantWelcomeForLead({
-              tenantId: tenantIdStr,
-              leadDoc: created,
-              repAuth: {
-                userId: assignedUserId,
-                tenantId: tenantIdStr,
-                email: repEmail,
-                name: repName,
-                role: 'sales',
+      if (
+        params.channel === 'justdial_feed' &&
+        !isJunkFlagged &&
+        jdCfg?.autoCreateTicketForService !== false &&
+        this.isServiceCategoryInquiry(
+          product,
+          message,
+          jdCfg?.serviceCategoryKeywords,
+        )
+      ) {
+        try {
+          const slaDueAt = new Date(Date.now() + 4 * 3600_000).toISOString();
+          const ticketNum = `TKT-JD-${Date.now().toString().slice(-5)}`;
+          await this.ticketModel.create({
+            tenantId: tenantOid,
+            ownerId: created.ownerId,
+            ticketNumber: ticketNum,
+            subject: `Justdial Service Request: ${product || 'After-Sales Support'}`,
+            category: 'amc_service',
+            priority: 'high',
+            status: 'open',
+            customerName: created.name,
+            company: created.company || '',
+            phone: created.phone || '',
+            email: created.email || '',
+            siteAddress: pincode ? `${city} (${pincode})` : city,
+            assignedToUserId: assignedUserId,
+            assignedToName: repName,
+            slaDueAt,
+            notes: message || `Auto-created from Justdial service inquiry (${extId}).`,
+            comments: [
+              {
+                id: randomBytes(6).toString('hex'),
+                authorName: 'Justdial Auto-Splitter',
+                authorRole: 'system',
+                message: `Auto-routed service inquiry (${product}) from Justdial directly into SLA Desk.`,
+                isInternal: true,
+                createdAt: nowIso,
               },
-              productHint: product,
-            });
+            ],
+          });
+          await this.leadModel.updateOne(
+            { _id: created._id },
+            {
+              $addToSet: { tags: 'Service Ticket Opened' },
+              $push: {
+                activities: {
+                  $each: [
+                    {
+                      id: randomBytes(6).toString('hex'),
+                      type: 'note',
+                      description: `Auto-opened SLA Ticket ${ticketNum} for Justdial service inquiry.`,
+                      authorName: 'Justdial Service Splitter',
+                      createdAt: nowIso,
+                    },
+                  ],
+                  $position: 0,
+                },
+              },
+            },
+          );
+        } catch {
+          // Do not block inquiry ingestion if ticket audit fails
+        }
+      }
+
+      // 3. Fire <10s Auto-WhatsApp Speed-to-Lead (respecting Junk Skip guard)
+      const skipWa =
+        params.autoWelcome === false ||
+        (isJunkFlagged && Boolean(imCfg.skipWhatsAppOnJunk));
+      const welcome = skipWa
+        ? { sent: false, speedToLeadSeconds: -1 }
+        : await this.dispatchInstantWelcomeForLead({
+            tenantId: tenantIdStr,
+            leadDoc: created,
+            repAuth: {
+              userId: assignedUserId,
+              tenantId: tenantIdStr,
+              email: repEmail,
+              name: repName,
+              role: 'sales',
+            },
+            productHint: product,
+          });
 
       if (welcome.sent) {
         whatsAppDispatchedCount += 1;
@@ -906,6 +1165,32 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
         dto.slaThresholdMinutes !== undefined
           ? Math.max(1, Math.min(120, Number(dto.slaThresholdMinutes) || 10))
           : prev.slaThresholdMinutes || 10,
+      autoAttachProductBrochure:
+        dto.autoAttachProductBrochure !== undefined
+          ? Boolean(dto.autoAttachProductBrochure)
+          : prev.autoAttachProductBrochure !== false,
+      autoQuickReplyButtons:
+        Array.isArray(dto.autoQuickReplyButtons)
+          ? dto.autoQuickReplyButtons
+              .map((b) => String(b || '').trim())
+              .filter(Boolean)
+              .slice(0, 3)
+          : Array.isArray(prev.autoQuickReplyButtons)
+            ? prev.autoQuickReplyButtons
+            : ['Share GST Quote', 'Download Catalog', 'Book Callback'],
+      brokerFilterEnabled:
+        dto.brokerFilterEnabled !== undefined
+          ? Boolean(dto.brokerFilterEnabled)
+          : prev.brokerFilterEnabled !== false,
+      skipWhatsAppOnJunk:
+        dto.skipWhatsAppOnJunk !== undefined
+          ? Boolean(dto.skipWhatsAppOnJunk)
+          : Boolean(prev.skipWhatsAppOnJunk),
+      junkKeywords:
+        dto.junkKeywords !== undefined
+          ? String(dto.junkKeywords).trim()
+          : prev.junkKeywords ||
+            'test, fake, sample free, job, vacancy, resume, student',
       lastSyncedAt: prev.lastSyncedAt || '',
       lastSyncStatus: prev.lastSyncStatus || '',
       lastSyncSummary: prev.lastSyncSummary || '',
@@ -934,7 +1219,7 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
           },
         })
         .select(
-          'name phone city source status ownerId firstContactedAt speedToLeadSeconds autoWhatsAppWelcomeSent createdAt',
+          'name phone city source status ownerId estimatedValue tags notes firstContactedAt speedToLeadSeconds autoWhatsAppWelcomeSent createdAt',
         )
         .sort({ createdAt: -1 })
         .limit(200)
@@ -990,6 +1275,59 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
         };
       });
 
+    const categoryMap = new Map<
+      string,
+      {
+        category: string;
+        inquiries: number;
+        qualifiedOrWon: number;
+        junkFlagged: number;
+        totalValueInr: number;
+        conversionRatePct: number;
+      }
+    >();
+
+    for (const l of marketplaceLeads) {
+      const notesStr = String((l as unknown as { notes?: string }).notes || '');
+      const prodMatch = notesStr.match(/Product:\s*([^\n—]+)/i);
+      const rawCat = prodMatch?.[1]?.trim() || String(l.source || 'marketplace').toUpperCase();
+      const catKey = rawCat.slice(0, 48);
+      if (!categoryMap.has(catKey)) {
+        categoryMap.set(catKey, {
+          category: catKey,
+          inquiries: 0,
+          qualifiedOrWon: 0,
+          junkFlagged: 0,
+          totalValueInr: 0,
+          conversionRatePct: 0,
+        });
+      }
+      const bucket = categoryMap.get(catKey)!;
+      bucket.inquiries += 1;
+      bucket.totalValueInr += Number((l as unknown as { estimatedValue?: number }).estimatedValue || 0);
+      const leadStatus = String(l.status || '').toLowerCase();
+      if (['qualified', 'proposal', 'converted', 'won'].includes(leadStatus)) {
+        bucket.qualifiedOrWon += 1;
+      }
+      const tagsList = Array.isArray((l as unknown as { tags?: string[] }).tags)
+        ? ((l as unknown as { tags?: string[] }).tags as string[])
+        : [];
+      if (tagsList.some((t) => t.startsWith('Flagged:'))) {
+        bucket.junkFlagged += 1;
+      }
+    }
+
+    const categoryRoiBreakdown = Array.from(categoryMap.values())
+      .map((row) => ({
+        ...row,
+        conversionRatePct:
+          row.inquiries > 0
+            ? Math.round((row.qualifiedOrWon / row.inquiries) * 100)
+            : 0,
+      }))
+      .sort((a, b) => b.totalValueInr - a.totalValueInr || b.inquiries - a.inquiries)
+      .slice(0, 10);
+
     return {
       config: {
         enabled: Boolean(cfg.enabled),
@@ -1002,6 +1340,16 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
           cfg.greetingTemplate || this.buildDefaultConfig().greetingTemplate,
         ),
         slaThresholdMinutes: slaMinutes,
+        autoAttachProductBrochure: cfg.autoAttachProductBrochure !== false,
+        autoQuickReplyButtons: Array.isArray(cfg.autoQuickReplyButtons)
+          ? cfg.autoQuickReplyButtons
+          : ['Share GST Quote', 'Download Catalog', 'Book Callback'],
+        brokerFilterEnabled: cfg.brokerFilterEnabled !== false,
+        skipWhatsAppOnJunk: Boolean(cfg.skipWhatsAppOnJunk),
+        junkKeywords: String(
+          cfg.junkKeywords ||
+            'test, fake, sample free, job, vacancy, resume, student',
+        ),
         lastSyncedAt: String(cfg.lastSyncedAt || ''),
         lastSyncStatus: String(cfg.lastSyncStatus || ''),
         lastSyncSummary: String(cfg.lastSyncSummary || ''),
@@ -1010,6 +1358,12 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
         totalMarketplaceLeads: marketplaceLeads.length,
         autoWelcomedCount: marketplaceLeads.filter((l) => l.autoWhatsAppWelcomeSent)
           .length,
+        junkFlaggedCount: marketplaceLeads.filter((l) =>
+          Array.isArray((l as unknown as { tags?: string[] }).tags) &&
+          ((l as unknown as { tags?: string[] }).tags as string[]).some((t) =>
+            t.startsWith('Flagged:'),
+          ),
+        ).length,
         contactedUnder10sCount: under10sCount,
         under10sPct:
           contactedLeads.length > 0
@@ -1019,6 +1373,7 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
         slaBreachedCount: slaBreachedLeads.length,
         slaBreachedLeads,
       },
+      categoryRoiBreakdown,
       recentLogs: recentLogs.map((log) => ({
         id: String(log._id),
         channel: log.channel,
@@ -1070,6 +1425,15 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
       secretToken: curr.justdialWebhook?.secretToken || '',
       categoryFilter: curr.justdialWebhook?.categoryFilter || '',
       autoWhatsAppWelcome: curr.justdialWebhook?.autoWhatsAppWelcome !== false,
+      pincodeZoneRules: curr.justdialWebhook?.pincodeZoneRules || '',
+      autoCreateTicketForService:
+        curr.justdialWebhook?.autoCreateTicketForService !== false,
+      serviceCategoryKeywords:
+        curr.justdialWebhook?.serviceCategoryKeywords ||
+        'repair, service, amc, installation, complaint, warranty',
+      reviewBoosterEnabled:
+        curr.justdialWebhook?.reviewBoosterEnabled !== false,
+      reviewLink: curr.justdialWebhook?.reviewLink || '',
       lastReceivedAt: curr.justdialWebhook?.lastReceivedAt || '',
       lastLeadSummary: curr.justdialWebhook?.lastLeadSummary || '',
     };
@@ -1167,6 +1531,15 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
         categoryFilter: connectors.justdialWebhook.categoryFilter || '',
         autoWhatsAppWelcome:
           connectors.justdialWebhook.autoWhatsAppWelcome !== false,
+        pincodeZoneRules: connectors.justdialWebhook.pincodeZoneRules || '',
+        autoCreateTicketForService:
+          connectors.justdialWebhook.autoCreateTicketForService !== false,
+        serviceCategoryKeywords:
+          connectors.justdialWebhook.serviceCategoryKeywords ||
+          'repair, service, amc, installation, complaint, warranty',
+        reviewBoosterEnabled:
+          connectors.justdialWebhook.reviewBoosterEnabled !== false,
+        reviewLink: connectors.justdialWebhook.reviewLink || '',
         lastReceivedAt: connectors.justdialWebhook.lastReceivedAt || '',
         lastLeadSummary: connectors.justdialWebhook.lastLeadSummary || '',
       },
@@ -1243,6 +1616,21 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
       }
       if (j.autoWhatsAppWelcome !== undefined) {
         nextJd.autoWhatsAppWelcome = Boolean(j.autoWhatsAppWelcome);
+      }
+      if (j.pincodeZoneRules !== undefined) {
+        nextJd.pincodeZoneRules = j.pincodeZoneRules.trim();
+      }
+      if (j.autoCreateTicketForService !== undefined) {
+        nextJd.autoCreateTicketForService = Boolean(j.autoCreateTicketForService);
+      }
+      if (j.serviceCategoryKeywords !== undefined) {
+        nextJd.serviceCategoryKeywords = j.serviceCategoryKeywords.trim();
+      }
+      if (j.reviewBoosterEnabled !== undefined) {
+        nextJd.reviewBoosterEnabled = Boolean(j.reviewBoosterEnabled);
+      }
+      if (j.reviewLink !== undefined) {
+        nextJd.reviewLink = j.reviewLink.trim();
       }
     }
 
@@ -1571,6 +1959,7 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
 
     const category = String(input?.category ?? input?.leadtype ?? 'Justdial Inquiry').trim();
     const city = String(input?.city ?? input?.area ?? tenant.city ?? 'Delhi-NCR').trim();
+    const pincode = String(input?.pincode ?? input?.pin ?? '').trim();
     const extId = String(input?.leadid ?? input?.id ?? `JD-${Date.now()}`).trim();
 
     return this.ingestRecords({
@@ -1587,6 +1976,7 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
           phone,
           email,
           city,
+          pincode,
           product: category,
           message: String(
             input?.message ?? input?.query ?? `Justdial ${category} inquiry in ${city}`,
@@ -1594,6 +1984,59 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
         },
       ],
     });
+  }
+
+  async sendJustdialReviewNudge(authHeader: string | undefined, leadId: string) {
+    const auth = await this.verifyAuth(authHeader);
+    if (!Types.ObjectId.isValid(leadId)) {
+      throw new BadRequestException('Invalid lead ID.');
+    }
+    const [lead, tenant] = await Promise.all([
+      this.leadModel.findOne({
+        _id: new Types.ObjectId(leadId),
+        tenantId: new Types.ObjectId(auth.tenantId),
+      }),
+      this.tenantModel.findById(new Types.ObjectId(auth.tenantId)).lean(),
+    ]);
+    if (!lead) throw new NotFoundException('Lead not found.');
+    if (!lead.phone) {
+      throw new BadRequestException('Buyer mobile number is missing.');
+    }
+    const reviewLink =
+      tenant?.leadConnectors?.justdialWebhook?.reviewLink?.trim() ||
+      'https://www.justdial.com';
+    const companyName = String(
+      tenant?.companyName || tenant?.name || 'our team',
+    ).trim();
+    const msg = `Namaste ${lead.name || 'Buyer'} ji! Thank you for choosing ${companyName}. It only takes 15 seconds to rate your experience with us on Justdial: ${reviewLink}`;
+
+    if (this.inboxService) {
+      await this.inboxService.startOrGetConversation(auth, {
+        linkedEntityType: 'lead',
+        linkedEntityId: String(lead._id),
+        contactName: lead.name,
+        company: lead.company || '',
+        phone: lead.phone,
+        city: lead.city || 'Delhi-NCR',
+        estimatedValue: Number(lead.estimatedValue || 0),
+        channel: 'whatsapp',
+        initialMessage: msg,
+        via: 'inbox',
+        isAiDrafted: false,
+        logToTimeline: true,
+      });
+    }
+
+    await this.leadModel.updateOne(
+      { _id: lead._id },
+      { $addToSet: { tags: 'Justdial Review Nudge Sent' } },
+    );
+
+    return {
+      ok: true,
+      leadId: String(lead._id),
+      reviewLink,
+    };
   }
 
   async handleTradeIndiaWebhook(
@@ -1675,6 +2118,7 @@ export class MarketplaceSyncService implements OnModuleInit, OnModuleDestroy {
       phone: dto.phone?.trim() || `+91 98115 4${suffix}`,
       email: `buyer${suffix}@example.in`,
       city: dto.city?.trim() || tenant.city || 'Noida',
+      pincode: dto.pincode?.trim() || '',
       product:
         dto.product?.trim() ||
         (dto.channel === 'meta_lead_ads'

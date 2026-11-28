@@ -94,6 +94,19 @@ export class MarketplaceSyncController {
     return this.syncService.rescueSlaLead(authHeader, leadId);
   }
 
+  @Post('justdial/review-nudge/:leadId')
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary:
+      'Send Justdial rating & review booster message via WhatsApp to a converted buyer',
+  })
+  sendJustdialReviewNudge(
+    @Headers('authorization') authHeader: string | undefined,
+    @Param('leadId') leadId: string,
+  ) {
+    return this.syncService.sendJustdialReviewNudge(authHeader, leadId);
+  }
+
   @Get('connectors')
   @ApiBearerAuth()
   @ApiOperation({

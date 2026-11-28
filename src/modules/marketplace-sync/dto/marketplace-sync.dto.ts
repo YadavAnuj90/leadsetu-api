@@ -45,6 +45,37 @@ export class UpdateIndiaMartConfigDto {
     example: 10,
   })
   slaThresholdMinutes?: number;
+
+  @ApiPropertyOptional({
+    description: 'Auto-match incoming product keywords against Products & HSN catalog and attach brochure/rate',
+    default: true,
+  })
+  autoAttachProductBrochure?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Up to 3 Meta Interactive Quick-Reply buttons attached to <10s WhatsApp welcome',
+    type: [String],
+    example: ['Share GST Quote', 'Download Catalog', 'Book Callback'],
+  })
+  autoQuickReplyButtons?: string[];
+
+  @ApiPropertyOptional({
+    description: 'Enable automatic broker/spam/low-intent inquiry shielding on marketplace leads',
+    default: true,
+  })
+  brokerFilterEnabled?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Skip sending paid <10s WhatsApp welcome when inquiry is flagged as junk/broker',
+    default: false,
+  })
+  skipWhatsAppOnJunk?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Comma-separated junk/broker keywords for auto-tagging',
+    example: 'test, fake, sample free, job, vacancy, resume, student',
+  })
+  junkKeywords?: string;
 }
 
 export class SyncIndiaMartNowDto {
@@ -98,6 +129,9 @@ export class MarketplaceRawLeadItemDto {
 
   @ApiPropertyOptional({ example: 340000 })
   estimatedValue?: number;
+
+  @ApiPropertyOptional({ example: '201301' })
+  pincode?: string;
 }
 
 export class IngestMarketplaceBatchDto {
@@ -136,6 +170,11 @@ export class UpdateLeadConnectorsDto {
     secretToken?: string;
     categoryFilter?: string;
     autoWhatsAppWelcome?: boolean;
+    pincodeZoneRules?: string;
+    autoCreateTicketForService?: boolean;
+    serviceCategoryKeywords?: string;
+    reviewBoosterEnabled?: boolean;
+    reviewLink?: string;
   };
 
   @ApiPropertyOptional({
@@ -188,6 +227,9 @@ export class SimulateConnectorWebhookDto {
 
   @ApiPropertyOptional({ example: '300 KVA Servo Stabilizer Inquiry' })
   product?: string;
+
+  @ApiPropertyOptional({ example: '201301' })
+  pincode?: string;
 }
 
 export class CreatePublicBookingDto {

@@ -212,6 +212,7 @@ export interface SendInboxMessageInput {
   sendMode?: 'text' | 'meta_template';
   metaTemplate?: MetaTemplateSendInput;
   attachment?: ChatAttachment;
+  quickReplyButtons?: string[];
 }
 
 export interface StartConversationInput {
@@ -231,6 +232,7 @@ export interface StartConversationInput {
   sendMode?: 'text' | 'meta_template';
   metaTemplate?: MetaTemplateSendInput;
   attachment?: ChatAttachment;
+  quickReplyButtons?: string[];
 }
 
 export interface UpdateWhatsAppConfigInput {
@@ -665,6 +667,10 @@ export class InboxService {
           : '',
       webhookPath: '/v1/webhooks/whatsapp',
       lastTestedAt: cfg.lastTestedAt || '',
+      qualityRating:
+        cfg.qualityRating || (runtime.active ? 'GREEN' : ''),
+      messagingLimitTier:
+        cfg.messagingLimitTier || (runtime.active ? 'TIER_1K' : ''),
       lastTestStatus:
         runtime.connectionMode === 'leadsetu_managed'
           ? 'connected'
@@ -1112,6 +1118,8 @@ export class InboxService {
           verifyToken:
             existing.verifyToken || `lsw_verify_${randomBytes(12).toString('hex')}`,
           lastTestedAt: nowIso,
+          qualityRating: existing.qualityRating || 'GREEN',
+          messagingLimitTier: existing.messagingLimitTier || 'TIER_1K',
           lastTestStatus: 'connected',
           lastError: '',
           updatedAt: existing.updatedAt || nowIso,
@@ -1123,7 +1131,8 @@ export class InboxService {
           verifiedPhoneNumber: runtime.verifiedPhoneNumber,
           businessDisplayName:
             runtime.businessDisplayName || tenant.companyName || tenant.name,
-          qualityRating: 'GREEN',
+          qualityRating: existing.qualityRating || 'GREEN',
+          messagingLimitTier: existing.messagingLimitTier || 'TIER_1K',
           error: '',
           config: this.sanitizeWhatsAppConfig(tenant, true, platform),
         };
@@ -1161,6 +1170,12 @@ export class InboxService {
         verifyToken:
           existing.verifyToken || `lsw_verify_${randomBytes(12).toString('hex')}`,
         lastTestedAt: nowIso,
+        qualityRating: result.ok
+          ? result.qualityRating || existing.qualityRating || ''
+          : existing.qualityRating || '',
+        messagingLimitTier: result.ok
+          ? result.messagingLimitTier || existing.messagingLimitTier || ''
+          : existing.messagingLimitTier || '',
         lastTestStatus: result.ok ? 'connected' : 'error',
         lastError: result.ok ? '' : result.error || 'Connection test failed',
         updatedAt: existing.updatedAt || nowIso,
@@ -1174,6 +1189,7 @@ export class InboxService {
       verifiedPhoneNumber: result.verifiedPhoneNumber || '',
       businessDisplayName: result.businessDisplayName || '',
       qualityRating: result.qualityRating || '',
+      messagingLimitTier: result.messagingLimitTier || '',
       error: result.error || '',
       config: this.sanitizeWhatsAppConfig(tenant, true, platform),
     };
@@ -1822,6 +1838,7 @@ export class InboxService {
     sendMode?: 'text' | 'meta_template';
     metaTemplate?: MetaTemplateSendInput;
     attachment?: ChatAttachment;
+    quickReplyButtons?: string[];
     entitySnapshot?: CrmEntitySnapshot | null;
   }): Promise<boolean> {
     const { auth, doc, entitySnapshot } = params;
@@ -1929,6 +1946,17 @@ export class InboxService {
           templateName: params.metaTemplate.name.trim(),
           languageCode: params.metaTemplate.languageCode || 'en',
           bodyParams: renderedParams,
+        });
+      } else if (
+        Array.isArray(params.quickReplyButtons) &&
+        params.quickReplyButtons.length > 0
+      ) {
+        metaResult = await this.metaWhatsAppService.sendInteractiveButtons({
+          phoneNumberId: runtime.phoneNumberId,
+          accessToken: runtime.accessToken,
+          toPhone: recipientDigits,
+          body: renderedText,
+          buttons: params.quickReplyButtons,
         });
       } else {
         metaResult = await this.metaWhatsAppService.sendText({
@@ -2055,6 +2083,7 @@ export class InboxService {
     languageCode?: string;
     sendMode?: 'text' | 'meta_template';
     attachment?: ChatAttachment;
+    quickReplyButtons?: string[];
     campaignId?: string;
     campaignName?: string;
     workflowId?: string;
@@ -2222,6 +2251,17 @@ export class InboxService {
           templateName: params.metaTemplateName.trim(),
           languageCode: params.languageCode || 'en',
           bodyParams,
+        });
+      } else if (
+        Array.isArray(params.quickReplyButtons) &&
+        params.quickReplyButtons.length > 0
+      ) {
+        metaResult = await this.metaWhatsAppService.sendInteractiveButtons({
+          phoneNumberId: runtime.phoneNumberId,
+          accessToken: runtime.accessToken,
+          toPhone: recipientDigits,
+          body: renderedText,
+          buttons: params.quickReplyButtons,
         });
       } else {
         metaResult = await this.metaWhatsAppService.sendText({
@@ -2695,6 +2735,7 @@ export class InboxService {
         sendMode: body.sendMode,
         metaTemplate: body.metaTemplate,
         attachment: body.attachment,
+        quickReplyButtons: body.quickReplyButtons,
         entitySnapshot: snapshot,
       });
     }

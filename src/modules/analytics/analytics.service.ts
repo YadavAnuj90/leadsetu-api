@@ -1020,17 +1020,38 @@ export class AnalyticsService {
 
     const items = [
       ...billingAlerts,
-      ...mentions.map((m) => ({
-        id: `notif-mention-${String(m._id)}`,
-        category: 'mention' as const,
-        severity: 'high' as const,
-        title: `@Mention from ${String(m.authorName || 'Teammate')}: ${String(m.entityLabel || m.entityType || 'Record')}`,
-        subtitle: String(m.excerpt || ''),
-        href: String(m.href || '/leads'),
-        createdAt: m.createdAt
-          ? new Date(m.createdAt as Date).toISOString()
-          : new Date().toISOString(),
-      })),
+      ...mentions.map((m) => {
+        if (m.entityType === 'platform_ticket') {
+          const sev = String(m.severity || 'high');
+          return {
+            id: `notif-plt-${String(m._id)}`,
+            category: 'ticket' as const,
+            severity:
+              sev === 'urgent'
+                ? ('urgent' as const)
+                : sev === 'info'
+                  ? ('info' as const)
+                  : ('high' as const),
+            title: String(m.title || `Leadsetu HQ Update: ${String(m.entityLabel || '')}`),
+            subtitle: String(m.excerpt || ''),
+            href: String(m.href || '/support-hq'),
+            createdAt: m.createdAt
+              ? new Date(m.createdAt as Date).toISOString()
+              : new Date().toISOString(),
+          };
+        }
+        return {
+          id: `notif-mention-${String(m._id)}`,
+          category: 'mention' as const,
+          severity: 'high' as const,
+          title: `@Mention from ${String(m.authorName || 'Teammate')}: ${String(m.entityLabel || m.entityType || 'Record')}`,
+          subtitle: String(m.excerpt || ''),
+          href: String(m.href || '/leads'),
+          createdAt: m.createdAt
+            ? new Date(m.createdAt as Date).toISOString()
+            : new Date().toISOString(),
+        };
+      }),
       ...hotLeads.map((l) => ({
         id: `notif-lead-${String(l._id)}`,
         category: 'lead' as const,

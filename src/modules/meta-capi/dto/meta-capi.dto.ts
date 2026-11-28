@@ -37,6 +37,12 @@ export class UpdateMetaCapiConfigDto {
 
   @ApiPropertyOptional({ default: true })
   autoFireOnInvoicePaid?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Monthly Meta Ad Spend in INR for real-time ROAS & Cost-Per-Lead calculation',
+    example: 50000,
+  })
+  monthlyAdSpendInr?: number;
 }
 
 export class SimulateCtwaInboundDto {

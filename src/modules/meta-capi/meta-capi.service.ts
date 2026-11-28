@@ -663,6 +663,41 @@ export class MetaCapiService {
       (a, b) => b.closedRevenueInr - a.closedRevenueInr || b.inquiries - a.inquiries,
     );
 
+    const monthlyAdSpendInr = Math.max(0, Number(cfg.monthlyAdSpendInr || 0) || 0);
+    const qualifiedLeadsCount = adRoasBreakdown.reduce(
+      (sum, row) => sum + row.qualifiedCount,
+      0,
+    );
+    const wonDealsCount = adRoasBreakdown.reduce(
+      (sum, row) => sum + row.wonDealsCount,
+      0,
+    );
+    const wonRevenueInr = adRoasBreakdown.reduce(
+      (sum, row) => sum + row.closedRevenueInr,
+      0,
+    );
+    const pipelineValueInr = adRoasBreakdown.reduce(
+      (sum, row) => sum + row.pipelineValueInr,
+      0,
+    );
+    const effectiveRevenue = wonRevenueInr || Number(purchaseAgg[0]?.total || 0);
+    const roasMultiplier =
+      monthlyAdSpendInr > 0
+        ? Number((effectiveRevenue / monthlyAdSpendInr).toFixed(2))
+        : 0;
+    const cplInr =
+      monthlyAdSpendInr > 0 && ctwaLeads.length > 0
+        ? Math.round(monthlyAdSpendInr / ctwaLeads.length)
+        : 0;
+    const cpqlInr =
+      monthlyAdSpendInr > 0 && qualifiedLeadsCount > 0
+        ? Math.round(monthlyAdSpendInr / qualifiedLeadsCount)
+        : 0;
+    const leadToWonPct =
+      ctwaLeads.length > 0
+        ? Math.round((wonDealsCount / ctwaLeads.length) * 100)
+        : 0;
+
     return {
       config: {
         enabled: Boolean(cfg.enabled),
@@ -674,6 +709,7 @@ export class MetaCapiService {
         autoFireOnLeadQualified: cfg.autoFireOnLeadQualified !== false,
         autoFireOnDealWon: cfg.autoFireOnDealWon !== false,
         autoFireOnInvoicePaid: cfg.autoFireOnInvoicePaid !== false,
+        monthlyAdSpendInr,
         lastFiredAt: String(cfg.lastFiredAt || ''),
         lastStatus: String(cfg.lastStatus || ''),
         lastError: String(cfg.lastError || ''),
@@ -684,6 +720,15 @@ export class MetaCapiService {
         simulatedEvents: simulatedCount,
         failedEvents: failedCount,
         ctwaLeadsCount: ctwaLeads.length,
+        qualifiedLeadsCount,
+        wonDealsCount,
+        wonRevenueInr: effectiveRevenue,
+        pipelineValueInr,
+        monthlyAdSpendInr,
+        roasMultiplier,
+        cplInr,
+        cpqlInr,
+        leadToWonPct,
         attributedRevenueInr: Number(purchaseAgg[0]?.total || 0),
         purchaseEventsCount: Number(purchaseAgg[0]?.count || 0),
       },
@@ -764,6 +809,10 @@ export class MetaCapiService {
         dto.autoFireOnInvoicePaid !== undefined
           ? Boolean(dto.autoFireOnInvoicePaid)
           : prev.autoFireOnInvoicePaid !== false,
+      monthlyAdSpendInr:
+        dto.monthlyAdSpendInr !== undefined
+          ? Math.max(0, Number(dto.monthlyAdSpendInr) || 0)
+          : Number(prev.monthlyAdSpendInr || 0) || 0,
       lastFiredAt: prev.lastFiredAt || '',
       lastStatus: prev.lastStatus || '',
       lastError: prev.lastError || '',

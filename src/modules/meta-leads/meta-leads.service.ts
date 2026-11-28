@@ -632,6 +632,116 @@ export class MetaLeadsService {
   }
 
   /**
+   * Safety-net manual / periodic backfill: pulls recent leads from Meta Graph API
+   * (`GET /{formId}/leads`) for connected subscribed forms so missed webhooks are recovered.
+   */
+  async backfillMissedLeads(
+    auth: MetaAuthContext,
+    dto?: { pageId?: string; formId?: string; limit?: number },
+  ) {
+    const tenantOid = new Types.ObjectId(auth.tenantId);
+    const query: Record<string, unknown> = { tenantId: tenantOid };
+    if (dto?.pageId?.trim()) {
+      query.pageId = dto.pageId.trim();
+    }
+
+    const pages = await this.pageModel.find(query).exec();
+    if (!pages.length) {
+      throw new BadRequestException(
+        'Connect at least one Facebook Page before running Meta Lead Ads backfill.',
+      );
+    }
+
+    const cfg = this.getMetaConfig();
+    const limit = Math.max(1, Math.min(50, Number(dto?.limit) || 25));
+    let checkedForms = 0;
+    let pulledCount = 0;
+    let createdCount = 0;
+    let deduplicatedCount = 0;
+    const formErrors: Array<{ pageId: string; formId: string; error: string }> = [];
+
+    for (const page of pages) {
+      let pageToken = '';
+      if (page.encryptedPageAccessToken && cfg.encryptionKey) {
+        try {
+          pageToken = decryptMetaPageToken({
+            encryptedPageAccessToken: page.encryptedPageAccessToken,
+            tokenIv: page.tokenIv,
+            tokenAuthTag: page.tokenAuthTag,
+            encryptionKey: cfg.encryptionKey,
+          });
+        } catch {
+          pageToken = '';
+        }
+      }
+
+      const targetForms = (page.forms || [])
+        .filter((f) => !dto?.formId || f.formId === dto.formId)
+        .slice(0, 6);
+
+      for (const form of targetForms) {
+        checkedForms += 1;
+        if (!pageToken || pageToken.startsWith('sandbox_')) {
+          continue;
+        }
+        try {
+          const url = `${cfg.graphBase}/${encodeURIComponent(form.formId)}/leads`;
+          const { data } = await axios.get<{
+            data?: Array<{
+              id?: string;
+              created_time?: string;
+              ad_id?: string;
+              field_data?: MetaGraphFieldDataEntry[];
+            }>;
+          }>(url, {
+            params: {
+              access_token: pageToken,
+              fields: 'id,created_time,ad_id,field_data',
+              limit,
+            },
+            timeout: 15000,
+          });
+
+          const leads = data?.data || [];
+          pulledCount += leads.length;
+          for (const item of leads) {
+            if (!item?.id) continue;
+            const jobRes = await this.processor.processLeadgenJob({
+              jobId: item.id,
+              leadgenId: item.id,
+              pageId: page.pageId,
+              formId: form.formId,
+              adId: item.ad_id,
+              createdTime: item.created_time,
+              ...(Array.isArray(item.field_data) && item.field_data.length > 0
+                ? { syntheticFieldData: item.field_data }
+                : {}),
+            });
+            if (jobRes?.outcome === 'created') createdCount += 1;
+            else deduplicatedCount += 1;
+          }
+        } catch (err) {
+          formErrors.push({
+            pageId: page.pageId,
+            formId: form.formId,
+            error: err instanceof Error ? err.message : 'Meta Graph lead pull failed',
+          });
+        }
+      }
+    }
+
+    return {
+      checkedPages: pages.length,
+      checkedForms,
+      pulledCount,
+      createdCount,
+      deduplicatedCount,
+      formErrors,
+      syncedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
    * `GET /webhooks/meta/leads`
    */
   verifyWebhookChallenge(

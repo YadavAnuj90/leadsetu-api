@@ -205,6 +205,7 @@ export class MetaWhatsAppService {
     verifiedPhoneNumber?: string;
     businessDisplayName?: string;
     qualityRating?: string;
+    messagingLimitTier?: string;
     error?: string;
   }> {
     const url = `${this.getGraphBaseUrl()}/${encodeURIComponent(params.phoneNumberId)}`;
@@ -214,9 +215,11 @@ export class MetaWhatsAppService {
         display_phone_number?: string;
         verified_name?: string;
         quality_rating?: string;
+        messaging_limit_tier?: string;
       }>(url, {
         params: {
-          fields: 'id,display_phone_number,verified_name,quality_rating',
+          fields:
+            'id,display_phone_number,verified_name,quality_rating,messaging_limit_tier',
         },
         headers: {
           Authorization: `Bearer ${params.accessToken}`,
@@ -229,6 +232,7 @@ export class MetaWhatsAppService {
         verifiedPhoneNumber: data?.display_phone_number || '',
         businessDisplayName: data?.verified_name || '',
         qualityRating: data?.quality_rating || '',
+        messagingLimitTier: data?.messaging_limit_tier || '',
       };
     } catch (err) {
       return {
@@ -381,6 +385,60 @@ export class MetaWhatsAppService {
       text: {
         preview_url: true,
         body: params.body,
+      },
+    });
+  }
+
+  /**
+   * Send Official Meta Interactive Quick-Reply Buttons (up to 3 reply buttons).
+   * Falls back cleanly when button list is empty.
+   */
+  async sendInteractiveButtons(params: {
+    phoneNumberId: string;
+    accessToken: string;
+    toPhone: string;
+    body: string;
+    footerText?: string;
+    buttons: string[];
+  }): Promise<MetaSendResult> {
+    const cleanButtons = (params.buttons || [])
+      .map((b) => String(b || '').trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    if (cleanButtons.length === 0) {
+      return this.sendText({
+        phoneNumberId: params.phoneNumberId,
+        accessToken: params.accessToken,
+        toPhone: params.toPhone,
+        body: params.body,
+      });
+    }
+
+    const to = this.formatRecipientDigits(params.toPhone);
+    if (!to || to.length < 10) {
+      return { ok: false, error: 'Recipient phone number is invalid for WhatsApp.' };
+    }
+
+    return this.postGraphMessage(params.phoneNumberId, params.accessToken, {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: String(params.body || '').slice(0, 1024) },
+        ...(params.footerText?.trim()
+          ? { footer: { text: params.footerText.trim().slice(0, 60) } }
+          : {}),
+        action: {
+          buttons: cleanButtons.map((title, idx) => ({
+            type: 'reply',
+            reply: {
+              id: `ls_btn_${idx + 1}`,
+              title: title.slice(0, 20),
+            },
+          })),
+        },
       },
     });
   }

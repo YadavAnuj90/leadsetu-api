@@ -147,6 +147,20 @@ export class MetaLeadsController {
     const auth = await this.metaLeadsService.verifyAuth(authHeader);
     return this.metaLeadsService.simulateTestLead(auth, body);
   }
+
+  @Post('backfill')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Safety-net backfill: pull recent leads from Meta Graph API for connected forms to recover missed webhooks',
+  })
+  async backfillMissedLeads(
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body?: { pageId?: string; formId?: string; limit?: number },
+  ) {
+    const auth = await this.metaLeadsService.verifyAuth(authHeader);
+    return this.metaLeadsService.backfillMissedLeads(auth, body);
+  }
 }
 
 @ApiTags('Meta Lead Ads Public Webhook')

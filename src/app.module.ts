@@ -46,6 +46,7 @@ import { MetaLeadsModule } from './modules/meta-leads/meta-leads.module';
 import { UniversalWebhooksModule } from './modules/universal-webhooks/universal-webhooks.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
 import { WhatsappCallingModule } from './modules/whatsapp-calling/whatsapp-calling.module';
+import { PlatformTicketsModule } from './modules/platform-tickets/platform-tickets.module';
 
 @Module({
   imports: [
@@ -138,6 +139,7 @@ import { WhatsappCallingModule } from './modules/whatsapp-calling/whatsapp-calli
     UniversalWebhooksModule,
     TimelineModule,
     WhatsappCallingModule,
+    PlatformTicketsModule,
     HealthModule,
   ],
   providers: [

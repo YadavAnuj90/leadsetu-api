@@ -19,6 +19,8 @@ import {
 import { Tenant, TenantSchema } from '../auth/schemas/tenant.schema';
 import { User, UserSchema } from '../auth/schemas/user.schema';
 import { Lead, LeadSchema } from '../leads/schemas/lead.schema';
+import { ProductItem, ProductSchema } from '../products/products.module';
+import { Ticket, TicketSchema } from '../tickets/tickets.module';
 import { LeadRoutingModule } from '../lead-routing/lead-routing.module';
 import { InboxModule } from '../inbox/inbox.module';
 
@@ -34,6 +36,8 @@ import { InboxModule } from '../inbox/inbox.module';
       { name: Tenant.name, schema: TenantSchema },
       { name: User.name, schema: UserSchema },
       { name: Lead.name, schema: LeadSchema },
+      { name: ProductItem.name, schema: ProductSchema },
+      { name: Ticket.name, schema: TicketSchema },
     ]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
